@@ -1,0 +1,115 @@
+# This repository is intentionally code-only.
+# Ignore everything first, then allow only source code and build configuration.
+*
+!*/
+!/.gitignore
+
+# Kotlin / Java / Gradle source
+!*.kt
+!*.java
+!*.gradle
+!*.gradle.kts
+!*.kts
+!*.pro
+
+# Android and build configuration expressed as XML/properties/TOML
+!*.xml
+!*.properties
+!*.toml
+
+# Shell and build scripts
+!gradlew
+!*.sh
+!*.bat
+!*.cmd
+!*.ps1
+
+# Local-only configuration and machine state
+local.properties
+**/local.properties
+.idea/
+.vscode/
+.gradle/
+.kotlin/
+gradle/gradle-daemon-jvm.properties
+**/build/
+build/
+captures/
+.externalNativeBuild/
+**/.externalNativeBuild/
+.cxx/
+**/.cxx/
+*.iml
+
+# Generated reports, logs, test output, and coverage
+**/reports/
+**/test-results/
+*.log
+*.hprof
+*.exec
+*.class
+*.dex
+
+# Binary artifacts and packaged outputs
+*.jar
+*.aar
+*.apk
+*.aab
+*.apks
+*.zip
+*.tar
+*.gz
+*.7z
+*.bin
+
+# Media and design assets
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.bmp
+*.ico
+*.svg
+*.mp3
+*.wav
+*.ogg
+*.mp4
+*.mov
+*.webm
+
+# Documentation and other non-code content
+*.md
+*.markdown
+*.rst
+*.txt
+*.adoc
+*.pdf
+docs/
+documentation/
+
+# Data files
+*.csv
+*.tsv
+*.json
+*.db
+*.sqlite
+*.sqlite3
+
+# Secrets and signing material
+*.keystore
+*.jks
+*.p12
+*.pfx
+*.pem
+*.der
+*.crt
+*.cer
+*.key
+secrets.properties
+**/secrets.properties
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini

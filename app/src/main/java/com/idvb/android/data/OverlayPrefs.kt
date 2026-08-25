@@ -1,0 +1,65 @@
+package com.idvb.android.data
+
+import android.content.Context
+
+/**
+ * 悬浮窗状态持久化（对齐参考项目 Overlay 显示配置）。
+ * 位置/尺寸使用像素，保存时按屏幕尺寸归一化，避免不同分辨率下错位。
+ */
+class OverlayPrefs(context: Context) {
+
+    private val prefs = context.applicationContext
+        .getSharedPreferences("overlay", Context.MODE_PRIVATE)
+
+    companion object {
+        /** 默认透明度，对齐参考项目 MapOpacity=0.46 */
+        const val DEFAULT_OPACITY = 0.46f
+        const val DEFAULT_W_RATIO = 0.6f
+        const val DEFAULT_H_RATIO = 0.6f
+    }
+
+    var lastMapId: String?
+        get() = prefs.getString("last_map_id", null)
+        set(value) = prefs.edit().putString("last_map_id", value).apply()
+
+    var lastFloorKey: String?
+        get() = prefs.getString("last_floor_key", null)
+        set(value) = prefs.edit().putString("last_floor_key", value).apply()
+
+    var opacity: Float
+        get() = prefs.getFloat("opacity", DEFAULT_OPACITY)
+        set(value) = prefs.edit().putFloat("opacity", value.coerceIn(0.1f, 1f)).apply()
+
+    var locked: Boolean
+        get() = prefs.getBoolean("locked", false)
+        set(value) = prefs.edit().putBoolean("locked", value).apply()
+
+    /** 开机自动恢复悬浮窗 */
+    var autoStartOnBoot: Boolean
+        get() = prefs.getBoolean("auto_start_on_boot", false)
+        set(value) = prefs.edit().putBoolean("auto_start_on_boot", value).apply()
+
+    // ---- 位置/尺寸：按屏幕比例保存 ----
+
+    /** x/屏幕宽 与 y/屏幕高（Float），未设置返回 null */
+    fun positionRatio(): Pair<Float, Float>? {
+        val x = prefs.getFloat("pos_x_ratio", Float.NaN)
+        val y = prefs.getFloat("pos_y_ratio", Float.NaN)
+        return if (x.isNaN() || y.isNaN()) null else x to y
+    }
+
+    fun setPositionRatio(x: Float, y: Float) {
+        prefs.edit().putFloat("pos_x_ratio", x).putFloat("pos_y_ratio", y).apply()
+    }
+
+    /** 窗口宽/屏幕宽 与 高/屏幕高 */
+    fun sizeRatio(): Pair<Float, Float>? {
+        val w = prefs.getFloat("size_w_ratio", Float.NaN)
+        val h = prefs.getFloat("size_h_ratio", Float.NaN)
+        return if (w.isNaN() || h.isNaN()) null else w to h
+    }
+
+    fun setSizeRatio(w: Float, h: Float) {
+        prefs.edit().putFloat("size_w_ratio", w).putFloat("size_h_ratio", h).apply()
+    }
+}
