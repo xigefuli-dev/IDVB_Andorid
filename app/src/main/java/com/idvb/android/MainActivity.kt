@@ -72,6 +72,7 @@ import com.idvb.android.ui.screens.TemplatePickerScreen
 import com.idvb.android.ui.screens.MapImagesScreen
 import com.idvb.android.ui.screens.GateMarkerScreen
 import com.idvb.android.data.MapTemplate
+import com.idvb.android.data.TemplateFloor
 import android.net.Uri
 import com.idvb.android.ui.screens.maplist.importIdvmUri
 import com.idvb.android.ui.theme.IDVBTheme
@@ -96,9 +97,11 @@ class MainActivity : ComponentActivity() {
                 var page by remember { mutableStateOf("main") }
                 var navigatingForward by remember { mutableStateOf(true) }
                 var creationClassId by remember { mutableStateOf<String?>(null) }
+                var creationMapId by remember { mutableStateOf<String?>(null) }
                 var creationTemplate by remember { mutableStateOf<MapTemplate?>(null) }
                 var creationTitle by remember { mutableStateOf("") }
                 var creationImages by remember { mutableStateOf<Map<String, Uri>>(emptyMap()) }
+                var creationSideDoors by remember { mutableStateOf(emptyList<com.idvb.android.idvm.NormalizedRect>()) }
                 val permissions = rememberPermissionController()
                 Scaffold(
                     containerColor = MaterialTheme.colorScheme.background,
@@ -108,8 +111,10 @@ class MainActivity : ComponentActivity() {
                         if (page == "main" && (tab == 0 || tab == 1)) ServiceStatusFab(
                             ready = permissions.snapshot.allGranted,
                             onClick = {
-                                if (permissions.snapshot.allGranted) OverlayService.start(this@MainActivity)
-                                else permissions.requestNextMissing()
+                                if (permissions.snapshot.allGranted) {
+                                    OverlayService.start(this@MainActivity)
+                                    moveTaskToBack(true)
+                                } else permissions.requestNextMissing()
                             },
                         )
                     },
@@ -130,12 +135,84 @@ class MainActivity : ComponentActivity() {
                         ) { (currentPage, currentTab) ->
                             when (currentPage) {
                                 "templates" -> TemplateManagerScreen { navigatingForward = false; page = "main" }
-                                "template-picker" -> TemplatePickerScreen(onBack = { navigatingForward = false; page = "main" }) { creationTemplate = it; navigatingForward = true; page = "map-images" }
-                                "map-images" -> creationTemplate?.let { template -> MapImagesScreen(template, creationTitle, { navigatingForward = false; page = "template-picker" }) { title, images -> creationTitle = title; creationImages = images; navigatingForward = true; page = "gate-marker" } }
-                                "gate-marker" -> creationTemplate?.let { template -> creationClassId?.let { targetClass -> GateMarkerScreen(template, creationTitle, creationImages, targetClass, { navigatingForward = false; page = "map-images" }) { catalogTick++; tab = 1; navigatingForward = false; page = "main" } } }
+                                "template-picker" -> TemplatePickerScreen(onBack = { navigatingForward = false; page = "main" }) {
+                                    creationMapId = null
+                                    creationSideDoors = emptyList()
+                                    creationTemplate = it
+                                    creationImages = emptyMap()
+                                    navigatingForward = true
+                                    page = "map-images"
+                                }
+                                "map-images" -> creationTemplate?.let { template ->
+                                    MapImagesScreen(
+                                        template = template,
+                                        defaultTitle = creationTitle,
+                                        initialImages = creationImages,
+                                        onBack = {
+                                            navigatingForward = false
+                                            page = if (creationMapId == null) "template-picker" else "main"
+                                        },
+                                        onNext = { title, images ->
+                                            creationTitle = title
+                                            creationImages = images
+                                            navigatingForward = true
+                                            page = "gate-marker"
+                                        },
+                                    )
+                                }
+                                "gate-marker" -> creationTemplate?.let { template -> creationClassId?.let { targetClass ->
+                                    GateMarkerScreen(
+                                        template = template,
+                                        title = creationTitle,
+                                        images = creationImages,
+                                        classId = targetClass,
+                                        onBack = { navigatingForward = false; page = "map-images" },
+                                        onSaved = {
+                                            catalogTick++
+                                            tab = 1
+                                            creationMapId = null
+                                            creationTemplate = null
+                                            creationImages = emptyMap()
+                                            creationSideDoors = emptyList()
+                                            navigatingForward = false
+                                            page = "main"
+                                        },
+                                        existingMapId = creationMapId,
+                                        initialSideDoors = creationSideDoors,
+                                    )
+                                } }
                                 else -> when (currentTab) {
                                     0 -> HomeScreen(permissions = permissions.snapshot)
-                                    1 -> MapListScreen(refreshTick = catalogTick) { classId, defaultTitle -> creationClassId = classId; creationTitle = defaultTitle; navigatingForward = true; page = "template-picker" }
+                                    1 -> MapListScreen(
+                                        refreshTick = catalogTick,
+                                        onCreateMap = { classId, defaultTitle ->
+                                            creationClassId = classId
+                                            creationMapId = null
+                                            creationTemplate = null
+                                            creationTitle = defaultTitle
+                                            creationImages = emptyMap()
+                                            creationSideDoors = emptyList()
+                                            navigatingForward = true
+                                            page = "template-picker"
+                                        },
+                                        onOpenMap = { map ->
+                                            val floors = map.floors.sortedBy { it.sortOrder }
+                                            creationClassId = map.classId
+                                            creationMapId = map.id
+                                            creationTemplate = MapTemplate(
+                                                id = "saved-${map.id}",
+                                                name = map.title,
+                                                floors = floors.map { TemplateFloor(it.key, it.displayName) },
+                                            )
+                                            creationTitle = map.title
+                                            creationImages = floors.associate { floor ->
+                                                floor.key to Uri.fromFile(AppServices.repository.floorImageFile(map.id, floor.imagePath))
+                                            }
+                                            creationSideDoors = AppServices.repository.loadSideDoors(map.id)
+                                            navigatingForward = true
+                                            page = "map-images"
+                                        },
+                                    )
                                     else -> SettingsScreen { navigatingForward = true; page = "templates" }
                                 }
                             }

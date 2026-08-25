@@ -39,6 +39,26 @@ class OverlayPrefs(context: Context) {
         get() = prefs.getBoolean("auto_start_on_boot", false)
         set(value) = prefs.edit().putBoolean("auto_start_on_boot", value).apply()
 
+    /** 按当前方向保存蓝图校准区域，值为 0..1 的屏幕比例。 */
+    fun setCaptureRegion(landscape: Boolean, left: Float, top: Float, right: Float, bottom: Float) {
+        val prefix = if (landscape) "capture_landscape" else "capture_portrait"
+        prefs.edit()
+            .putFloat("${prefix}_left", left.coerceIn(0f, 1f))
+            .putFloat("${prefix}_top", top.coerceIn(0f, 1f))
+            .putFloat("${prefix}_right", right.coerceIn(0f, 1f))
+            .putFloat("${prefix}_bottom", bottom.coerceIn(0f, 1f))
+            .apply()
+    }
+
+    fun captureRegion(landscape: Boolean): FloatArray? {
+        val prefix = if (landscape) "capture_landscape" else "capture_portrait"
+        val left = prefs.getFloat("${prefix}_left", Float.NaN)
+        val top = prefs.getFloat("${prefix}_top", Float.NaN)
+        val right = prefs.getFloat("${prefix}_right", Float.NaN)
+        val bottom = prefs.getFloat("${prefix}_bottom", Float.NaN)
+        return if (listOf(left, top, right, bottom).any { it.isNaN() }) null else floatArrayOf(left, top, right, bottom)
+    }
+
     // ---- 位置/尺寸：按屏幕比例保存 ----
 
     /** x/屏幕宽 与 y/屏幕高（Float），未设置返回 null */

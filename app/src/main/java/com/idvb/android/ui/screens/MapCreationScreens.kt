@@ -309,7 +309,7 @@ private fun rectToStroke(rect: NormalizedRect): List<Offset> = listOf(
 )
 
 private fun openImageInputStream(context: android.content.Context, uri: Uri): java.io.InputStream? =
-    if (uri.scheme == "file") uri.path?.let(::java.io.File)?.inputStream() else context.contentResolver.openInputStream(uri)
+    if (uri.scheme == "file") uri.path?.let { java.io.File(it).inputStream() } else context.contentResolver.openInputStream(uri)
 
 @Composable
 private fun ScreenHeader(title: String, onBack: () -> Unit, actions: @Composable RowScope.() -> Unit = {}) {
