@@ -158,6 +158,30 @@ object IdvmValidator {
                 require(f.imageWidth > 0 && f.imageHeight > 0) { "地图 $mapId：楼层 ${f.key} 图片尺寸非法" }
                 f.recognitionRegion?.let { validateRect("地图 $mapId 楼层 ${f.key} recognitionRegion", it) }
                 f.validMapBounds?.let { validateRect("地图 $mapId 楼层 ${f.key} validMapBounds", it) }
+                f.recognitionImage?.let { path ->
+                    validateRecognitionAssetPath(
+                        mapId = mapId,
+                        floorKey = f.key,
+                        root = manifestMap?.root,
+                        what = "recognitionImage",
+                        path = path,
+                    )
+                }
+                f.sideEntranceFeature?.let { feature ->
+                    validateRecognitionAssetPath(
+                        mapId = mapId,
+                        floorKey = f.key,
+                        root = manifestMap?.root,
+                        what = "sideEntranceFeature.file",
+                        path = feature.file,
+                    )
+                    require(feature.centerX.isFinite() && feature.centerY.isFinite()) {
+                        "地图 $mapId：楼层 ${f.key} 侧门特征中心必须为有限数"
+                    }
+                    require(feature.centerX >= 0.0 && feature.centerY >= 0.0 && feature.radius > 0) {
+                        "地图 $mapId：楼层 ${f.key} 侧门特征坐标或半径非法"
+                    }
+                }
             }
         }
         if (gates != null) {
@@ -202,6 +226,26 @@ object IdvmValidator {
         val eps = 1e-6
         require(r.x >= -eps && r.y >= -eps && (r.x + r.width) <= 1.0 + eps && (r.y + r.height) <= 1.0 + eps) {
             "$context 矩形必须完整落在 0..1（允许 $eps 边界误差）"
+        }
+    }
+
+    private fun validateRecognitionAssetPath(
+        mapId: String,
+        floorKey: String,
+        root: String?,
+        what: String,
+        path: String,
+    ) {
+        require(validateSafeRelativePath(path)) {
+            "地图 $mapId：楼层 $floorKey 的 $what 路径不安全"
+        }
+        if (root != null) {
+            require(path.startsWith("${root.trimEnd('/')}/data/")) {
+                "地图 $mapId：楼层 $floorKey 的 $what 必须位于地图 data 目录"
+            }
+        }
+        require(path.substringAfterLast('.', missingDelimiterValue = "").lowercase() in setOf("png", "jpg", "jpeg")) {
+            "地图 $mapId：楼层 $floorKey 的 $what 不是受支持的图片"
         }
     }
 

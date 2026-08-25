@@ -8,6 +8,8 @@ import java.security.MessageDigest
 import java.util.UUID
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
+import kotlin.math.ceil
+import kotlin.math.floor
 
 /**
  * IDVM 地图包导入器（移植参考项目 IdvmPackageService.Reader.cs / Validator.cs）。
@@ -52,6 +54,12 @@ class IdvmImporter(private val json: Json = IdvmJson.instance) {
         val importedClasses: List<ClassRecord>,
         val importedMaps: List<MapRecord>,
         val catalog: MapCatalogDocument,
+    )
+
+    private data class ImportedImageAsset(
+        val localPath: String,
+        val width: Int,
+        val height: Int,
     )
 
     private fun importInternal(
@@ -145,6 +153,7 @@ class IdvmImporter(private val json: Json = IdvmJson.instance) {
             File(localDir, "data").mkdirs()
 
             val floorRecords = doc.manifestMap.floors.sortedBy { it.sortOrder }.map { mf ->
+                val metaFloor = doc.metadata.floors.first { it.key == mf.key }
                 val src = inventory[mf.image] ?: error("缺少楼层图条目：${mf.image}")
                 verifyEntry(zip, src, mf.image, manifest)
                 val bytes = IdvmUtil.readBounded(zip.getInputStream(src), IdvmLimits.MAX_SINGLE_FILE_BYTES)
@@ -152,15 +161,55 @@ class IdvmImporter(private val json: Json = IdvmJson.instance) {
                 val relative = mf.image.removePrefix("${doc.manifestMap.root}/")
                 val localImage = File(localDir, relative).apply { parentFile?.mkdirs() }
                 FileOutputStream(localImage).use { it.write(bytes) }
+                val recognitionAsset = metaFloor.recognitionImage?.let { logicalPath ->
+                    inspectImageAsset(
+                        zip = zip,
+                        inventory = inventory,
+                        manifest = manifest,
+                        root = doc.manifestMap.root,
+                        localMapId = localMapId,
+                        logicalPath = logicalPath,
+                        what = "楼层 ${mf.key} 识别图",
+                    )
+                }
+                val recognitionSize = recognitionAsset?.let { it.width to it.height }
+                    ?: recognitionSize(metaFloor)
+                val sideEntranceFeature = metaFloor.sideEntranceFeature?.let { feature ->
+                    val asset = inspectImageAsset(
+                        zip = zip,
+                        inventory = inventory,
+                        manifest = manifest,
+                        root = doc.manifestMap.root,
+                        localMapId = localMapId,
+                        logicalPath = feature.file,
+                        what = "楼层 ${mf.key} 侧门特征图",
+                    )
+                    require(feature.centerX <= recognitionSize.first && feature.centerY <= recognitionSize.second) {
+                        "楼层 ${mf.key} 侧门特征中心超出识别图范围"
+                    }
+                    SideEntranceFeatureRecord(
+                        imagePath = asset.localPath,
+                        centerX = feature.centerX,
+                        centerY = feature.centerY,
+                        radius = feature.radius,
+                        imageWidth = asset.width,
+                        imageHeight = asset.height,
+                    )
+                }
                 FloorRecord(
                     key = mf.key,
                     displayName = mf.displayName,
                     sortOrder = mf.sortOrder,
                     imagePath = "$localMapId/$relative",
-                    imageWidth = doc.metadata.floors.first { it.key == mf.key }.imageWidth,
-                    imageHeight = doc.metadata.floors.first { it.key == mf.key }.imageHeight,
-                    orientationDegrees = doc.metadata.floors.first { it.key == mf.key }.orientationDegrees,
-                    previewRegion = doc.metadata.floors.first { it.key == mf.key }.recognitionRegion,
+                    imageWidth = metaFloor.imageWidth,
+                    imageHeight = metaFloor.imageHeight,
+                    orientationDegrees = metaFloor.orientationDegrees,
+                    previewRegion = metaFloor.recognitionRegion,
+                    recognitionImagePath = recognitionAsset?.localPath,
+                    recognitionWidth = recognitionSize.first,
+                    recognitionHeight = recognitionSize.second,
+                    validMapBounds = metaFloor.validMapBounds,
+                    sideEntranceFeature = sideEntranceFeature,
                 )
             }
 
@@ -273,6 +322,40 @@ class IdvmImporter(private val json: Json = IdvmJson.instance) {
         require(dim.first == metaFloor.imageWidth && dim.second == metaFloor.imageHeight) {
             "楼层图 '$path' 尺寸 ${dim.first}x${dim.second} 与 metadata 声明 ${metaFloor.imageWidth}x${metaFloor.imageHeight} 不一致"
         }
+    }
+
+    private fun inspectImageAsset(
+        zip: ZipFile,
+        inventory: Map<String, ZipEntry>,
+        manifest: IdvmManifest,
+        root: String,
+        localMapId: String,
+        logicalPath: String,
+        what: String,
+    ): ImportedImageAsset {
+        val entry = inventory[logicalPath] ?: error("$what 未在 IDVM 文件清单中声明：$logicalPath")
+        verifyEntry(zip, entry, logicalPath, manifest)
+        val bytes = IdvmUtil.readBounded(zip.getInputStream(entry), IdvmLimits.MAX_SINGLE_FILE_BYTES)
+        val dimensions = ImageProbe.dimensions(bytes) ?: error("$what 无法识别为 PNG/JPEG：$logicalPath")
+        val prefix = "${root.trimEnd('/')}/"
+        require(logicalPath.startsWith(prefix)) { "$what 不属于当前地图目录" }
+        return ImportedImageAsset(
+            localPath = "$localMapId/${logicalPath.removePrefix(prefix)}",
+            width = dimensions.first,
+            height = dimensions.second,
+        )
+    }
+
+    private fun recognitionSize(floorMetadata: MetadataFloor): Pair<Int, Int> {
+        val region = floorMetadata.recognitionRegion
+            ?: return floorMetadata.imageWidth to floorMetadata.imageHeight
+        val left = floor(region.x * floorMetadata.imageWidth).toInt().coerceIn(0, floorMetadata.imageWidth - 1)
+        val top = floor(region.y * floorMetadata.imageHeight).toInt().coerceIn(0, floorMetadata.imageHeight - 1)
+        val right = ceil((region.x + region.width) * floorMetadata.imageWidth).toInt()
+            .coerceIn(left + 1, floorMetadata.imageWidth)
+        val bottom = ceil((region.y + region.height) * floorMetadata.imageHeight).toInt()
+            .coerceIn(top + 1, floorMetadata.imageHeight)
+        return (right - left) to (bottom - top)
     }
 
     private fun resolveClassName(desired: String, taken: MutableSet<String>): String {

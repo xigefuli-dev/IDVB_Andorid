@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import com.idvb.android.ui.PermissionSnapshot
 import com.idvb.android.ui.theme.SignalGreen
 import com.idvb.android.ui.theme.SignalGreenDeep
+import com.idvb.android.data.ScreenCaptureMethod
 
 private data class PermissionItem(val title: String, val detail: String, val granted: Boolean)
 
@@ -30,10 +31,18 @@ private data class PermissionItem(val title: String, val detail: String, val gra
 fun HomeScreen(permissions: PermissionSnapshot) {
     val items = listOf(
         PermissionItem("悬浮窗", "在其他应用上层显示地图", permissions.overlay),
-        PermissionItem("屏幕捕获", "读取当前屏幕画面以进行识别", permissions.screenCapture),
+        PermissionItem(
+            if (permissions.captureMethod == ScreenCaptureMethod.ACCESSIBILITY) "无障碍" else "屏幕捕获",
+            if (permissions.captureMethod == ScreenCaptureMethod.ACCESSIBILITY) "通过 IDVB 无障碍服务截取识别画面" else "读取当前屏幕画面以进行识别",
+            permissions.screenCapture,
+        ),
         PermissionItem("通知", "显示服务运行状态与控制入口", permissions.notifications),
         PermissionItem("前台服务", "FOREGROUND_SERVICE", permissions.foregroundService),
-        PermissionItem("媒体投影服务", "FOREGROUND_SERVICE_MEDIA_PROJECTION", permissions.mediaProjectionService),
+        if (permissions.captureMethod == ScreenCaptureMethod.MEDIA_PROJECTION) {
+            PermissionItem("媒体投影服务", "FOREGROUND_SERVICE_MEDIA_PROJECTION", permissions.mediaProjectionService)
+        } else {
+            PermissionItem("截图服务", "AccessibilityService.takeScreenshot", permissions.screenCapture)
+        },
         PermissionItem("电池优化白名单", "允许忽略后台高耗电限制", permissions.batteryOptimization),
     )
     val grantedCount = items.count { it.granted }

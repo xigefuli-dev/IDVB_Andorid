@@ -8,6 +8,18 @@ import kotlinx.serialization.Serializable
  * 纯 Kotlin DTO，供 [IdvmImporter] 与 data/MapRepository 共用。
  */
 @Serializable
+data class SideEntranceFeatureRecord(
+    /** 相对 maps 根目录的特征图路径。 */
+    @SerialName("imagePath") val imagePath: String,
+    /** 特征中心在权威识别图中的像素坐标。 */
+    @SerialName("centerX") val centerX: Double,
+    @SerialName("centerY") val centerY: Double,
+    @SerialName("radius") val radius: Int,
+    @SerialName("imageWidth") val imageWidth: Int,
+    @SerialName("imageHeight") val imageHeight: Int,
+)
+
+@Serializable
 data class FloorRecord(
     @SerialName("key") val key: String,
     @SerialName("displayName") val displayName: String,
@@ -19,6 +31,12 @@ data class FloorRecord(
     @SerialName("orientationDegrees") val orientationDegrees: Int = 0,
     /** Desktop 中用户选择的识别裁切区域；旧目录为 null 时从 metadata.json 回读。 */
     @SerialName("previewRegion") val previewRegion: NormalizedRect? = null,
+    /** Desktop 测绘地图导出的独立识别图；普通地图为空并使用 image + previewRegion。 */
+    @SerialName("recognitionImagePath") val recognitionImagePath: String? = null,
+    @SerialName("recognitionWidth") val recognitionWidth: Int = 0,
+    @SerialName("recognitionHeight") val recognitionHeight: Int = 0,
+    @SerialName("validMapBounds") val validMapBounds: NormalizedRect? = null,
+    @SerialName("sideEntranceFeature") val sideEntranceFeature: SideEntranceFeatureRecord? = null,
 )
 
 @Serializable

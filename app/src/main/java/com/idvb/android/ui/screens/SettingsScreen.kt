@@ -70,6 +70,7 @@ private val featureEntries = listOf(
 @Composable
 fun SettingsScreen(
     onOpenGeneral: () -> Unit = {},
+    onOpenVision: () -> Unit = {},
     onOpenTemplates: () -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -122,6 +123,7 @@ fun SettingsScreen(
         SettingSection("功能设置", featureEntries) {
             when (it.title) {
                 "通用" -> onOpenGeneral()
+                "视觉" -> onOpenVision()
                 "模板" -> onOpenTemplates()
                 else -> Toast.makeText(context, it.title + "设置：暂未实现", Toast.LENGTH_SHORT).show()
             }

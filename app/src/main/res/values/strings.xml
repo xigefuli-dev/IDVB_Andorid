@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">IDVB</string>
+    <string name="accessibility_service_description">用于在识别时截取当前屏幕，不读取或操作界面内容。</string>
 </resources>

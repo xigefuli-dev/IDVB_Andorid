@@ -115,6 +115,14 @@ data class MetadataMap(
 )
 
 @Serializable
+data class SideEntranceFeatureMetadata(
+    @SerialName("file") val file: String,
+    @SerialName("centerX") val centerX: Double,
+    @SerialName("centerY") val centerY: Double,
+    @SerialName("radius") val radius: Int,
+)
+
+@Serializable
 data class MetadataFloor(
     @SerialName("key") val key: String,
     @SerialName("displayName") val displayName: String,
@@ -126,6 +134,10 @@ data class MetadataFloor(
     @SerialName("recognitionRegion") val recognitionRegion: NormalizedRect? = null,
     @SerialName("validMapBounds") val validMapBounds: NormalizedRect? = null,
     @SerialName("markerKeys") val markerKeys: List<String> = emptyList(),
+    /** Desktop 为测绘地图导出的权威识别图；为空时使用 image + recognitionRegion。 */
+    @SerialName("recognitionImage") val recognitionImage: String? = null,
+    /** Desktop 已按当前算法生成并遮掉公共侧门图标的权威特征图。 */
+    @SerialName("sideEntranceFeature") val sideEntranceFeature: SideEntranceFeatureMetadata? = null,
 )
 
 @Serializable
@@ -172,6 +184,22 @@ data class Anchor(
 data class FloorAnchors(
     @SerialName("anchors") val anchors: List<Anchor> = emptyList(),
     @SerialName("wholeImageIgnoreRegions") val wholeImageIgnoreRegions: List<NormalizedRect> = emptyList(),
+    @SerialName("backgroundLayers") val backgroundLayers: List<BackgroundLayer> = emptyList(),
+)
+
+@Serializable
+data class BackgroundLayer(
+    @SerialName("id") val id: String = "",
+    @SerialName("semantic") val semantic: String = "background",
+    @SerialName("shape") val shape: String = "circle",
+    @SerialName("brushSizePixels") val brushSizePixels: Int = 64,
+    @SerialName("points") val points: List<NormalizedPoint> = emptyList(),
+)
+
+@Serializable
+data class NormalizedPoint(
+    @SerialName("x") val x: Double,
+    @SerialName("y") val y: Double,
 )
 
 @Serializable

@@ -26,13 +26,27 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
     var mapLocked: Boolean = false
         set(value) {
             field = value
-            eyeButton.isEnabled = value; floorButton.isEnabled = value
-            eyeButton.alpha = if (value) 1f else .32f; floorButton.alpha = if (value) 1f else .32f
+            updateEyePresentation()
+            floorButton.isEnabled = value
+            floorButton.alpha = if (value) 1f else .32f
+        }
+    var candidatesAvailable: Boolean = false
+        set(value) {
+            field = value
+            updateEyePresentation()
+        }
+    var identityVerified: Boolean? = null
+        set(value) {
+            field = value
+            updateFloorPresentation()
         }
     var guideVisible: Boolean = false
         set(value) { field = value; eyeButton.text = if (value) "◉" else "👁" }
     var floorLabel: String = "--"
-        set(value) { field = value; floorButton.text = value.ifBlank { "--" } }
+        set(value) {
+            field = value
+            updateFloorPresentation()
+        }
 
     init {
         orientation = VERTICAL; gravity = Gravity.END
@@ -54,6 +68,27 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
             addView(menuItem("⏻", "关闭悬浮窗") { listener?.onClose() })
         }
         addView(morePanel); mapLocked = false
+    }
+
+    private fun updateEyePresentation() {
+        val enabled = mapLocked || candidatesAvailable
+        eyeButton.isEnabled = enabled
+        eyeButton.alpha = if (enabled) 1f else .32f
+        eyeButton.contentDescription = if (candidatesAvailable) "查看候选地图" else "显示攻略地图"
+    }
+
+    private fun updateFloorPresentation() {
+        val label = floorLabel.ifBlank { "--" }
+        floorButton.text = when (identityVerified) {
+            true -> "✓$label"
+            false -> "?$label"
+            null -> label
+        }
+        floorButton.contentDescription = when (identityVerified) {
+            true -> "结构已确认的地图，切换楼层"
+            false -> "人工选择且结构未确认的地图，切换楼层"
+            null -> "切换楼层"
+        }
     }
 
     private fun ball(label: String, description: String, click: () -> Unit) = TextView(context).apply {

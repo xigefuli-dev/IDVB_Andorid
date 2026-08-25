@@ -2,6 +2,9 @@ package com.idvb.android.data
 
 import android.content.Context
 
+enum class MapIdentitySource { STRUCTURE_VERIFIED, MANUAL_UNVERIFIED }
+enum class ScreenCaptureMethod { MEDIA_PROJECTION, ACCESSIBILITY }
+
 /**
  * 悬浮窗状态持久化（对齐参考项目 Overlay 显示配置）。
  * 位置/尺寸使用像素，保存时按屏幕尺寸归一化，避免不同分辨率下错位。
@@ -20,7 +23,18 @@ class OverlayPrefs(context: Context) {
 
     var lastMapId: String?
         get() = prefs.getString("last_map_id", null)
-        set(value) = prefs.edit().putString("last_map_id", value).apply()
+        set(value) {
+            val edit = prefs.edit().putString("last_map_id", value)
+            if (value == null) edit.remove("last_map_identity_source")
+            edit.apply()
+        }
+
+    /** 自动结构确认与人工选择必须跨服务重启保持不同语义。 */
+    var lastMapIdentitySource: MapIdentitySource
+        get() = prefs.getString("last_map_identity_source", null)
+            ?.let { runCatching { MapIdentitySource.valueOf(it) }.getOrNull() }
+            ?: MapIdentitySource.MANUAL_UNVERIFIED
+        set(value) = prefs.edit().putString("last_map_identity_source", value.name).apply()
 
     var lastFloorKey: String?
         get() = prefs.getString("last_floor_key", null)
@@ -48,6 +62,33 @@ class OverlayPrefs(context: Context) {
     var debugMode: Boolean
         get() = prefs.getBoolean("debug_mode", false)
         set(value) = prefs.edit().putBoolean("debug_mode", value).apply()
+
+    /** 扫描完成后暂存候选结果，等待用户点击悬浮窗的眼睛按钮再显示。 */
+    var backgroundScanEnabled: Boolean
+        get() = prefs.getBoolean("background_scan_enabled", false)
+        set(value) = prefs.edit().putBoolean("background_scan_enabled", value).apply()
+
+    /** 保存真实扫描输入与候选证据，供 Desktop/Android 差分验证。 */
+    var recognitionDiagnosticsEnabled: Boolean
+        get() = prefs.getBoolean("recognition_diagnostics_enabled", false)
+        set(value) = prefs.edit().putBoolean("recognition_diagnostics_enabled", value).apply()
+
+    /** 将攻略地图显示区域限制在屏幕范围内。 */
+    var constrainGuideToScreen: Boolean
+        get() = prefs.getBoolean("constrain_guide_to_screen", false)
+        set(value) = prefs.edit().putBoolean("constrain_guide_to_screen", value).apply()
+
+    /** 显示攻略地图时按 Class 标记或楼层主色移除背景。 */
+    var removeGuideBackground: Boolean
+        get() = prefs.getBoolean("remove_guide_background", false)
+        set(value) = prefs.edit().putBoolean("remove_guide_background", value).apply()
+
+    /** 识别截图来源；默认保持原有的系统屏幕捕获链路。 */
+    var screenCaptureMethod: ScreenCaptureMethod
+        get() = prefs.getString("screen_capture_method", null)
+            ?.let { runCatching { ScreenCaptureMethod.valueOf(it) }.getOrNull() }
+            ?: ScreenCaptureMethod.MEDIA_PROJECTION
+        set(value) = prefs.edit().putString("screen_capture_method", value.name).apply()
 
     /** 按当前方向保存蓝图校准区域，值为 0..1 的屏幕比例。 */
     fun setCaptureRegion(landscape: Boolean, left: Float, top: Float, right: Float, bottom: Float) {

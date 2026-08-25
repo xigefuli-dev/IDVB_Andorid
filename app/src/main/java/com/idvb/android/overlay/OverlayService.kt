@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
 import android.content.pm.ServiceInfo
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.IBinder
 import android.graphics.RectF
@@ -30,9 +31,17 @@ import com.idvb.android.recognize.ScreenCaptureGrant
 import com.idvb.android.recognize.ScreenCaptureSession
 import com.idvb.android.recognize.SideEntranceRecognizer
 import com.idvb.android.recognize.CandidateDisposition
+import com.idvb.android.data.MapIdentitySource
+import com.idvb.android.data.ScreenCaptureMethod
+import com.idvb.android.recognize.AccessibilityScreenCaptureService
 import com.idvb.android.recognize.RecognitionCandidate
+import com.idvb.android.recognize.CaptureDiagnosticsContext
+import com.idvb.android.recognize.RecognitionExecutor
+import com.idvb.android.recognize.gate.ScreenRect
 import com.idvb.android.idvm.MapRecord
 import com.idvb.android.graphics.decodeMapRegion
+import com.idvb.android.graphics.MapBackgroundRemover
+import java.util.concurrent.Executors
 
 /** 新悬浮窗入口：当前阶段只承载四个独立控制小球。 */
 class OverlayService : Service() {
@@ -70,6 +79,19 @@ class OverlayService : Service() {
     private var currentMap: MapRecord? = null
     private var floorIndex = 0
     @Volatile private var scanning = false
+    private val recognitionExecutor = RecognitionExecutor()
+    private val accessibilityCaptureExecutor = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "idvb-accessibility-capture")
+    }
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = Unit
+        override fun onDisplayRemoved(displayId: Int) = Unit
+        override fun onDisplayChanged(displayId: Int) {
+            if (displayId == android.view.Display.DEFAULT_DISPLAY) {
+                Handler(Looper.getMainLooper()).post { refreshWindowsForDisplayChange() }
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -77,6 +99,7 @@ class OverlayService : Service() {
         blueprintWindow = OverlayWindowManager(this)
         candidateWindow = OverlayWindowManager(this)
         guideWindow = OverlayWindowManager(this)
+        getSystemService(DisplayManager::class.java).registerDisplayListener(displayListener, Handler(Looper.getMainLooper()))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -102,6 +125,9 @@ class OverlayService : Service() {
         window.x = (screen.first - window.width).coerceAtLeast(0); window.y = (screen.second * .28f).toInt()
         balls = OverlayBallView(this).apply {
             mapLocked = currentMap != null
+            identityVerified = currentMap?.let {
+                AppServices.prefs.lastMapIdentitySource == MapIdentitySource.STRUCTURE_VERIFIED
+            }
             floorLabel = orderedFloors.getOrNull(floorIndex)?.displayName ?: "--"
             listener = object : OverlayBallView.Listener {
                 override fun onSearch() = runForegroundScan()
@@ -137,7 +163,7 @@ class OverlayService : Service() {
         guideWindow.x = 0; guideWindow.y = 0; guideWindow.width = 1; guideWindow.height = 1
         guideWindow.add(guideView!!, locked = true)
         window.add(balls!!, locked = false)
-        if (ScreenCaptureGrant.available) {
+        if (AppServices.prefs.screenCaptureMethod == ScreenCaptureMethod.MEDIA_PROJECTION && ScreenCaptureGrant.available) {
             captureSession = ScreenCaptureSession(this).also { it.start(screen.first, screen.second) }
         }
         OverlayState.update { it.copy(running = true, visible = true, locked = false) }
@@ -153,52 +179,103 @@ class OverlayService : Service() {
             Toast.makeText(this, "正在扫描地图，请稍候", Toast.LENGTH_SHORT).show()
             return
         }
+        clearPendingCandidates()
         val size = screenSize()
         val region = captureRegionPixels(size.first, size.second)
         if (region == null) {
             Toast.makeText(this, "请先在 ··· 中校准显示区域", Toast.LENGTH_SHORT).show()
             return
         }
+        val method = AppServices.prefs.screenCaptureMethod
         val session = captureSession
-        if (session == null || !session.start(size.first, size.second)) {
-            Toast.makeText(this, "屏幕捕获授权已失效，请返回 IDVB 重新授权", Toast.LENGTH_LONG).show()
-            return
+        if (method == ScreenCaptureMethod.MEDIA_PROJECTION && (session == null || !session.start(size.first, size.second))) {
+            Toast.makeText(this, "屏幕捕获授权已失效，请返回 IDVB 重新授权", Toast.LENGTH_LONG).show(); return
+        }
+        if (method == ScreenCaptureMethod.ACCESSIBILITY && !AccessibilityScreenCaptureService.available) {
+            Toast.makeText(this, "IDVB 无障碍服务未启用，请返回应用授权", Toast.LENGTH_LONG).show(); return
         }
         scanning = true
         balls?.visibility = android.view.View.INVISIBLE
         guideView?.visibility = android.view.View.INVISIBLE
         balls?.postDelayed({
-            session.capture(Rect(region.left.toInt(), region.top.toInt(), region.right.toInt(), region.bottom.toInt())) { captured ->
-                val bitmap = captured.getOrElse { error ->
-                    Handler(Looper.getMainLooper()).post {
-                        scanning = false
-                        balls?.visibility = android.view.View.VISIBLE
-                        if (guideVisible) guideView?.visibility = android.view.View.VISIBLE
-                        Toast.makeText(this, "截图失败：${error.message}", Toast.LENGTH_LONG).show()
-                    }
-                    return@capture
-                }
+            val bounds = Rect(region.left.toInt(), region.top.toInt(), region.right.toInt(), region.bottom.toInt())
+            val callback = { captured: Result<Bitmap> -> processCapturedFrame(captured, region, size) }
+            if (method == ScreenCaptureMethod.ACCESSIBILITY) {
+                AccessibilityScreenCaptureService.capture(bounds, accessibilityCaptureExecutor, callback)
+            } else {
+                session!!.capture(bounds, callback)
+            }
+        }, 140L)
+    }
+
+    private fun processCapturedFrame(captured: Result<Bitmap>, region: RectF, size: Pair<Int, Int>) {
+        val bitmap = captured.getOrElse { error ->
+            Handler(Looper.getMainLooper()).post {
+                scanning = false
+                balls?.visibility = android.view.View.VISIBLE
+                if (guideVisible) guideView?.visibility = android.view.View.VISIBLE
+                Toast.makeText(this, "截图失败：${error.message}", Toast.LENGTH_LONG).show()
+            }
+            return
+        }
                 // 截图完成后立即恢复小球；识别算法在后台继续运行。
                 Handler(Looper.getMainLooper()).post {
                     balls?.visibility = android.view.View.VISIBLE
                     if (guideVisible) guideView?.visibility = android.view.View.VISIBLE
                     Toast.makeText(this, "截图完成，正在扫描地图…", Toast.LENGTH_SHORT).show()
                 }
-                Thread {
-                    val classId = resolveActiveClassId(AppServices.repository.loadCatalog())
+                val accepted = recognitionExecutor.execute {
+                    val catalog = AppServices.repository.loadCatalog()
+                    val classId = resolveActiveClassId(catalog)
                     val recognition = runCatching {
-                        SideEntranceRecognizer(AppServices.repository, classId).recognize(bitmap)
+                        SideEntranceRecognizer(this, AppServices.repository, classId).recognize(
+                            frame = bitmap,
+                            viewportBounds = ScreenRect(
+                                region.left.toDouble(),
+                                region.top.toDouble(),
+                                region.width().toDouble(),
+                                region.height().toDouble(),
+                            ),
+                            clientWidth = size.first,
+                            clientHeight = size.second,
+                        )
                     }
+                    val diagnostics = if (AppServices.prefs.recognitionDiagnosticsEnabled) {
+                        recognition.getOrNull()?.let { result ->
+                            AppServices.recognitionDiagnostics.record(
+                                capturedFrame = bitmap,
+                                result = result,
+                                captureContext = CaptureDiagnosticsContext(
+                                    screenWidth = size.first,
+                                    screenHeight = size.second,
+                                    captureLeft = region.left.toInt(),
+                                    captureTop = region.top.toInt(),
+                                    captureRight = region.right.toInt(),
+                                    captureBottom = region.bottom.toInt(),
+                                    classId = classId,
+                                    className = catalog.classes.firstOrNull { it.id == classId }?.name,
+                                ),
+                            )
+                        }
+                    } else null
                     Handler(Looper.getMainLooper()).post {
                         scanning = false
-                        recognition.onSuccess(::showCandidates).onFailure { error ->
+                        diagnostics?.exceptionOrNull()?.let { error ->
+                            Toast.makeText(this, "识别诊断保存失败：${error.message}", Toast.LENGTH_LONG).show()
+                        }
+                        recognition.onSuccess(::handleScanResult).onFailure { error ->
                             bitmap.recycle()
                             Toast.makeText(this, "扫描失败：${error.message}", Toast.LENGTH_LONG).show()
                         }
                     }
-                }.start()
-            }
-        }, 140L)
+                }
+                if (!accepted) {
+                    scanning = false
+                    bitmap.recycle()
+                    balls?.visibility = android.view.View.VISIBLE
+                    if (guideVisible) guideView?.visibility = android.view.View.VISIBLE
+                    Toast.makeText(this, "识别线程已停止", Toast.LENGTH_LONG).show()
+                }
     }
 
     private fun showDebugCandidates() {
@@ -258,12 +335,31 @@ class OverlayService : Service() {
             paint.color = Color.LTGRAY; paint.textSize = 20f
             drawText("已跳过屏幕捕获与识别算法", preview.width / 2f, preview.height / 2f + 34f, paint)
         }
-        showCandidates(RecognitionResult(preview, high + references + remaining))
+        handleScanResult(RecognitionResult(preview, high + references + remaining))
+    }
+
+    private fun handleScanResult(result: RecognitionResult) {
+        if (!AppServices.prefs.backgroundScanEnabled) {
+            showCandidates(result)
+            return
+        }
+        clearPendingCandidates()
+        candidateResult = result
+        balls?.candidatesAvailable = true
+        Toast.makeText(this, "扫描完成，已得出候选结果；点击 👁 查看", Toast.LENGTH_LONG).show()
+    }
+
+    private fun showPendingCandidates(): Boolean {
+        val result = candidateResult ?: return false
+        if (candidateView != null) return true
+        showCandidates(result)
+        return true
     }
 
     private fun showCandidates(result: RecognitionResult) {
-        closeCandidates(recycleCapture = true)
+        if (candidateResult !== result) closeCandidates(recycleCapture = true)
         candidateResult = result
+        balls?.candidatesAvailable = false
         val size = screenSize()
         candidateWindow.x = 0; candidateWindow.y = 0; candidateWindow.width = size.first; candidateWindow.height = size.second
         candidateView = CandidateSelectionView(this, result, AppServices.repository).apply {
@@ -271,14 +367,26 @@ class OverlayService : Service() {
                 override fun onSelected(candidate: com.idvb.android.recognize.RecognitionCandidate) {
                     AppServices.prefs.lastMapId = candidate.map.id
                     AppServices.prefs.lastFloorKey = candidate.floorKey
+                    val identitySource = if (candidate.disposition == CandidateDisposition.RELIABLE) {
+                        MapIdentitySource.STRUCTURE_VERIFIED
+                    } else {
+                        MapIdentitySource.MANUAL_UNVERIFIED
+                    }
+                    AppServices.prefs.lastMapIdentitySource = identitySource
                     currentMap = candidate.map
                     val floors = candidate.map.floors.sortedBy { it.sortOrder }
                     floorIndex = floors.indexOfFirst { it.key == candidate.floorKey }.let { if (it < 0) 0 else it }
                     balls?.mapLocked = true
+                    balls?.identityVerified = identitySource == MapIdentitySource.STRUCTURE_VERIFIED
                     balls?.floorLabel = floors.getOrNull(floorIndex)?.displayName ?: candidate.floorKey
                     if (guideVisible) loadGuideFloor()
                     closeCandidates(recycleCapture = true)
-                    Toast.makeText(this@OverlayService, "已锁定地图：${candidate.map.title}", Toast.LENGTH_SHORT).show()
+                    val message = if (identitySource == MapIdentitySource.STRUCTURE_VERIFIED) {
+                        "结构已确认并锁定：${candidate.map.title}"
+                    } else {
+                        "已人工选择：${candidate.map.title}（结构未确认）"
+                    }
+                    Toast.makeText(this@OverlayService, message, Toast.LENGTH_SHORT).show()
                 }
                 override fun onCancelled() = closeCandidates(recycleCapture = true)
             }
@@ -290,9 +398,15 @@ class OverlayService : Service() {
         candidateWindow.remove(); candidateView = null
         if (recycleCapture) candidateResult?.capturedRegion?.let { if (!it.isRecycled) it.recycle() }
         candidateResult = null
+        balls?.candidatesAvailable = false
+    }
+
+    private fun clearPendingCandidates() {
+        if (candidateView == null && candidateResult != null) closeCandidates(recycleCapture = true)
     }
 
     private fun toggleGuide() {
+        if (showPendingCandidates()) return
         if (currentMap == null) return
         if (guideVisible) {
             guideView?.visibility = android.view.View.INVISIBLE
@@ -331,7 +445,22 @@ class OverlayService : Service() {
         val file = AppServices.repository.floorImageFile(map.id, floor.imagePath)
         val maxDimension = maxOf(screenSize().first, screenSize().second) * 2
         val selected = AppServices.repository.loadPreviewRegion(map.id, floor)
-        val next = decodeMapRegion(file, selected, maxDimension) ?: return
+        var next = decodeMapRegion(file, selected, maxDimension) ?: return
+        if (AppServices.prefs.removeGuideBackground) {
+            val classMarkedForRemoval = AppServices.repository.loadCatalog().classes
+                .firstOrNull { it.id == map.classId }
+                ?.removeBackground == true
+            val processed = MapBackgroundRemover.remove(
+                bitmap = next,
+                classMarkedForRemoval = classMarkedForRemoval,
+                layers = AppServices.repository.loadBackgroundLayers(map.id, floor.key),
+                sourceWidth = floor.imageWidth,
+                sourceHeight = floor.imageHeight,
+                region = selected,
+            )
+            if (processed !== next && !next.isRecycled) next.recycle()
+            next = processed
+        }
         val previous = guideBitmap
         guideBitmap = next
         guideView?.showBitmap(next, AppServices.prefs.opacity)
@@ -339,10 +468,21 @@ class OverlayService : Service() {
     }
 
     private fun applyGuideBounds(region: RectF) {
-        guideWindow.x = region.left.toInt()
-        guideWindow.y = region.top.toInt()
-        guideWindow.width = region.width().toInt().coerceAtLeast(1)
-        guideWindow.height = region.height().toInt().coerceAtLeast(1)
+        val target = if (AppServices.prefs.constrainGuideToScreen) {
+            val screen = screenSize()
+            val width = region.width().coerceAtMost(screen.first.toFloat()).coerceAtLeast(1f)
+            val height = region.height().coerceAtMost(screen.second.toFloat()).coerceAtLeast(1f)
+            RectF(
+                region.left.coerceIn(0f, screen.first - width),
+                region.top.coerceIn(0f, screen.second - height),
+                region.left.coerceIn(0f, screen.first - width) + width,
+                region.top.coerceIn(0f, screen.second - height) + height,
+            )
+        } else region
+        guideWindow.x = target.left.toInt()
+        guideWindow.y = target.top.toInt()
+        guideWindow.width = target.width().toInt().coerceAtLeast(1)
+        guideWindow.height = target.height().toInt().coerceAtLeast(1)
     }
 
     private fun enterFreeAdjustMode() {
@@ -467,6 +607,9 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
+        getSystemService(DisplayManager::class.java).unregisterDisplayListener(displayListener)
+        accessibilityCaptureExecutor.shutdownNow()
+        recognitionExecutor.close()
         closeCandidates(recycleCapture = true)
         captureSession?.close(); captureSession = null
         guideWindow.remove(); guideView = null
@@ -478,6 +621,11 @@ class OverlayService : Service() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        refreshWindowsForDisplayChange()
+    }
+
+    /** 固定竖屏 Activity 在后台时配置回调并不可靠，显示器旋转事件也走同一刷新链路。 */
+    private fun refreshWindowsForDisplayChange() {
         if (balls == null) return
         val screen = screenSize()
         if (blueprintView != null) {
@@ -522,7 +670,9 @@ class OverlayService : Service() {
         val notification = buildNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             val type = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
-                if (ScreenCaptureGrant.available) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0
+                if (AppServices.prefs.screenCaptureMethod == ScreenCaptureMethod.MEDIA_PROJECTION && ScreenCaptureGrant.available) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                } else 0
             startForeground(NOTIFICATION_ID, notification, type)
         } else startForeground(NOTIFICATION_ID, notification)
     }

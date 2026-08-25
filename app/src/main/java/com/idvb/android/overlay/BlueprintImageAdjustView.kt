@@ -52,6 +52,11 @@ class BlueprintImageAdjustView(
     private var pinchFocusY = 0f
     private var pinching = false
 
+    // Lock the gesture to the view that received ACTION_DOWN. In particular, a
+    // small slide on a button must never fall through to image movement.
+    private enum class TouchTarget { NONE, IMAGE, RESET, CONFIRM }
+    private var touchTarget = TouchTarget.NONE
+
     private val confirmRect get() = RectF(width - dp(104f), dp(18f), width - dp(18f), dp(64f))
     private val resetRect get() = RectF(width - dp(198f), dp(18f), width - dp(112f), dp(64f))
 
@@ -86,13 +91,20 @@ class BlueprintImageAdjustView(
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 requestFocus()
-                if (resetRect.contains(event.x, event.y) || confirmRect.contains(event.x, event.y)) return true
-                gestureStartRegion = RectF(imageRegion)
-                startX = event.x
-                startY = event.y
+                touchTarget = when {
+                    confirmRect.contains(event.x, event.y) -> TouchTarget.CONFIRM
+                    resetRect.contains(event.x, event.y) -> TouchTarget.RESET
+                    fittedBitmapRect(imageRegion).contains(event.x, event.y) -> {
+                        gestureStartRegion = RectF(imageRegion)
+                        startX = event.x
+                        startY = event.y
+                        TouchTarget.IMAGE
+                    }
+                    else -> TouchTarget.NONE
+                }
                 pinching = false
             }
-            MotionEvent.ACTION_POINTER_DOWN -> if (event.pointerCount >= 2) {
+            MotionEvent.ACTION_POINTER_DOWN -> if (touchTarget == TouchTarget.IMAGE && event.pointerCount >= 2) {
                 gestureStartRegion = RectF(imageRegion)
                 pinchDistance = pointerDistance(event).coerceAtLeast(1f)
                 pinchFocusX = (event.getX(0) + event.getX(1)) / 2f
@@ -100,7 +112,10 @@ class BlueprintImageAdjustView(
                 pinching = true
             }
             MotionEvent.ACTION_MOVE -> {
-                if (pinching && event.pointerCount >= 2) {
+                if (touchTarget != TouchTarget.IMAGE) {
+                    // Buttons keep ownership of the whole gesture, even when
+                    // the finger drifts a few pixels before it is released.
+                } else if (pinching && event.pointerCount >= 2) {
                     val scale = (pointerDistance(event) / pinchDistance).coerceIn(.2f, 5f)
                     val focusX = (event.getX(0) + event.getX(1)) / 2f
                     val focusY = (event.getY(0) + event.getY(1)) / 2f
@@ -121,23 +136,35 @@ class BlueprintImageAdjustView(
                 }
             }
             MotionEvent.ACTION_POINTER_UP -> {
-                // 双指缩放结束后，把当前矩形和仍按住的手指设为新的拖动基准。
-                // 否则下一次 ACTION_MOVE 会继续使用缩放前的基准，造成尺寸瞬间还原。
-                gestureStartRegion = RectF(imageRegion)
-                val remainingIndex = if (event.actionIndex == 0) 1 else 0
-                startX = event.getX(remainingIndex)
-                startY = event.getY(remainingIndex)
-                pinching = false
-            }
-            MotionEvent.ACTION_UP -> when {
-                resetRect.contains(event.x, event.y) -> {
-                    imageRegion.set(resetRegion)
-                    opacity = com.idvb.android.data.OverlayPrefs.DEFAULT_OPACITY
-                    invalidate()
+                if (touchTarget == TouchTarget.IMAGE) {
+                    // 双指缩放结束后，把当前矩形和仍按住的手指设为新的拖动基准。
+                    // 否则下一次 ACTION_MOVE 会继续使用缩放前的基准，造成尺寸瞬间还原。
+                    gestureStartRegion = RectF(imageRegion)
+                    val remainingIndex = if (event.actionIndex == 0) 1 else 0
+                    startX = event.getX(remainingIndex)
+                    startY = event.getY(remainingIndex)
+                    pinching = false
                 }
-                confirmRect.contains(event.x, event.y) -> listener?.onConfirmed(RectF(imageRegion), opacity)
             }
-            MotionEvent.ACTION_CANCEL -> pinching = false
+            MotionEvent.ACTION_UP -> {
+                when (touchTarget) {
+                    TouchTarget.RESET -> if (resetRect.contains(event.x, event.y)) {
+                        imageRegion.set(resetRegion)
+                        opacity = com.idvb.android.data.OverlayPrefs.DEFAULT_OPACITY
+                        invalidate()
+                    }
+                    TouchTarget.CONFIRM -> if (confirmRect.contains(event.x, event.y)) {
+                        listener?.onConfirmed(RectF(imageRegion), opacity)
+                    }
+                    else -> Unit
+                }
+                pinching = false
+                touchTarget = TouchTarget.NONE
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                pinching = false
+                touchTarget = TouchTarget.NONE
+            }
         }
         return true
     }

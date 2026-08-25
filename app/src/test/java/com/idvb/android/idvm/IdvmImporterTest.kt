@@ -100,6 +100,57 @@ class IdvmImporterTest {
     }
 
     @Test
+    fun `导入 Desktop 权威识别图和侧门特征`() {
+        val pkg = TestIdvmPackage.build(
+            formatMinor = 2,
+            floors = listOf(
+                FloorImage(
+                    key = "1f",
+                    displayName = "1F",
+                    sortOrder = 1,
+                    bytes = TestIdvmPackage.PNG_1X1,
+                    recognitionImageBytes = TestIdvmPackage.PNG_1X1,
+                    sideEntranceFeatureBytes = TestIdvmPackage.PNG_1X1,
+                    sideEntranceFeatureCenterX = 0.5,
+                    sideEntranceFeatureCenterY = 0.5,
+                    sideEntranceFeatureRadius = 1,
+                )
+            ),
+        )
+        val outcome = doImport(pkg)
+        val floor = requireSuccess(outcome.result).importedMaps.single().floors.single()
+
+        assertEquals(1, floor.recognitionWidth)
+        assertEquals(1, floor.recognitionHeight)
+        assertEquals(NormalizedRect(0.0, 0.0, 1.0, 1.0), floor.validMapBounds)
+        assertTrue(File(outcome.mapsRoot, requireNotNull(floor.recognitionImagePath)).isFile)
+        val feature = requireNotNull(floor.sideEntranceFeature)
+        assertEquals(0.5, feature.centerX, 0.0)
+        assertEquals(0.5, feature.centerY, 0.0)
+        assertEquals(1, feature.radius)
+        assertEquals(1, feature.imageWidth)
+        assertEquals(1, feature.imageHeight)
+        assertTrue(File(outcome.mapsRoot, feature.imagePath).isFile)
+    }
+
+    @Test
+    fun `metadata 引用未声明识别资产时拒绝导入`() {
+        val pkg = TestIdvmPackage.build(
+            formatMinor = 2,
+            mutateMetadata = { metadata ->
+                metadata.copy(floors = metadata.floors.map { floor ->
+                    floor.copy(
+                        recognitionImage = "maps/61ac15d778e94454a659aeeed373e902/data/missing-recognition.png"
+                    )
+                })
+            },
+        )
+
+        val reason = requireFailure(doImport(pkg).result)
+        assertTrue(reason.contains("未在 IDVM 文件清单中声明"))
+    }
+
+    @Test
     fun `重复导入生成新副本且 Class 名冲突时用原名-新添加N`() {
         val pkg = TestIdvmPackage.build(className = "S1")
         val first = doImport(pkg)

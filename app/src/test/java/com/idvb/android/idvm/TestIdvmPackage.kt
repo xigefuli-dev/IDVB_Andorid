@@ -13,6 +13,11 @@ data class FloorImage(
     val sortOrder: Int,
     val bytes: ByteArray,
     val orientationDegrees: Int = 0,
+    val recognitionImageBytes: ByteArray? = null,
+    val sideEntranceFeatureBytes: ByteArray? = null,
+    val sideEntranceFeatureCenterX: Double = 0.5,
+    val sideEntranceFeatureCenterY: Double = 0.5,
+    val sideEntranceFeatureRadius: Int = 1,
 )
 
 data class BuiltPackage(
@@ -46,6 +51,12 @@ object TestIdvmPackage {
     ): BuiltPackage {
         val root = "maps/${mapId.replace("-", "")}" 
         val imagePaths = floors.map { "$root/maps/floor-${it.sortOrder.toString().padStart(3, '0')}.png" }
+        val recognitionImagePaths = floors.map { floor ->
+            floor.recognitionImageBytes?.let { "$root/data/floor-${floor.sortOrder.toString().padStart(3, '0')}-recognition.png" }
+        }
+        val featurePaths = floors.map { floor ->
+            floor.sideEntranceFeatureBytes?.let { "$root/data/floor-${floor.sortOrder.toString().padStart(3, '0')}-side-entrance-feature.png" }
+        }
         val dims = floors.map { ImageProbe.dimensions(it.bytes) ?: (0 to 0) }
 
         val metadata = MetadataDocument(
@@ -61,6 +72,15 @@ object TestIdvmPackage {
                     orientationDegrees = f.orientationDegrees,
                     recognitionRegion = NormalizedRect(0.02, 0.02, 0.96, 0.96),
                     validMapBounds = NormalizedRect(0.0, 0.0, 1.0, 1.0),
+                    recognitionImage = recognitionImagePaths[i],
+                    sideEntranceFeature = featurePaths[i]?.let { path ->
+                        SideEntranceFeatureMetadata(
+                            file = path,
+                            centerX = f.sideEntranceFeatureCenterX,
+                            centerY = f.sideEntranceFeatureCenterY,
+                            radius = f.sideEntranceFeatureRadius,
+                        )
+                    },
                 )
             },
         ).let(mutateMetadata)
@@ -78,7 +98,15 @@ object TestIdvmPackage {
             "$root/data/gates.json" to json.encodeToString(GatesDocument.serializer(), gates).encodeToByteArray(),
             "$root/data/anchors.json" to json.encodeToString(AnchorsDocument.serializer(), anchors).encodeToByteArray(),
         )
-        val payload: Map<String, ByteArray> = dataFiles + floors.zip(imagePaths).associate { (f, p) -> p to f.bytes }
+        val recognitionPayload = buildMap {
+            floors.forEachIndexed { index, floor ->
+                recognitionImagePaths[index]?.let { path -> put(path, floor.recognitionImageBytes!!) }
+                featurePaths[index]?.let { path -> put(path, floor.sideEntranceFeatureBytes!!) }
+            }
+        }
+        val payload: Map<String, ByteArray> = dataFiles +
+            floors.zip(imagePaths).associate { (f, p) -> p to f.bytes } +
+            recognitionPayload
 
         val manifest = IdvmManifest(
             format = "idvm",

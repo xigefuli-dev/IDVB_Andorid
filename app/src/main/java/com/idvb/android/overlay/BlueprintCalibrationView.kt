@@ -40,8 +40,9 @@ class BlueprintCalibrationView(context: Context) : View(context) {
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), mask)
-        text.textSize = dp(18f); canvas.drawText("蓝图模式 · 框选地图显示区域", width / 2f, dp(42f), text)
-        text.textSize = dp(13f); canvas.drawText("触摸不会传递到其他应用", width / 2f, dp(66f), text)
+        val headerCenterX = width * 0.25f
+        text.textSize = dp(18f); canvas.drawText("蓝图模式 · 框选地图显示区域", headerCenterX, dp(42f), text)
+        text.textSize = dp(13f); canvas.drawText("触摸不会传递到其他应用", headerCenterX, dp(66f), text)
         selection?.let {
             // 框内减弱滤镜，方便精确对齐底层游戏画面。
             canvas.save()

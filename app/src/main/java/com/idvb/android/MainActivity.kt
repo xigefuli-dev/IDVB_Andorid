@@ -44,6 +44,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -69,6 +70,8 @@ import com.idvb.android.ui.screens.HomeScreen
 import com.idvb.android.ui.screens.maplist.MapListScreen
 import com.idvb.android.ui.screens.SettingsScreen
 import com.idvb.android.ui.screens.GeneralSettingsScreen
+import com.idvb.android.ui.screens.VisionSettingsScreen
+import com.idvb.android.data.ScreenCaptureMethod
 import com.idvb.android.ui.screens.TemplateManagerScreen
 import com.idvb.android.ui.screens.TemplatePickerScreen
 import com.idvb.android.ui.screens.MapImagesScreen
@@ -105,17 +108,26 @@ class MainActivity : ComponentActivity() {
                 var creationImages by remember { mutableStateOf<Map<String, Uri>>(emptyMap()) }
                 var creationSideDoors by remember { mutableStateOf(emptyList<com.idvb.android.idvm.NormalizedRect>()) }
                 val permissions = rememberPermissionController()
+                LaunchedEffect(page, tab) {
+                    if (page == "main" && tab == 0) permissions.refresh()
+                }
                 Scaffold(
                     containerColor = MaterialTheme.colorScheme.background,
                     // 始终保留同一块布局空间，避免页面切换时高度变化造成“斜向”动画。
                     bottomBar = { MainBottomBar(tab = tab, visible = page == "main", onSelect = { selected -> navigatingForward = selected > tab; tab = selected }) },
                     floatingActionButton = {
                         if (page == "main" && (tab == 0 || tab == 1)) ServiceStatusFab(
-                            ready = permissions.snapshot.allGranted,
+                            ready = permissions.snapshot.allGranted || permissions.snapshot.onlyScreenCaptureMissing,
                             onClick = {
                                 if (permissions.snapshot.allGranted) {
                                     OverlayService.start(this@MainActivity)
                                     moveTaskToBack(true)
+                                } else if (permissions.snapshot.onlyScreenCaptureMissing &&
+                                    permissions.snapshot.captureMethod == ScreenCaptureMethod.MEDIA_PROJECTION) {
+                                    permissions.requestScreenCapture {
+                                        OverlayService.start(this@MainActivity)
+                                        moveTaskToBack(true)
+                                    }
                                 } else permissions.requestNextMissing()
                             },
                         )
@@ -138,6 +150,7 @@ class MainActivity : ComponentActivity() {
                             when (currentPage) {
                                 "templates" -> TemplateManagerScreen { navigatingForward = false; page = "main" }
                                 "general-settings" -> GeneralSettingsScreen { navigatingForward = false; page = "main" }
+                                "vision-settings" -> VisionSettingsScreen { navigatingForward = false; page = "main" }
                                 "template-picker" -> TemplatePickerScreen(onBack = { navigatingForward = false; page = "main" }) {
                                     creationMapId = null
                                     creationSideDoors = emptyList()
@@ -231,13 +244,16 @@ class MainActivity : ComponentActivity() {
                                             creationImages = floors.associate { floor ->
                                                 floor.key to Uri.fromFile(AppServices.repository.floorImageFile(map.id, floor.imagePath))
                                             }
-                                            creationSideDoors = AppServices.repository.loadSideDoors(map.id)
+                                            creationSideDoors = floors.firstOrNull()?.let { floor ->
+                                                AppServices.repository.loadSideDoorsForEditing(map.id, floor)
+                                            }.orEmpty()
                                             navigatingForward = true
                                             page = "map-images"
                                         },
                                     )
                                     else -> SettingsScreen(
                                         onOpenGeneral = { navigatingForward = true; page = "general-settings" },
+                                        onOpenVision = { navigatingForward = true; page = "vision-settings" },
                                         onOpenTemplates = { navigatingForward = true; page = "templates" },
                                     )
                                 }

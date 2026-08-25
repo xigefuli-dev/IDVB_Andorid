@@ -66,6 +66,16 @@
             </intent-filter>
         </activity>
 
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.diagnostics.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/diagnostics_file_paths" />
+        </provider>
+
         <!-- 悬浮窗前台服务：specialUse，targetSdk 34+ 必须声明类型与子类型 -->
         <service
             android:name=".overlay.OverlayService"
@@ -75,6 +85,19 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="overlay" />
+        </service>
+
+        <service
+            android:name=".recognize.AccessibilityScreenCaptureService"
+            android:exported="true"
+            android:label="IDVB 屏幕识别"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
         </service>
 
         <!-- 开机自启恢复悬浮窗 -->
