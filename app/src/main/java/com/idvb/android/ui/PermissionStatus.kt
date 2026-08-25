@@ -23,6 +23,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.idvb.android.keepalive.BatteryOptimization
+import com.idvb.android.recognize.ScreenCaptureGrant
 
 data class PermissionSnapshot(
     val overlay: Boolean,
@@ -46,7 +47,7 @@ data class PermissionController(
 fun rememberPermissionController(): PermissionController {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    var screenCaptureGranted by remember { mutableStateOf(false) }
+    var screenCaptureGranted by remember { mutableStateOf(ScreenCaptureGrant.available) }
     var refreshTick by remember { mutableStateOf(0) }
 
     val notificationLauncher = rememberLauncherForActivityResult(
@@ -56,6 +57,7 @@ fun rememberPermissionController(): PermissionController {
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
         screenCaptureGranted = result.resultCode == Activity.RESULT_OK && result.data != null
+        ScreenCaptureGrant.update(result.resultCode, result.data)
         refreshTick++
     }
 

@@ -201,6 +201,30 @@ class MapRepository(context: Context) {
             .mapNotNull { it.bounds }
     }.getOrDefault(emptyList())
 
+    /** 读取指定楼层的侧门，避免多楼层地图误用其他楼层的第一个门。 */
+    fun loadSideDoors(mapId: String, floorKey: String): List<NormalizedRect> = runCatching {
+        val file = File(mapsRoot, "$mapId/data/gates.json")
+        if (!file.isFile) return emptyList()
+        json.decodeFromString<GatesDocument>(file.readText()).gates
+            .filter {
+                it.role == "sideEntrance" && it.enabled &&
+                    it.floorKey.equals(floorKey, ignoreCase = true)
+            }
+            .mapNotNull { it.bounds }
+    }.getOrDefault(emptyList())
+
+    /** Restores the selected Desktop display region for catalogs imported by older app builds. */
+    fun loadPreviewRegion(mapId: String, floor: FloorRecord): NormalizedRect? {
+        floor.previewRegion?.let { return it }
+        return runCatching {
+            val file = File(mapsRoot, "$mapId/data/metadata.json")
+            if (!file.isFile) return null
+            json.decodeFromString<MetadataDocument>(file.readText()).floors
+                .firstOrNull { it.key.equals(floor.key, ignoreCase = true) }
+                ?.recognitionRegion
+        }.getOrNull()
+    }
+
     private fun openImageInputStream(uri: Uri, resolver: ContentResolver): java.io.InputStream =
         if (uri.scheme == "file") {
             File(requireNotNull(uri.path) { "图片路径为空" }).inputStream()

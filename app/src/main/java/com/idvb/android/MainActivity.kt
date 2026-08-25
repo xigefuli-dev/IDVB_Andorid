@@ -1,6 +1,7 @@
 package com.idvb.android
 
 import android.os.Bundle
+import android.os.Build
 import android.content.Intent
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -67,6 +68,7 @@ import androidx.compose.animation.togetherWith
 import com.idvb.android.ui.screens.HomeScreen
 import com.idvb.android.ui.screens.maplist.MapListScreen
 import com.idvb.android.ui.screens.SettingsScreen
+import com.idvb.android.ui.screens.GeneralSettingsScreen
 import com.idvb.android.ui.screens.TemplateManagerScreen
 import com.idvb.android.ui.screens.TemplatePickerScreen
 import com.idvb.android.ui.screens.MapImagesScreen
@@ -135,6 +137,7 @@ class MainActivity : ComponentActivity() {
                         ) { (currentPage, currentTab) ->
                             when (currentPage) {
                                 "templates" -> TemplateManagerScreen { navigatingForward = false; page = "main" }
+                                "general-settings" -> GeneralSettingsScreen { navigatingForward = false; page = "main" }
                                 "template-picker" -> TemplatePickerScreen(onBack = { navigatingForward = false; page = "main" }) {
                                     creationMapId = null
                                     creationSideDoors = emptyList()
@@ -148,9 +151,29 @@ class MainActivity : ComponentActivity() {
                                         template = template,
                                         defaultTitle = creationTitle,
                                         initialImages = creationImages,
+                                        existingMapId = creationMapId,
                                         onBack = {
                                             navigatingForward = false
                                             page = if (creationMapId == null) "template-picker" else "main"
+                                        },
+                                        onDelete = {
+                                            creationMapId?.let { mapId ->
+                                                AppServices.repository.loadCatalog().maps
+                                                    .firstOrNull { it.id == mapId }
+                                                    ?.let(AppServices.repository::deleteMap)
+                                                if (AppServices.prefs.lastMapId == mapId) {
+                                                    AppServices.prefs.lastMapId = null
+                                                    AppServices.prefs.lastFloorKey = null
+                                                }
+                                            }
+                                            catalogTick++
+                                            tab = 1
+                                            creationMapId = null
+                                            creationTemplate = null
+                                            creationImages = emptyMap()
+                                            creationSideDoors = emptyList()
+                                            navigatingForward = false
+                                            page = "main"
                                         },
                                         onNext = { title, images ->
                                             creationTitle = title
@@ -213,7 +236,10 @@ class MainActivity : ComponentActivity() {
                                             page = "map-images"
                                         },
                                     )
-                                    else -> SettingsScreen { navigatingForward = true; page = "templates" }
+                                    else -> SettingsScreen(
+                                        onOpenGeneral = { navigatingForward = true; page = "general-settings" },
+                                        onOpenTemplates = { navigatingForward = true; page = "templates" },
+                                    )
                                 }
                             }
                         }
@@ -231,21 +257,53 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleFileIntent(intent: Intent?) {
-        if (intent?.action != Intent.ACTION_VIEW) return
-        val uri = intent.data ?: return
+        val source = intent ?: return
+        val uris = when (source.action) {
+            Intent.ACTION_VIEW -> listOfNotNull(source.data)
+            Intent.ACTION_SEND -> listOfNotNull(source.sharedStreamUri(), source.clipData?.firstUri()).distinct()
+            Intent.ACTION_SEND_MULTIPLE -> (source.sharedStreamUris() + source.clipData.allUris()).distinct()
+            else -> emptyList()
+        }
+        if (uris.isEmpty()) return
         intent.action = null // configuration changes must not import the same package twice
         lifecycleScope.launch {
-            val (result, _) = withContext(Dispatchers.IO) { importIdvmUri(this@MainActivity, uri) }
-            val message = when (result) {
-                is ImportResult.Success -> {
-                    catalogTick++
-                    "地图导入成功"
-                }
-                is ImportResult.Failure -> "导入失败：${result.reason}"
+            val results = withContext(Dispatchers.IO) {
+                uris.map { uri -> importIdvmUri(this@MainActivity, uri).first }
+            }
+            val successCount = results.count { it is ImportResult.Success }
+            if (successCount > 0) catalogTick += successCount
+            val failures = results.filterIsInstance<ImportResult.Failure>()
+            val message = when {
+                failures.isEmpty() && successCount == 1 -> "地图导入成功"
+                failures.isEmpty() -> "已导入 $successCount 个地图包"
+                successCount > 0 -> "已导入 $successCount 个，${failures.size} 个失败：${failures.first().reason}"
+                else -> "导入失败：${failures.first().reason}"
             }
             Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
         }
     }
+}
+
+private fun Intent.sharedStreamUri(): Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+    getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+} else {
+    @Suppress("DEPRECATION")
+    getParcelableExtra(Intent.EXTRA_STREAM)
+}
+
+private fun Intent.sharedStreamUris(): List<Uri> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+    getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
+} else {
+    @Suppress("DEPRECATION")
+    getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM).orEmpty()
+}
+
+private fun android.content.ClipData?.firstUri(): Uri? =
+    this?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
+
+private fun android.content.ClipData?.allUris(): List<Uri> = buildList {
+    val data = this@allUris ?: return@buildList
+    for (index in 0 until data.itemCount) data.getItemAt(index).uri?.let(::add)
 }
 
 @Composable

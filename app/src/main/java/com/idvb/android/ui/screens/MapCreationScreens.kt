@@ -4,6 +4,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -12,6 +13,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -149,25 +151,37 @@ fun MapImagesScreen(
     template: MapTemplate,
     defaultTitle: String,
     initialImages: Map<String, Uri> = emptyMap(),
+    existingMapId: String? = null,
     onBack: () -> Unit,
+    onDelete: () -> Unit = {},
     onNext: (String, Map<String, Uri>) -> Unit,
 ) {
     var title by remember(template.id, defaultTitle) { mutableStateOf(defaultTitle) }
     var selected by remember(template.id, defaultTitle) { mutableStateOf(initialImages) }
     var pickingFloor by remember { mutableStateOf<String?>(null) }
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    var confirmDelete by remember { mutableStateOf(false) }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         val key = pickingFloor
         if (uri != null && key != null) selected = selected + (key to uri)
         pickingFloor = null
     }
-    ScreenHeader("创建地图", onBack)
+    ScreenHeader(if (existingMapId == null) "创建地图" else "编辑地图", onBack) {
+        if (existingMapId != null) {
+            IconButton(onClick = { confirmDelete = true }) {
+                Icon(Icons.Outlined.Delete, "删除地图", tint = MaterialTheme.colorScheme.error)
+            }
+        }
+    }
     Column(Modifier.fillMaxSize().padding(top = 76.dp, start = 20.dp, end = 20.dp, bottom = 16.dp)) {
         OutlinedTextField(title, { title = it }, Modifier.fillMaxWidth(), label = { Text("地图名称") }, singleLine = true)
         Spacer(Modifier.height(16.dp))
         template.floors.chunked(2).forEach { row ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 row.forEach { floor ->
-                    FloorImageSlot(floor, selected[floor.id], Modifier.weight(1f)) { pickingFloor = floor.id; picker.launch(arrayOf("image/*")) }
+                    FloorImageSlot(floor, selected[floor.id], Modifier.weight(1f)) {
+                        pickingFloor = floor.id
+                        picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                    }
                 }
                 if (row.size == 1) Spacer(Modifier.weight(1f))
             }
@@ -176,6 +190,17 @@ fun MapImagesScreen(
         Spacer(Modifier.weight(1f))
         Button(onClick = { onNext(title.trim(), selected) }, enabled = title.isNotBlank() && selected.size == template.floors.size, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("下一步：标记门") }
     }
+    if (confirmDelete) AlertDialog(
+        onDismissRequest = { confirmDelete = false },
+        title = { Text("删除地图？") },
+        text = { Text("将删除“${title.ifBlank { defaultTitle }}”及其全部本地图片，此操作无法撤销。") },
+        confirmButton = {
+            TextButton(onClick = { confirmDelete = false; onDelete() }) {
+                Text("确认删除", color = MaterialTheme.colorScheme.error)
+            }
+        },
+        dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("取消") } },
+    )
 }
 
 @Composable
@@ -237,8 +262,13 @@ fun GateMarkerScreen(
                     if (pressed.size >= 2) {
                         isPainting = false
                         currentStroke = emptyList()
-                        gestureZoom = (gestureZoom * event.calculateZoom()).coerceIn(1f, 6f)
-                        gesturePan += event.calculatePan()
+                        val panChange = event.calculatePan()
+                        val centroid = event.calculateCentroid(useCurrent = true)
+                        val nextZoom = (gestureZoom * event.calculateZoom()).coerceIn(1f, 6f)
+                        val appliedZoom = nextZoom / gestureZoom
+                        // Keep the map point below the fingers stationary while scaling, then apply finger movement.
+                        gesturePan = centroid - (centroid - panChange - gesturePan) * appliedZoom
+                        gestureZoom = nextZoom
                         zoom = gestureZoom
                         pan = gesturePan
                     } else if (isPainting && pressed.size == 1) {
@@ -271,7 +301,12 @@ fun GateMarkerScreen(
         }
         Row(Modifier.padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("缩放", style = MaterialTheme.typography.labelLarge)
-            Slider(value = zoom, onValueChange = { zoom = it }, valueRange = 1f..6f, modifier = Modifier.weight(1f).padding(start = 12.dp))
+            Slider(value = zoom, onValueChange = { nextZoom ->
+                val focus = Offset(canvasSize.width / 2f, canvasSize.height / 2f)
+                val appliedZoom = nextZoom / zoom
+                pan = focus - (focus - pan) * appliedZoom
+                zoom = nextZoom
+            }, valueRange = 1f..6f, modifier = Modifier.weight(1f).padding(start = 12.dp))
             Text(String.format("%.1f×", zoom), style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(42.dp))
         }
         Row(Modifier.padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { OutlinedButton(onClick = { marks = emptyList() }, enabled = marks.isNotEmpty()) { Text("清除") }; Button(onClick = {

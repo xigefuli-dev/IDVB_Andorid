@@ -26,6 +26,11 @@ class OverlayPrefs(context: Context) {
         get() = prefs.getString("last_floor_key", null)
         set(value) = prefs.edit().putString("last_floor_key", value).apply()
 
+    /** 地图列表当前展示的关卡模式，也是扫描算法唯一允许使用的模式。 */
+    var selectedMapClassId: String?
+        get() = prefs.getString("selected_map_class_id", null)
+        set(value) = prefs.edit().putString("selected_map_class_id", value).apply()
+
     var opacity: Float
         get() = prefs.getFloat("opacity", DEFAULT_OPACITY)
         set(value) = prefs.edit().putFloat("opacity", value.coerceIn(0.1f, 1f)).apply()
@@ -38,6 +43,11 @@ class OverlayPrefs(context: Context) {
     var autoStartOnBoot: Boolean
         get() = prefs.getBoolean("auto_start_on_boot", false)
         set(value) = prefs.edit().putBoolean("auto_start_on_boot", value).apply()
+
+    /** 开发用候选界面模拟开关。 */
+    var debugMode: Boolean
+        get() = prefs.getBoolean("debug_mode", false)
+        set(value) = prefs.edit().putBoolean("debug_mode", value).apply()
 
     /** 按当前方向保存蓝图校准区域，值为 0..1 的屏幕比例。 */
     fun setCaptureRegion(landscape: Boolean, left: Float, top: Float, right: Float, bottom: Float) {
@@ -57,6 +67,36 @@ class OverlayPrefs(context: Context) {
         val right = prefs.getFloat("${prefix}_right", Float.NaN)
         val bottom = prefs.getFloat("${prefix}_bottom", Float.NaN)
         return if (listOf(left, top, right, bottom).any { it.isNaN() }) null else floatArrayOf(left, top, right, bottom)
+    }
+
+    /** 自由调整后的攻略图显示矩形；允许轻微越过屏幕边缘。 */
+    fun setGuideRegion(landscape: Boolean, left: Float, top: Float, right: Float, bottom: Float) {
+        val prefix = if (landscape) "guide_landscape" else "guide_portrait"
+        prefs.edit()
+            .putFloat("${prefix}_left", left.coerceIn(-2f, 3f))
+            .putFloat("${prefix}_top", top.coerceIn(-2f, 3f))
+            .putFloat("${prefix}_right", right.coerceIn(-2f, 3f))
+            .putFloat("${prefix}_bottom", bottom.coerceIn(-2f, 3f))
+            .apply()
+    }
+
+    fun guideRegion(landscape: Boolean): FloatArray? {
+        val prefix = if (landscape) "guide_landscape" else "guide_portrait"
+        val left = prefs.getFloat("${prefix}_left", Float.NaN)
+        val top = prefs.getFloat("${prefix}_top", Float.NaN)
+        val right = prefs.getFloat("${prefix}_right", Float.NaN)
+        val bottom = prefs.getFloat("${prefix}_bottom", Float.NaN)
+        return if (listOf(left, top, right, bottom).any { it.isNaN() } || right <= left || bottom <= top) {
+            null
+        } else floatArrayOf(left, top, right, bottom)
+    }
+
+    fun clearGuideRegion(landscape: Boolean) {
+        val prefix = if (landscape) "guide_landscape" else "guide_portrait"
+        prefs.edit()
+            .remove("${prefix}_left").remove("${prefix}_top")
+            .remove("${prefix}_right").remove("${prefix}_bottom")
+            .apply()
     }
 
     // ---- 位置/尺寸：按屏幕比例保存 ----

@@ -1,3 +1,8 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <style name="Theme.IDVBForAndroid" parent="android:Theme.Material.NoActionBar" />
+    <style name="Theme.IDVBForAndroid" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@drawable/splash_screen</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:statusBarColor">#171C22</item>
+        <item name="android:navigationBarColor">#171C22</item>
+    </style>
 </resources>

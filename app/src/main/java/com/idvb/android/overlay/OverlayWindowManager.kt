@@ -31,10 +31,10 @@ class OverlayWindowManager(private val context: Context) {
 
     fun isAdded(): Boolean = view != null
 
-    private fun buildParams(locked: Boolean): WindowManager.LayoutParams {
-        var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+    private fun buildParams(locked: Boolean, focusable: Boolean): WindowManager.LayoutParams {
+        var flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+        if (!focusable) flags = flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
         if (locked) {
             // 锁定态整窗点击穿透，对应 WS_EX_TRANSPARENT
             flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
@@ -51,10 +51,10 @@ class OverlayWindowManager(private val context: Context) {
         }
     }
 
-    fun add(v: View, locked: Boolean) {
+    fun add(v: View, locked: Boolean, focusable: Boolean = false) {
         remove()
         view = v
-        runCatching { wm.addView(v, buildParams(locked)) }
+        runCatching { wm.addView(v, buildParams(locked, focusable)) }
     }
 
     /** 应用当前 x/y/宽高；locked 传值则同步切换点击穿透标志 */

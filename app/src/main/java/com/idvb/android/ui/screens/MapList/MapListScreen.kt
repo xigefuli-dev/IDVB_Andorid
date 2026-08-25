@@ -52,7 +52,7 @@ fun MapListScreen(
 ) {
     val context = LocalContext.current
     var catalog by remember { mutableStateOf<MapCatalogDocument?>(null) }
-    var classId by remember { mutableStateOf<String?>(null) }
+    var classId by remember { mutableStateOf(AppServices.prefs.selectedMapClassId) }
     var deleteMode by remember { mutableStateOf(false) }
     var classMenuOpen by remember { mutableStateOf(false) }
     var moreMenuOpen by remember { mutableStateOf(false) }
@@ -81,6 +81,7 @@ fun MapListScreen(
     LaunchedEffect(catalog) {
         val doc = catalog ?: return@LaunchedEffect
         if (classId !in doc.classes.map { it.id }) classId = doc.classes.firstOrNull()?.id
+        AppServices.prefs.selectedMapClassId = classId
     }
     val doc = catalog
     val currentClass = doc?.classes?.firstOrNull { it.id == classId }
@@ -105,7 +106,11 @@ fun MapListScreen(
                     ExposedDropdownMenu(classMenuOpen, { classMenuOpen = false }) {
                         doc?.classes?.forEach { mode -> DropdownMenuItem(
                             text = { Text(mode.name, style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 24.sp)) },
-                            onClick = { classId = mode.id; classMenuOpen = false },
+                            onClick = {
+                                classId = mode.id
+                                AppServices.prefs.selectedMapClassId = mode.id
+                                classMenuOpen = false
+                            },
                         ) }
                     }
                 }
@@ -202,6 +207,7 @@ fun MapListScreen(
                         AppServices.repository.saveCatalog(updated)
                         catalog = updated
                         classId = created.id
+                        AppServices.prefs.selectedMapClassId = created.id
                         newClassDialog = false
                     },
                 ) { Text("创建") }

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.IDVBForAndroid" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowSplashScreenBackground">#171C22</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">#171C22</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:statusBarColor">#171C22</item>
+        <item name="android:navigationBarColor">#171C22</item>
+    </style>
+</resources>

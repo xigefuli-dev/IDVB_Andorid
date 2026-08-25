@@ -14,7 +14,7 @@ import android.widget.TextView
 /** 独立的小球控制窗；不依赖已废弃的整块地图悬浮层。 */
 class OverlayBallView(context: Context) : LinearLayout(context) {
     interface Listener {
-        fun onSearch(); fun onToggleGuide(); fun onNextFloor(); fun onCalibrate(); fun onClose()
+        fun onSearch(); fun onToggleGuide(); fun onNextFloor(); fun onFreeAdjust(); fun onCalibrate(); fun onClose()
         fun onMove(dx: Float, dy: Float)
         fun onMenuExpanded(expanded: Boolean)
     }
@@ -49,8 +49,9 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
         addView(row)
         morePanel = LinearLayout(context).apply {
             orientation = VERTICAL; gravity = Gravity.END; visibility = View.GONE; setPadding(0, dp(6), 0, 0)
-            addView(menuItem("校准显示区域") { listener?.onCalibrate() })
-            addView(menuItem("关闭悬浮窗") { listener?.onClose() })
+            addView(menuItem("✥", "自由调整") { listener?.onFreeAdjust() })
+            addView(menuItem("▣", "校准显示区域") { listener?.onCalibrate() })
+            addView(menuItem("⏻", "关闭悬浮窗") { listener?.onClose() })
         }
         addView(morePanel); mapLocked = false
     }
@@ -93,12 +94,18 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
         layoutParams = LayoutParams(dp(48), dp(48)).apply { marginStart = dp(4) }; elevation = dp(6).toFloat()
     }
 
-    private fun menuItem(label: String, click: () -> Unit) = TextView(context).apply {
-        text = label; gravity = Gravity.CENTER; textSize = 14f; setTextColor(Color.WHITE); setPadding(dp(18), dp(11), dp(18), dp(11))
+    private fun menuItem(icon: String, label: String, click: () -> Unit) = TextView(context).apply {
+        text = "$icon   $label"; contentDescription = label
+        gravity = Gravity.CENTER_VERTICAL; textSize = 14f; setTextColor(Color.WHITE)
+        setPadding(dp(18), dp(11), dp(18), dp(11)); minWidth = dp(184)
         background = GradientDrawable().apply {
             cornerRadius = dp(12).toFloat(); setColor(Color.argb(242, 31, 35, 38)); setStroke(dp(1), Color.argb(160, 112, 226, 157))
         }
-        isClickable = true; setOnClickListener { click() }
+        isClickable = true; setOnClickListener {
+            morePanel.visibility = View.GONE
+            listener?.onMenuExpanded(false)
+            click()
+        }
     }
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 }

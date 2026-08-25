@@ -68,7 +68,10 @@ private val featureEntries = listOf(
 )
 
 @Composable
-fun SettingsScreen(onOpenTemplates: () -> Unit = {}) {
+fun SettingsScreen(
+    onOpenGeneral: () -> Unit = {},
+    onOpenTemplates: () -> Unit = {},
+) {
     val context = LocalContext.current
     Column(
         modifier = Modifier
@@ -117,8 +120,11 @@ fun SettingsScreen(onOpenTemplates: () -> Unit = {}) {
         }
         Spacer(Modifier.height(22.dp))
         SettingSection("功能设置", featureEntries) {
-            if (it.title == "模板") onOpenTemplates()
-            else Toast.makeText(context, it.title + "设置：暂未实现", Toast.LENGTH_SHORT).show()
+            when (it.title) {
+                "通用" -> onOpenGeneral()
+                "模板" -> onOpenTemplates()
+                else -> Toast.makeText(context, it.title + "设置：暂未实现", Toast.LENGTH_SHORT).show()
+            }
         }
         Spacer(Modifier.height(28.dp))
     }
