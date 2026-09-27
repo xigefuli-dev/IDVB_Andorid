@@ -65,8 +65,13 @@ class OverlayPrefs(context: Context) {
 
     /** 扫描完成后暂存候选结果，等待用户点击悬浮窗的眼睛按钮再显示。 */
     var backgroundScanEnabled: Boolean
-        get() = prefs.getBoolean("background_scan_enabled", false)
+        get() = prefs.getBoolean("background_scan_enabled", true)
         set(value) = prefs.edit().putBoolean("background_scan_enabled", value).apply()
+
+    /** 放大镜直接打开按 IDVM 标签筛选的地图目录，不执行屏幕捕获。 */
+    var manualMapSelectionEnabled: Boolean
+        get() = prefs.getBoolean("manual_map_selection_enabled", false)
+        set(value) = prefs.edit().putBoolean("manual_map_selection_enabled", value).apply()
 
     /** 保存真实扫描输入与候选证据，供 Desktop/Android 差分验证。 */
     var recognitionDiagnosticsEnabled: Boolean

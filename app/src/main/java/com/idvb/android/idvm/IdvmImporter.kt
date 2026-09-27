@@ -32,14 +32,171 @@ class IdvmImporter(private val json: Json = IdvmJson.instance) {
         catalogSaver: (MapCatalogDocument) -> Unit,
     ): ImportResult {
         return try {
+            if (!packageFile.exists()) {
+                return ImportResult.Failure("找不到地图包文件：${packageFile.path}")
+            }
+            if (packageFile.isDirectory) {
+                return importDirectory(packageFile, mapsRoot, currentCatalog, catalogSaver)
+            }
+            val bundleResult = tryImportBundleOrWrappedPackage(packageFile, mapsRoot, currentCatalog, catalogSaver)
+            if (bundleResult != null) {
+                return bundleResult
+            }
+
             val (result, journal) = importInternal(packageFile, mapsRoot, currentCatalog)
             catalogSaver(result.catalog)
             journal.delete()
             ImportResult.Success(result.importedClasses, result.importedMaps, result.catalog)
         } catch (e: IllegalArgumentException) {
             ImportResult.Failure(e.message ?: "导入失败", e.cause?.message)
+        } catch (e: java.util.zip.ZipException) {
+            ImportResult.Failure("所选文件不是有效的 IDVM 地图包（非 ZIP 格式）", e.message)
         } catch (e: Exception) {
             ImportResult.Failure("导入失败：${e.message}", e.stackTraceToString().take(2000))
+        }
+    }
+
+    /** 批量导入多个包（或目录中的全部包），更新目录清单并汇总导入记录。 */
+    fun importPackages(
+        packageFiles: List<File>,
+        mapsRoot: File,
+        currentCatalog: MapCatalogDocument,
+        catalogSaver: (MapCatalogDocument) -> Unit,
+    ): ImportResult {
+        if (packageFiles.isEmpty()) return ImportResult.Failure("没有提供地图包文件")
+        val allImportedClasses = mutableListOf<ClassRecord>()
+        val allImportedMaps = mutableListOf<MapRecord>()
+        var runningCatalog = currentCatalog
+        val failures = mutableListOf<String>()
+
+        for (file in packageFiles) {
+            when (val res = importPackage(file, mapsRoot, runningCatalog, { runningCatalog = it })) {
+                is ImportResult.Success -> {
+                    allImportedClasses += res.importedClasses
+                    allImportedMaps += res.importedMaps
+                    runningCatalog = res.catalog
+                }
+                is ImportResult.Failure -> {
+                    failures += "${file.name}: ${res.reason}"
+                }
+            }
+        }
+
+        if (allImportedMaps.isNotEmpty() || failures.isEmpty()) {
+            catalogSaver(runningCatalog)
+            return ImportResult.Success(allImportedClasses, allImportedMaps, runningCatalog)
+        }
+        return ImportResult.Failure("全部地图包导入失败：${failures.joinToString("；")}")
+    }
+
+    private fun importDirectory(
+        directory: File,
+        mapsRoot: File,
+        currentCatalog: MapCatalogDocument,
+        catalogSaver: (MapCatalogDocument) -> Unit,
+    ): ImportResult {
+        val headerFile = File(directory, "header")
+        val manifestFile = File(directory, "manifest.json")
+        if (headerFile.isFile && manifestFile.isFile) {
+            val tempZip = File(mapsRoot, ".dir-import-${UUID.randomUUID()}.idvm")
+            try {
+                java.util.zip.ZipOutputStream(tempZip.outputStream().buffered()).use { outStream ->
+                    directory.walkTopDown().filter { it.isFile }.forEach { file ->
+                        val rel = file.relativeTo(directory).path.replace('\\', '/')
+                        outStream.putNextEntry(ZipEntry(rel))
+                        file.inputStream().buffered().use { it.copyTo(outStream) }
+                        outStream.closeEntry()
+                    }
+                }
+                val (result, journal) = importInternal(tempZip, mapsRoot, currentCatalog)
+                catalogSaver(result.catalog)
+                journal.delete()
+                return ImportResult.Success(result.importedClasses, result.importedMaps, result.catalog)
+            } finally {
+                tempZip.delete()
+            }
+        }
+
+        val idvmFiles = directory.walkTopDown()
+            .filter { it.isFile && it.extension.equals("idvm", ignoreCase = true) }
+            .toList()
+        if (idvmFiles.isNotEmpty()) {
+            return importPackages(idvmFiles, mapsRoot, currentCatalog, catalogSaver)
+        }
+
+        return ImportResult.Failure("所选目录不是有效的 IDVM 地图包，且未在其中找到任何 .idvm 文件：${directory.name}")
+    }
+
+    private fun tryImportBundleOrWrappedPackage(
+        packageFile: File,
+        mapsRoot: File,
+        currentCatalog: MapCatalogDocument,
+        catalogSaver: (MapCatalogDocument) -> Unit,
+    ): ImportResult? {
+        val zip = try {
+            ZipFile(packageFile)
+        } catch (_: Exception) {
+            return null
+        }
+
+        zip.use { zf ->
+            if (zf.getEntry("header") != null) {
+                return null
+            }
+
+            // 1. 压缩包容器内含有 *.idvm（例如全包 ZIP 或目录压缩包）
+            val idvmEntries = zf.entries().asSequence()
+                .filter { !it.isDirectory && it.name.endsWith(".idvm", ignoreCase = true) }
+                .toList()
+            if (idvmEntries.isNotEmpty()) {
+                val bundleDir = File(mapsRoot, ".bundle-${UUID.randomUUID()}").apply { mkdirs() }
+                try {
+                    val extractedFiles = mutableListOf<File>()
+                    for (entry in idvmEntries) {
+                        val safeName = entry.name.substringAfterLast('/').substringAfterLast('\\')
+                        val tempFile = File(bundleDir, "${UUID.randomUUID()}-$safeName")
+                        zf.getInputStream(entry).use { inStream ->
+                            tempFile.outputStream().use { outStream -> inStream.copyTo(outStream) }
+                        }
+                        extractedFiles += tempFile
+                    }
+                    return importPackages(extractedFiles, mapsRoot, currentCatalog, catalogSaver)
+                } finally {
+                    bundleDir.deleteRecursively()
+                }
+            }
+
+            // 2. 单一子目录包裹模式（如 some_folder/header 与 some_folder/manifest.json）
+            val headerEntry = zf.entries().asSequence().firstOrNull {
+                !it.isDirectory && (it.name.endsWith("/header") || it.name.endsWith("\\header"))
+            }
+            if (headerEntry != null) {
+                val prefix = headerEntry.name.substringBeforeLast("header")
+                if (prefix.isNotEmpty() && zf.getEntry("${prefix}manifest.json") != null) {
+                    val unwrapZip = File(mapsRoot, ".unwrap-${UUID.randomUUID()}.idvm")
+                    try {
+                        java.util.zip.ZipOutputStream(unwrapZip.outputStream().buffered()).use { outStream ->
+                            for (entry in zf.entries()) {
+                                if (entry.isDirectory || !entry.name.startsWith(prefix)) continue
+                                val logicalName = entry.name.removePrefix(prefix).replace('\\', '/')
+                                outStream.putNextEntry(ZipEntry(logicalName))
+                                zf.getInputStream(entry).use { it.copyTo(outStream) }
+                                outStream.closeEntry()
+                            }
+                        }
+                        val (result, journal) = importInternal(unwrapZip, mapsRoot, currentCatalog)
+                        catalogSaver(result.catalog)
+                        journal.delete()
+                        return ImportResult.Success(result.importedClasses, result.importedMaps, result.catalog)
+                    } finally {
+                        unwrapZip.delete()
+                    }
+                }
+            }
+
+            throw IllegalArgumentException(
+                "包内缺少 header 条目。若为包含多个地图包的压缩包，请确保其内部包含 .idvm 文件；或直接解压后导入其中的 .idvm 地图包。"
+            )
         }
     }
 
@@ -138,7 +295,8 @@ class IdvmImporter(private val json: Json = IdvmJson.instance) {
             val localId = UUID.randomUUID().toString()
             val localName = resolveClassName(c.name, taken)
             classIdMap[c.classId] = localId
-            newClasses += ClassRecord(id = localId, name = localName, removeBackground = c.properties.removeBackground)
+            newClasses += ClassRecord(id = localId, name = localName,
+                removeBackground = c.properties.removeBackground, scanFloorKey = c.properties.scanFloorKey)
         }
 
         // 7) 逐地图解压到 staging，校验图片尺寸与摘要
@@ -155,12 +313,10 @@ class IdvmImporter(private val json: Json = IdvmJson.instance) {
             val floorRecords = doc.manifestMap.floors.sortedBy { it.sortOrder }.map { mf ->
                 val metaFloor = doc.metadata.floors.first { it.key == mf.key }
                 val src = inventory[mf.image] ?: error("缺少楼层图条目：${mf.image}")
-                verifyEntry(zip, src, mf.image, manifest)
-                val bytes = IdvmUtil.readBounded(zip.getInputStream(src), IdvmLimits.MAX_SINGLE_FILE_BYTES)
-                verifyImageDimensions(mf.image, bytes, doc, mf)
                 val relative = mf.image.removePrefix("${doc.manifestMap.root}/")
                 val localImage = File(localDir, relative).apply { parentFile?.mkdirs() }
-                FileOutputStream(localImage).use { it.write(bytes) }
+                copyVerifiedEntry(zip, src, mf.image, manifest, localImage)
+                verifyImageDimensions(mf.image, localImage, doc, mf)
                 val recognitionAsset = metaFloor.recognitionImage?.let { logicalPath ->
                     inspectImageAsset(
                         zip = zip,
@@ -196,6 +352,38 @@ class IdvmImporter(private val json: Json = IdvmJson.instance) {
                         imageHeight = asset.height,
                     )
                 }
+                val prebuiltStructureLine = metaFloor.prebuiltStructureLine?.let { line ->
+                    val asset = inspectImageAsset(
+                        zip = zip,
+                        inventory = inventory,
+                        manifest = manifest,
+                        root = doc.manifestMap.root,
+                        localMapId = localMapId,
+                        logicalPath = line.file,
+                        what = "楼层 ${mf.key} 预制线图",
+                    )
+                    val lineEntry = manifest.files.first { it.path == line.file }
+                    val algorithmEntry = manifest.files.firstOrNull { it.path == line.algorithmFile }
+                        ?: error("楼层 ${mf.key} 预制线图算法未在文件清单中声明")
+                    require(asset.width == line.width && asset.height == line.height &&
+                        asset.width == recognitionSize.first && asset.height == recognitionSize.second &&
+                        lineEntry.size == line.fileLength &&
+                        lineEntry.sha256.equals(line.sha256, ignoreCase = true) &&
+                        algorithmEntry.sha256.equals(line.algorithmSha256, ignoreCase = true)) {
+                        "楼层 ${mf.key} 预制线图与识别图尺寸或文件登记不一致"
+                    }
+                    val algorithmZipEntry = inventory[line.algorithmFile]
+                        ?: error("楼层 ${mf.key} 预制线图算法文件缺失")
+                    verifyEntry(zip, algorithmZipEntry, line.algorithmFile, manifest)
+                    PrebuiltStructureLineRecord(
+                        imagePath = asset.localPath,
+                        sha256 = line.sha256,
+                        width = line.width,
+                        height = line.height,
+                        fileLength = line.fileLength,
+                        algorithmId = line.algorithmId,
+                    )
+                }
                 FloorRecord(
                     key = mf.key,
                     displayName = mf.displayName,
@@ -205,11 +393,13 @@ class IdvmImporter(private val json: Json = IdvmJson.instance) {
                     imageHeight = metaFloor.imageHeight,
                     orientationDegrees = metaFloor.orientationDegrees,
                     previewRegion = metaFloor.recognitionRegion,
+                    freeCropPoints = metaFloor.freeCropPoints,
                     recognitionImagePath = recognitionAsset?.localPath,
                     recognitionWidth = recognitionSize.first,
                     recognitionHeight = recognitionSize.second,
                     validMapBounds = metaFloor.validMapBounds,
                     sideEntranceFeature = sideEntranceFeature,
+                    prebuiltStructureLine = prebuiltStructureLine,
                 )
             }
 
@@ -218,11 +408,9 @@ class IdvmImporter(private val json: Json = IdvmJson.instance) {
                 val path = declared.path
                 if (doc.manifestMap.floors.any { it.image == path }) continue
                 val src = inventory[path] ?: error("缺少清单文件：$path")
-                verifyEntry(zip, src, path, manifest)
-                val bytes = IdvmUtil.readBounded(zip.getInputStream(src), IdvmLimits.MAX_SINGLE_FILE_BYTES)
                 val relative = path.removePrefix("${doc.manifestMap.root}/")
                 val target = File(localDir, relative).apply { parentFile?.mkdirs() }
-                FileOutputStream(target).use { it.write(bytes) }
+                copyVerifiedEntry(zip, src, path, manifest, target)
             }
 
             // 8) 提交：staging → 最终目录
@@ -309,15 +497,38 @@ class IdvmImporter(private val json: Json = IdvmJson.instance) {
         val declared = manifest.files.firstOrNull { it.path == path }
             ?: error("清单未声明文件：$path")
         require(entry.size == declared.size) { "文件 '$path' 大小与清单声明不一致" }
-        val actual = hashOf(zip.getInputStream(entry))
+        val actual = zip.getInputStream(entry).use(::hashOf)
         require(actual == declared.sha256) { "文件 '$path' 的 SHA-256 与清单声明不一致" }
     }
 
+    private fun copyVerifiedEntry(zip: ZipFile, entry: ZipEntry, path: String, manifest: IdvmManifest, target: File) {
+        val declared = manifest.files.firstOrNull { it.path == path } ?: error("清单未声明文件：$path")
+        require(entry.size == declared.size && entry.size in 0..IdvmLimits.MAX_SINGLE_FILE_BYTES) {
+            "文件 '$path' 大小与清单声明不一致"
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+        var total = 0L
+        zip.getInputStream(entry).use { input -> target.outputStream().use { output ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                total += count
+                require(total <= declared.size) { "文件 '$path' 超过清单声明大小" }
+                digest.update(buffer, 0, count)
+                output.write(buffer, 0, count)
+            }
+        } }
+        require(total == declared.size && IdvmUtil.sha256Hex(digest.digest()) == declared.sha256) {
+            "文件 '$path' 的 SHA-256 与清单声明不一致"
+        }
+    }
+
     /** 校验图片能解码且尺寸与 metadata 声明一致 */
-    private fun verifyImageDimensions(path: String, bytes: ByteArray, doc: MapDoc, mf: ManifestFloor) {
+    private fun verifyImageDimensions(path: String, file: File, doc: MapDoc, mf: ManifestFloor) {
         val metaFloor = doc.metadata.floors.firstOrNull { it.key == mf.key }
             ?: error("metadata 缺少楼层 ${mf.key}")
-        val dim = ImageProbe.dimensions(bytes)
+        val dim = file.inputStream().use(ImageProbe::dimensions)
             ?: error("楼层图 '$path' 无法识别为 PNG/JPEG")
         require(dim.first == metaFloor.imageWidth && dim.second == metaFloor.imageHeight) {
             "楼层图 '$path' 尺寸 ${dim.first}x${dim.second} 与 metadata 声明 ${metaFloor.imageWidth}x${metaFloor.imageHeight} 不一致"
@@ -335,8 +546,8 @@ class IdvmImporter(private val json: Json = IdvmJson.instance) {
     ): ImportedImageAsset {
         val entry = inventory[logicalPath] ?: error("$what 未在 IDVM 文件清单中声明：$logicalPath")
         verifyEntry(zip, entry, logicalPath, manifest)
-        val bytes = IdvmUtil.readBounded(zip.getInputStream(entry), IdvmLimits.MAX_SINGLE_FILE_BYTES)
-        val dimensions = ImageProbe.dimensions(bytes) ?: error("$what 无法识别为 PNG/JPEG：$logicalPath")
+        val dimensions = zip.getInputStream(entry).use(ImageProbe::dimensions)
+            ?: error("$what 无法识别为 PNG/JPEG：$logicalPath")
         val prefix = "${root.trimEnd('/')}/"
         require(logicalPath.startsWith(prefix)) { "$what 不属于当前地图目录" }
         return ImportedImageAsset(

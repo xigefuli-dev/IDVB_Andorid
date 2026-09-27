@@ -8,6 +8,7 @@ import com.idvb.android.idvm.FloorRecord
 import com.idvb.android.idvm.MapRecord
 import com.idvb.android.recognize.cv.CvImages
 import com.idvb.android.recognize.gate.GateSearchContext
+import com.idvb.android.recognize.gate.GateDetectionResult
 import com.idvb.android.recognize.gate.GateSearchMode
 import com.idvb.android.recognize.gate.GateTemplateDetector
 import com.idvb.android.recognize.gate.GateTemplateRules
@@ -60,13 +61,20 @@ class SideEntranceRecognizer(
         viewportBounds: ScreenRect,
         clientWidth: Int,
         clientHeight: Int,
+        progress: ((Double) -> Unit)? = null,
+        detectedGates: GateDetectionResult? = null,
     ): RecognitionResult {
+        val startedNanos = System.nanoTime()
+        progress?.invoke(0.0)
         val catalog = repository.loadCatalog()
         val modeMaps = catalog.maps.filter { classId == null || it.classId == classId }
         val profile = SideEntranceScanProfiles.resolve(clientWidth, clientHeight)
-        val inputs = buildInputs(modeMaps, profile)
+        val scanFloorByClass = catalog.classes.associate { it.id to it.scanFloorKey }
+        val inputs = buildInputs(modeMaps, profile, scanFloorByClass)
+        val inputsAt = System.nanoTime()
+        progress?.invoke(.10)
         val eligibleMapCount = modeMaps.count { map ->
-            map.floors.minByOrNull { it.sortOrder }?.let {
+            scanFloor(map, scanFloorByClass[map.classId])?.let {
                 repository.loadSideDoors(map.id, it.key).isNotEmpty()
             } == true
         }
@@ -74,7 +82,7 @@ class SideEntranceRecognizer(
             val grayFrame = CvImages.bitmapToGray(frame)
             try {
                 GateTemplateDetector.fromAssets(appContext).use { gateDetector ->
-                    val gateResult = gateDetector.detect(
+                    val gateResult = detectedGates ?: gateDetector.detect(
                         liveMatchImage = grayFrame,
                         viewportBounds = viewportBounds,
                         clientWidth = clientWidth.toDouble(),
@@ -89,6 +97,8 @@ class SideEntranceRecognizer(
                             ),
                         ),
                     )
+                    progress?.invoke(.30)
+                    val gatesAt = System.nanoTime()
                     if (gateResult.gates.isEmpty()) {
                         return buildResult(
                             frame,
@@ -111,7 +121,10 @@ class SideEntranceRecognizer(
                         detectedGates = gateResult.gates,
                         viewportBounds = viewportBounds,
                         topK = max(5, inputs.size),
+                        progress = { value -> progress?.invoke(.30 + .55 * value) },
                     )
+                    progress?.invoke(.85)
+                    val templatesAt = System.nanoTime()
                     val scan = SideEntranceScanResult(
                         gateDetection = gateResult,
                         candidates = candidates,
@@ -132,6 +145,11 @@ class SideEntranceRecognizer(
                         gateResult.gates.mapNotNull { gate -> gate.screenBounds.toLocalRect(viewportBounds, frame) },
                         profile,
                     )
+                    progress?.invoke(.98)
+                    android.util.Log.i("IDVB-Scan", "side prepareMs=${(inputsAt - startedNanos) / 1e6}" +
+                        " gatesMs=${(gatesAt - inputsAt) / 1e6}" +
+                        " templatesMs=${(templatesAt - gatesAt) / 1e6}" +
+                        " structureMs=${(System.nanoTime() - templatesAt) / 1e6}")
                     return buildResult(frame, modeMaps, scan, profile, structure, viewportBounds)
                 }
             } finally {
@@ -145,9 +163,10 @@ class SideEntranceRecognizer(
     private fun buildInputs(
         maps: List<MapRecord>,
         profile: SideEntranceScanConfig,
+        scanFloorByClass: Map<String, String?>,
     ): List<SideEntranceScanInput> = buildList {
         maps.forEach { map ->
-            val floor = map.floors.minByOrNull { it.sortOrder } ?: return@forEach
+            val floor = scanFloor(map, scanFloorByClass[map.classId]) ?: return@forEach
             val assets = repository.loadRecognitionAssets(map.id, floor)
             val gate = repository.loadSideDoors(map.id, floor.key).firstOrNull() ?: return@forEach
             val stored = assets.sideEntranceFeature
@@ -204,6 +223,10 @@ class SideEntranceRecognizer(
             }
         }
     }
+
+    private fun scanFloor(map: MapRecord, key: String?): FloorRecord? =
+        if (key == null) map.floors.minByOrNull(FloorRecord::sortOrder)
+        else map.floors.firstOrNull { it.key == key }
 
     private fun loadRecognitionGray(
         map: MapRecord,

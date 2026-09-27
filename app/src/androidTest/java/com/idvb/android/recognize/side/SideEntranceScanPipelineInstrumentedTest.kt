@@ -69,6 +69,12 @@ class SideEntranceScanPipelineInstrumentedTest {
             assertTrue(results.first().matchLocation.x in 250.0..270.0)
             assertTrue(results.first().matchLocation.y in 160.0..180.0)
             assertTrue(results.first().matchScale in .90..1.10)
+            // Identical gate branches reuse raw refinement evidence, while classification
+            // must keep independent candidate objects and the original gate tie ordering.
+            val repeated = SideEntranceScanPipeline(config).runScan(
+                frame, inputs, listOf(unrelatedGate, gate, gate), viewport, topK = 2,
+            )
+            assertEquals(results, repeated)
         } finally {
             correct.release()
             wrong.release()

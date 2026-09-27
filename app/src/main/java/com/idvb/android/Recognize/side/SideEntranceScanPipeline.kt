@@ -10,6 +10,7 @@ import org.opencv.core.Scalar
 import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
 import java.util.concurrent.Callable
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.ceil
@@ -38,6 +39,9 @@ class SideEntranceScanPipeline(
         if (inputs.isEmpty()) return emptyList()
 
         val maskedFrame = capturedGrayFrame.clone()
+        // Scan-local, managed results only. All branches observe the same masked pixels.
+        val refinements = ConcurrentHashMap<RefinementKey, SideEntranceScanCandidate>()
+        val reused = AtomicInteger()
         try {
             maskDetectedGates(maskedFrame, detectedGates, viewportBounds)
             val totalBranches = max(1, detectedGates.size + 1)
@@ -51,6 +55,8 @@ class SideEntranceScanPipeline(
                     inputs.size,
                     gate,
                     viewportBounds,
+                    refinements,
+                    reused,
                 ) { value -> progress?.invoke((gateIndex + value) / totalBranches) }
                 branch.forEach { candidate ->
                     candidate.associatedGate = gate
@@ -80,6 +86,8 @@ class SideEntranceScanPipeline(
                     rescueInputs.size,
                     detectedGate = null,
                     viewportBounds = viewportBounds,
+                    refinements = refinements,
+                    reused = reused,
                 ) { value -> progress?.invoke((detectedGates.size + value) / totalBranches) }
                 rescued.forEach { candidate ->
                     candidate.associatedGate = null
@@ -105,6 +113,7 @@ class SideEntranceScanPipeline(
             return collapsed.filter { it.disposition != SideEntranceCandidateDisposition.REJECTED }
                 .take(max(1, topK))
         } finally {
+            android.util.Log.i("IDVB-Scan", "side reusedRefinements=${reused.get()}")
             maskedFrame.release()
         }
     }
@@ -115,6 +124,8 @@ class SideEntranceScanPipeline(
         topK: Int,
         detectedGate: GateDetection?,
         viewportBounds: ScreenRect,
+        refinements: ConcurrentHashMap<RefinementKey, SideEntranceScanCandidate>,
+        reused: AtomicInteger,
         progress: ((Double) -> Unit)? = null,
     ): List<SideEntranceScanCandidate> {
         val valid = inputs.filter { !it.featureTemplate.empty() && it.featureTemplate.channels() == 1 }
@@ -133,6 +144,7 @@ class SideEntranceScanPipeline(
                 Imgproc.INTER_AREA,
             )
 
+            val coarseAt = System.nanoTime()
             val coarseCompleted = AtomicInteger()
             val coarse = parallelMap(valid, config.scanParallelism) { input ->
                 val peak = findCoarsePeak(coarseFrame, input.featureTemplate, factor)
@@ -142,13 +154,17 @@ class SideEntranceScanPipeline(
                 .filter { it.peak.score >= config.coarseScorePruneThreshold }
                 .sortedByDescending { it.peak.score }
 
+            val refineAt = System.nanoTime()
             val refinedCompleted = AtomicInteger()
             val refined = parallelMap(coarse, config.scanParallelism) { item ->
-                val candidate = refine(constrained, item.input, item.peak, factor)
+                val candidate = refine(constrained, item.input, item.peak, factor, searchBounds, refinements, reused)
                 progress?.invoke(.7 + .3 * refinedCompleted.incrementAndGet() / max(1, coarse.size))
                 candidate
             }.filterNotNull().toMutableList()
 
+            android.util.Log.i("IDVB-Scan", "side branch=${if (detectedGate == null) "rescue" else "gate"}" +
+                " inputs=${valid.size} bounds=$searchBounds coarseMs=${(refineAt - coarseAt) / 1e6}" +
+                " refineMs=${(System.nanoTime() - refineAt) / 1e6} refined=${refined.size}")
             if (searchBounds.x != 0 || searchBounds.y != 0) {
                 refined.forEach { candidate ->
                     candidate.matchLocation = candidate.matchLocation.copy(
@@ -194,6 +210,10 @@ class SideEntranceScanPipeline(
 
     private data class CoarsePeak(val scale: Double, val x: Int, val y: Int, val score: Double)
     private data class CoarseResult(val input: SideEntranceScanInput, val peak: CoarsePeak)
+    private data class RefinementKey(
+        val input: SideEntranceScanInput, val scale: Double,
+        val x: Int, val y: Int, val width: Int, val height: Int,
+    )
 
     private fun findCoarsePeak(coarseFrame: Mat, template: Mat, factor: Int): CoarsePeak? {
         var scale = config.minimumScale
@@ -228,10 +248,21 @@ class SideEntranceScanPipeline(
         input: SideEntranceScanInput,
         peak: CoarsePeak,
         factor: Int,
+        searchBounds: Rect,
+        refinements: ConcurrentHashMap<RefinementKey, SideEntranceScanCandidate>,
+        reused: AtomicInteger,
     ): SideEntranceScanCandidate? {
         val refineStep = config.coarseScaleStep / 4.0
         val maximumScale = peak.scale * (1.0 + config.refineStepsPerSide * refineStep)
         val window = buildRefineWindow(grayFrame, input.featureTemplate, peak, maximumScale, factor) ?: return null
+        val key = RefinementKey(input, peak.scale, window.x + searchBounds.x,
+            window.y + searchBounds.y, window.width, window.height)
+        refinements[key]?.let { stored ->
+            reused.incrementAndGet()
+            // Candidates are mutable during gate classification. Never share those mutations.
+            return stored.copy(matchLocation = stored.matchLocation.copy(
+                x = stored.matchLocation.x - searchBounds.x, y = stored.matchLocation.y - searchBounds.y))
+        }
         val searchRegion = grayFrame.submat(window)
         try {
             val origin = Point(window.x.toDouble(), window.y.toDouble())
@@ -242,6 +273,10 @@ class SideEntranceScanPipeline(
                 if (scale < config.minimumScale || scale > config.maximumScale) continue
                 val candidate = evaluate(searchRegion, origin, input, scale)
                 if (candidate != null && (best == null || candidate.matchScore > best.matchScore)) best = candidate
+            }
+            best?.let { candidate ->
+                refinements[key] = candidate.copy(matchLocation = candidate.matchLocation.copy(
+                    x = candidate.matchLocation.x + searchBounds.x, y = candidate.matchLocation.y + searchBounds.y))
             }
             return best
         } finally {

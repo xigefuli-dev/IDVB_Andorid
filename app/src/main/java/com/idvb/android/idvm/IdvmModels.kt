@@ -38,6 +38,8 @@ data class ManifestClass(
 @Serializable
 data class ManifestClassProperties(
     @SerialName("removeBackground") val removeBackground: Boolean = false,
+    /** Desktop 为地图类别指定的扫描楼层。 */
+    @SerialName("scanFloorKey") val scanFloorKey: String? = null,
 )
 
 @Serializable
@@ -86,6 +88,7 @@ data class ManifestCapabilities(
     @SerialName("classBackgroundRemoval") val classBackgroundRemoval: Boolean = false,
     @SerialName("variantGroups") val variantGroups: Boolean = false,
     @SerialName("floorMarkerKeys") val floorMarkerKeys: Boolean = false,
+    @SerialName("mapTags") val mapTags: Boolean = false,
 )
 
 @Serializable
@@ -122,6 +125,22 @@ data class SideEntranceFeatureMetadata(
     @SerialName("radius") val radius: Int,
 )
 
+/** Desktop VPSG 预制线图及生成算法的完整性登记。 */
+@Serializable
+data class PrebuiltStructureLineMetadata(
+    @SerialName("file") val file: String,
+    @SerialName("sha256") val sha256: String,
+    @SerialName("sourceSha256") val sourceSha256: String,
+    @SerialName("width") val width: Int,
+    @SerialName("height") val height: Int,
+    @SerialName("fileLength") val fileLength: Long,
+    @SerialName("algorithmId") val algorithmId: String,
+    @SerialName("algorithmFile") val algorithmFile: String,
+    @SerialName("algorithmSha256") val algorithmSha256: String,
+    @SerialName("algorithmSchemaVersion") val algorithmSchemaVersion: String,
+    @SerialName("engineRevision") val engineRevision: Int = 0,
+)
+
 @Serializable
 data class MetadataFloor(
     @SerialName("key") val key: String,
@@ -132,12 +151,38 @@ data class MetadataFloor(
     @SerialName("imageHeight") val imageHeight: Int,
     @SerialName("orientationDegrees") val orientationDegrees: Int = 0,
     @SerialName("recognitionRegion") val recognitionRegion: NormalizedRect? = null,
+    /** Desktop 自由裁剪多边形，点坐标相对楼层原图。 */
+    @SerialName("freeCropPoints") val freeCropPoints: List<NormalizedPoint> = emptyList(),
     @SerialName("validMapBounds") val validMapBounds: NormalizedRect? = null,
     @SerialName("markerKeys") val markerKeys: List<String> = emptyList(),
     /** Desktop 为测绘地图导出的权威识别图；为空时使用 image + recognitionRegion。 */
     @SerialName("recognitionImage") val recognitionImage: String? = null,
     /** Desktop 已按当前算法生成并遮掉公共侧门图标的权威特征图。 */
     @SerialName("sideEntranceFeature") val sideEntranceFeature: SideEntranceFeatureMetadata? = null,
+    @SerialName("prebuiltStructureLine") val prebuiltStructureLine: PrebuiltStructureLineMetadata? = null,
+)
+
+/** Desktop 地图标签；Android 暂不使用。 */
+@Serializable
+data class MetadataTag(
+    @SerialName("groupId") val groupId: String,
+    @SerialName("groupName") val groupName: String,
+    @SerialName("value") val value: String,
+)
+
+/** Desktop 全图识别设置；Android 暂不使用。 */
+@Serializable
+data class RecognitionWholeImage(
+    @SerialName("enabled") val enabled: Boolean = false,
+    @SerialName("weight") val weight: Double = 0.15,
+    @SerialName("annotatedReferencePenalty") val annotatedReferencePenalty: Double = 0.55,
+    @SerialName("referenceMayContainAnnotations") val referenceMayContainAnnotations: Boolean = false,
+)
+
+@Serializable
+data class RecognitionSettings(
+    @SerialName("schemaVersion") val schemaVersion: Int = 1,
+    @SerialName("wholeImage") val wholeImage: RecognitionWholeImage = RecognitionWholeImage(),
 )
 
 @Serializable
@@ -145,6 +190,8 @@ data class MetadataDocument(
     @SerialName("schemaVersion") val schemaVersion: Int,
     @SerialName("map") val map: MetadataMap,
     @SerialName("floors") val floors: List<MetadataFloor>,
+    @SerialName("recognition") val recognition: RecognitionSettings = RecognitionSettings(),
+    @SerialName("tags") val tags: List<MetadataTag> = emptyList(),
 )
 
 // ---------- gates.json ----------

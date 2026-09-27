@@ -29,10 +29,13 @@ object IdvmValidator {
             "header 与 manifest 的 IDVM 版本不一致或读取器版本不受支持"
         }
         require(manifest.packageType == "class-set") { "仅支持 class-set 类型的 IDVM 包" }
-        require(manifest.formatVersion in setOf("1.0", "1.1", "1.2")) { "不支持的 IDVM 版本：${manifest.formatVersion}" }
+        require(manifest.formatVersion in setOf("1.0", "1.1", "1.2", "1.3")) { "不支持的 IDVM 版本：${manifest.formatVersion}" }
         require(manifest.formatVersion != "1.0" || manifest.variantGroups.isEmpty()) { "IDVM 1.0 包不能声明变体组合" }
         require(manifest.formatVersion != "1.1" || manifest.capabilities.variantGroups) { "IDVM 1.1 包必须声明 variantGroups 能力" }
         require(manifest.formatVersion != "1.2" || manifest.capabilities.floorMarkerKeys) { "IDVM 1.2 包必须声明 floorMarkerKeys 能力" }
+        require(manifest.formatVersion != "1.3" || (manifest.capabilities.floorMarkerKeys && manifest.capabilities.mapTags)) {
+            "IDVM 1.3 包必须声明 floorMarkerKeys 和 mapTags 能力"
+        }
 
         val manifestPackageId = manifest.packageId.lowercase()
         val headerPackageId = header.packageId.toString().lowercase()
@@ -126,8 +129,9 @@ object IdvmValidator {
         anchors: AnchorsDocument?,
     ) {
         if (manifestMap != null && metadata != null) {
-            require(metadata.schemaVersion in setOf(1, 2)) { "地图 $mapId：不支持 metadata schemaVersion ${metadata.schemaVersion}" }
-            require(manifestMap.floors.any() && (metadata.schemaVersion == 2 || manifestMap.floors.all { it.markerKeys.isEmpty() })) {
+            require(metadata.schemaVersion in setOf(1, 2, 3)) { "地图 $mapId：不支持 metadata schemaVersion ${metadata.schemaVersion}" }
+            require(metadata.schemaVersion != 3 || metadata.tags.size <= 256) { "地图 $mapId：地图标签数量超过限制" }
+            require(manifestMap.floors.any() && (metadata.schemaVersion >= 2 || manifestMap.floors.all { it.markerKeys.isEmpty() })) {
                 "地图 $mapId：旧 metadata schema 不允许楼层 markerKeys"
             }
             require(metadata.map.id == manifestMap.mapId) { "地图 $mapId：metadata.map.id 与 manifest 不一致" }
@@ -157,6 +161,12 @@ object IdvmValidator {
                 }
                 require(f.imageWidth > 0 && f.imageHeight > 0) { "地图 $mapId：楼层 ${f.key} 图片尺寸非法" }
                 f.recognitionRegion?.let { validateRect("地图 $mapId 楼层 ${f.key} recognitionRegion", it) }
+                require(f.freeCropPoints.size !in 1..2) { "地图 $mapId：freeCropPoints 必须为空或至少包含三个点" }
+                f.freeCropPoints.forEach { point ->
+                    require(point.x.isFinite() && point.y.isFinite() && point.x in 0.0..1.0 && point.y in 0.0..1.0) {
+                        "地图 $mapId：freeCropPoints 坐标必须在 0..1"
+                    }
+                }
                 f.validMapBounds?.let { validateRect("地图 $mapId 楼层 ${f.key} validMapBounds", it) }
                 f.recognitionImage?.let { path ->
                     validateRecognitionAssetPath(
@@ -180,6 +190,23 @@ object IdvmValidator {
                     }
                     require(feature.centerX >= 0.0 && feature.centerY >= 0.0 && feature.radius > 0) {
                         "地图 $mapId：楼层 ${f.key} 侧门特征坐标或半径非法"
+                    }
+                }
+                f.prebuiltStructureLine?.let { line ->
+                    validateRecognitionAssetPath(mapId, f.key, manifestMap?.root,
+                        "prebuiltStructureLine.file", line.file)
+                    require(line.file.endsWith(".png", ignoreCase = true) &&
+                        validateSafeRelativePath(line.algorithmFile) &&
+                        line.algorithmFile.startsWith("${manifestMap?.root?.trimEnd('/')}/data/") &&
+                        line.algorithmFile.endsWith(".idva", ignoreCase = true)) {
+                        "地图 $mapId：楼层 ${f.key} 预制线图算法路径无效"
+                    }
+                    val sha = Regex("[0-9a-fA-F]{64}")
+                    require(line.sha256.matches(sha) && line.sourceSha256.matches(sha) &&
+                        line.algorithmSha256.matches(sha) && line.width > 0 && line.height > 0 &&
+                        line.fileLength > 0 && line.algorithmId.isNotBlank() &&
+                        line.algorithmSchemaVersion == "1.1") {
+                        "地图 $mapId：楼层 ${f.key} 预制线图登记无效"
                     }
                 }
             }

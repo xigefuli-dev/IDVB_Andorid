@@ -57,7 +57,7 @@ fun VisionSettingsScreen(onBack: () -> Unit) {
                 Text("打开 IDVB 无障碍设置")
             }
         }
-        Text("更改后将在下一次启动悬浮服务时生效。无障碍模式仅用于截图，不读取或操作界面内容。",
+        Text("更改后立即切换截图来源；切回屏幕捕获需返回首页重新授权。无障碍模式仅用于截图，不读取或操作界面内容。",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 4.dp, vertical = 12.dp))
         Spacer(Modifier.height(8.dp))

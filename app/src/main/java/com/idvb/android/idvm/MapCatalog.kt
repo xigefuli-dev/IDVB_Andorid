@@ -20,6 +20,16 @@ data class SideEntranceFeatureRecord(
 )
 
 @Serializable
+data class PrebuiltStructureLineRecord(
+    @SerialName("imagePath") val imagePath: String,
+    @SerialName("sha256") val sha256: String,
+    @SerialName("width") val width: Int,
+    @SerialName("height") val height: Int,
+    @SerialName("fileLength") val fileLength: Long,
+    @SerialName("algorithmId") val algorithmId: String,
+)
+
+@Serializable
 data class FloorRecord(
     @SerialName("key") val key: String,
     @SerialName("displayName") val displayName: String,
@@ -31,12 +41,14 @@ data class FloorRecord(
     @SerialName("orientationDegrees") val orientationDegrees: Int = 0,
     /** Desktop 中用户选择的识别裁切区域；旧目录为 null 时从 metadata.json 回读。 */
     @SerialName("previewRegion") val previewRegion: NormalizedRect? = null,
+    @SerialName("freeCropPoints") val freeCropPoints: List<NormalizedPoint> = emptyList(),
     /** Desktop 测绘地图导出的独立识别图；普通地图为空并使用 image + previewRegion。 */
     @SerialName("recognitionImagePath") val recognitionImagePath: String? = null,
     @SerialName("recognitionWidth") val recognitionWidth: Int = 0,
     @SerialName("recognitionHeight") val recognitionHeight: Int = 0,
     @SerialName("validMapBounds") val validMapBounds: NormalizedRect? = null,
     @SerialName("sideEntranceFeature") val sideEntranceFeature: SideEntranceFeatureRecord? = null,
+    @SerialName("prebuiltStructureLine") val prebuiltStructureLine: PrebuiltStructureLineRecord? = null,
 )
 
 @Serializable
@@ -56,6 +68,7 @@ data class ClassRecord(
     @SerialName("id") val id: String,
     @SerialName("name") val name: String,
     @SerialName("removeBackground") val removeBackground: Boolean = false,
+    @SerialName("scanFloorKey") val scanFloorKey: String? = null,
 )
 
 @Serializable
@@ -75,4 +88,10 @@ data class MapCatalogDocument(
     /** 判断 Class 名是否已被占用（忽略大小写，对齐 IDVM §10） */
     fun isClassNameTaken(name: String): Boolean =
         classes.any { it.name.equals(name, ignoreCase = true) }
+
+    /** 当前地图所在变体组的下一张地图，沿 IDVM 的 mapIds 顺序循环。 */
+    fun nextVariantMapId(currentMapId: String): String? = variantGroups
+        .firstOrNull { currentMapId in it.mapIds && it.mapIds.size > 1 }
+        ?.mapIds
+        ?.let { ids -> ids[(ids.indexOf(currentMapId) + 1) % ids.size] }
 }

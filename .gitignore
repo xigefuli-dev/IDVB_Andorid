@@ -78,6 +78,11 @@ captures/
 *.mov
 *.webm
 
+# Launcher artwork used by the Android app
+!app/src/main/res/drawable-nodpi/ic_launcher_art.png
+!app/src/main/res/mipmap-*/ic_launcher.webp
+!app/src/main/res/mipmap-*/ic_launcher_round.webp
+
 # Documentation and other non-code content
 *.md
 *.markdown

@@ -6,144 +6,158 @@ import android.graphics.Bitmap
 import android.graphics.Rect
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Handler
 import android.os.HandlerThread
-import java.util.concurrent.atomic.AtomicBoolean
+import android.os.SystemClock
+import android.util.Log
 
-/** 服务生命周期内保持的捕获会话，为前台扫描和后续后台扫描共用。 */
+/** All projection, reader and retained-frame operations share this session's monitor. */
 class ScreenCaptureSession(private val context: Context) {
+    val grantRevision = ScreenCaptureGrant.revision
     private val thread = HandlerThread("idvb-screen-capture").apply { start() }
     private val handler = Handler(thread.looper)
     private var projection: MediaProjection? = null
     private var display: VirtualDisplay? = null
     private var reader: ImageReader? = null
+    private var latest: Image? = null
     private var width = 0
     private var height = 0
-    private val projectionCallback = object : MediaProjection.Callback() {
-        override fun onStop() {
-            display?.release(); display = null
-            reader?.close(); reader = null
-            projection = null
-        }
+    private var closed = false
+    private var failure: Throwable? = null
+    private var pending: Request? = null
 
-        override fun onCapturedContentResize(newWidth: Int, newHeight: Int) {
-            if (newWidth > 0 && newHeight > 0) resizeExistingDisplay(newWidth, newHeight)
+    private inner class Request(val region: Rect, val callback: (Result<Bitmap>) -> Unit) : Runnable {
+        val deadline = SystemClock.uptimeMillis() + 3_000L
+        override fun run() = synchronized(this@ScreenCaptureSession) {
+            if (pending !== this) return@synchronized
+            val error = failure
+            when {
+                error != null -> finish(Result.failure(error))
+                closed || reader == null -> finish(Result.failure(IllegalStateException("屏幕捕获已停止，请重新授权")))
+                latest != null -> finish(runCatching { copyRegion(latest!!, region) })
+                SystemClock.uptimeMillis() >= deadline -> finish(Result.failure(IllegalStateException("等待屏幕画面超时（屏幕捕获未收到新帧）")))
+                else -> { handler.postDelayed(this, 32L); Unit }
+            }
+        }
+        fun finish(result: Result<Bitmap>) {
+            if (pending !== this) { result.getOrNull()?.recycle(); return }
+            pending = null
+            handler.removeCallbacks(this)
+            result.exceptionOrNull()?.let { Log.e("IDVBCapture", "MediaProjection capture failed", it) }
+            callback(result)
+        }
+    }
+
+    private val projectionCallback = object : MediaProjection.Callback() {
+        override fun onStop() = synchronized(this@ScreenCaptureSession) {
+            stop(IllegalStateException("屏幕捕获授权已失效，请重新授权"))
+        }
+        override fun onCapturedContentResize(newWidth: Int, newHeight: Int) = synchronized(this@ScreenCaptureSession) {
+            if (!closed && newWidth > 0 && newHeight > 0) {
+                runCatching { resize(newWidth, newHeight) }.onFailure { stop(it) }
+            }
         }
     }
 
     @Synchronized
     fun start(screenWidth: Int, screenHeight: Int): Boolean {
+        if (closed || failure != null) return false
         return runCatching {
             if (projection == null) {
-                val data = ScreenCaptureGrant.data ?: return false
-                if (ScreenCaptureGrant.resultCode != Activity.RESULT_OK) return false
-                projection = context.getSystemService(MediaProjectionManager::class.java)
-                    .getMediaProjection(ScreenCaptureGrant.resultCode, data)
-                    ?.also { it.registerCallback(projectionCallback, handler) }
-            }
-            if (display == null || reader == null) {
-                createDisplay(screenWidth, screenHeight)
-            } else if (width != screenWidth || height != screenHeight) {
-                resizeExistingDisplay(screenWidth, screenHeight)
-            }
-            reader != null
-        }.getOrDefault(false)
+                val data = ScreenCaptureGrant.consume(grantRevision) ?: return false
+                projection = (context.getSystemService(MediaProjectionManager::class.java)
+                    .getMediaProjection(Activity.RESULT_OK, data) ?: error("屏幕捕获授权无效"))
+                    .also { it.registerCallback(projectionCallback, handler) }
+                reader = newReader(screenWidth, screenHeight)
+                width = screenWidth; height = screenHeight
+                display = projection!!.createVirtualDisplay(
+                    "IDVB capture", width, height, context.resources.displayMetrics.densityDpi,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader!!.surface, null, handler,
+                ) ?: error("无法创建屏幕捕获显示器")
+            } else resize(screenWidth, screenHeight)
+            true
+        }.getOrElse { stop(it); false }
     }
 
-    fun capture(region: Rect, callback: (Result<Bitmap>) -> Unit) {
-        val imageReader = reader ?: return callback(Result.failure(IllegalStateException("屏幕捕获会话未启动")))
-        val completed = AtomicBoolean(false)
-        val timeout = Runnable {
-            if (completed.compareAndSet(false, true)) {
-                callback(Result.failure(IllegalStateException("等待屏幕画面超时")))
-            }
-        }
-        handler.post {
-            // 会话创建后没有消费者时队列会被旧帧填满。先全部释放，虚拟屏幕才能
-            // 在小球隐藏后写入一张真正的新帧。
-            runCatching {
-                while (true) (imageReader.acquireNextImage() ?: break).close()
-            }
-            handler.postDelayed(timeout, 3_000L)
-            val poll = object : Runnable {
-                override fun run() {
-                    if (completed.get()) return
-                    val image = runCatching { imageReader.acquireLatestImage() }.getOrNull()
-                    if (image == null) {
-                        handler.postDelayed(this, 32L)
-                        return
-                    }
-                    try {
-                        if (!completed.compareAndSet(false, true)) return
-                        handler.removeCallbacks(timeout)
-                        callback(Result.success(copyRegion(image, region)))
-                    } catch (error: Throwable) {
-                        completed.set(true)
-                        handler.removeCallbacks(timeout)
-                        callback(Result.failure(error))
-                    } finally { image.close() }
+    private fun newReader(w: Int, h: Int): ImageReader =
+        ImageReader.newInstance(w, h, android.graphics.PixelFormat.RGBA_8888, 3).also {
+            it.setOnImageAvailableListener({ source ->
+                synchronized(this) {
+                    if (closed || source !== reader) return@synchronized
+                    runCatching {
+                        // Retain one frame, leaving two slots for acquireLatestImage to discard older frames.
+                        source.acquireLatestImage()?.let { image -> latest?.close(); latest = image }
+                    }.onFailure { stop(it) }
                 }
-            }
-            handler.post(poll)
+            }, handler)
         }
-    }
 
-    private fun copyRegion(image: android.media.Image, region: Rect): Bitmap {
-        val plane = image.planes[0]
-        val pixelStride = plane.pixelStride
-        val rowStride = plane.rowStride
-        val paddedWidth = rowStride / pixelStride
-        val full = Bitmap.createBitmap(paddedWidth, image.height, Bitmap.Config.ARGB_8888)
-        full.copyPixelsFromBuffer(plane.buffer)
-        val left = region.left.coerceIn(0, image.width - 1)
-        val top = region.top.coerceIn(0, image.height - 1)
-        val right = region.right.coerceIn(left + 1, image.width)
-        val bottom = region.bottom.coerceIn(top + 1, image.height)
-        return Bitmap.createBitmap(full, left, top, right - left, bottom - top).also { full.recycle() }
-    }
-
-    /** 每个 MediaProjection 授权生命周期内只允许创建一次 VirtualDisplay。 */
-    private fun createDisplay(screenWidth: Int, screenHeight: Int) {
-        display?.release(); reader?.close()
-        width = screenWidth; height = screenHeight
-        reader = ImageReader.newInstance(width, height, android.graphics.PixelFormat.RGBA_8888, 3)
-        display = projection?.createVirtualDisplay(
-            "IDVB capture", width, height, context.resources.displayMetrics.densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            reader?.surface, null, handler,
-        )
-    }
-
-    /**
-     * 横竖屏切换必须原地调整现有 VirtualDisplay。重新 createVirtualDisplay 在
-     * Android 14+ 会触发 SecurityException 并令整个捕获授权失效。
-     */
+    /** Clear BEFORE hiding overlays, so the final static frame produced by hiding them is retained. */
     @Synchronized
-    private fun resizeExistingDisplay(screenWidth: Int, screenHeight: Int) {
-        if (screenWidth <= 0 || screenHeight <= 0 ||
-            screenWidth == width && screenHeight == height) return
-        val currentDisplay = display ?: return
-        val nextReader = ImageReader.newInstance(
-            screenWidth,
-            screenHeight,
-            android.graphics.PixelFormat.RGBA_8888,
-            3,
-        )
-        val previousReader = reader
-        currentDisplay.resize(screenWidth, screenHeight, context.resources.displayMetrics.densityDpi)
-        currentDisplay.surface = nextReader.surface
-        reader = nextReader
-        width = screenWidth
-        height = screenHeight
-        previousReader?.close()
+    fun prepareCapture() {
+        latest?.close(); latest = null
+        runCatching { reader?.acquireLatestImage()?.close() }.onFailure { stop(it) }
     }
 
+    @Synchronized
+    fun capture(region: Rect, callback: (Result<Bitmap>) -> Unit) {
+        if (closed || failure != null || reader == null) {
+            callback(Result.failure(failure ?: IllegalStateException("屏幕捕获会话未启动")))
+            return
+        }
+        pending?.finish(Result.failure(IllegalStateException("截图请求已被替换")))
+        Request(Rect(region), callback).also { pending = it; handler.post(it) }
+    }
+
+    private fun copyRegion(image: Image, region: Rect): Bitmap {
+        val safe = Rect(region)
+        require(safe.intersect(0, 0, image.width, image.height)) { "截图区域超出屏幕" }
+        val plane = image.planes[0]
+        val full = Bitmap.createBitmap(plane.rowStride / plane.pixelStride, image.height, Bitmap.Config.ARGB_8888)
+        try {
+            plane.buffer.rewind()
+            full.copyPixelsFromBuffer(plane.buffer)
+            val cropped = Bitmap.createBitmap(full, safe.left, safe.top, safe.width(), safe.height())
+            return if (cropped === full) full.copy(Bitmap.Config.ARGB_8888, false) else cropped
+        } finally { full.recycle() }
+    }
+
+    private fun resize(w: Int, h: Int) {
+        if (w == width && h == height) return
+        val current = display ?: return
+        pending?.finish(Result.failure(IllegalStateException("屏幕尺寸已变化，请重新截图")))
+        val next = newReader(w, h)
+        try {
+            current.resize(w, h, context.resources.displayMetrics.densityDpi)
+            current.surface = next.surface
+        } catch (error: Throwable) { next.close(); throw error }
+        latest?.close(); latest = null
+        reader?.close(); reader = next
+        width = w; height = h
+    }
+
+    private fun stop(error: Throwable) {
+        failure = error
+        ScreenCaptureGrant.invalidate(grantRevision)
+        pending?.finish(Result.failure(error))
+        latest?.close(); latest = null
+        display?.release(); display = null
+        reader?.close(); reader = null
+        projection?.unregisterCallback(projectionCallback)
+        projection?.stop(); projection = null
+        Log.w("IDVBCapture", "MediaProjection session stopped: ${error.message}")
+    }
+
+    @Synchronized
     fun close() {
-        display?.release(); reader?.close()
-        projection?.unregisterCallback(projectionCallback); projection?.stop(); thread.quitSafely()
-        display = null; reader = null; projection = null
+        if (closed) return
+        closed = true
+        stop(IllegalStateException("屏幕捕获会话已关闭"))
+        handler.removeCallbacksAndMessages(null)
+        thread.quitSafely()
     }
 }

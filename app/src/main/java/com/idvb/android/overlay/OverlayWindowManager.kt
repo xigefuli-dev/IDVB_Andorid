@@ -2,6 +2,9 @@ package com.idvb.android.overlay
 
 import android.content.Context
 import android.graphics.PixelFormat
+import android.hardware.input.InputManager
+import android.os.Build
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -16,6 +19,35 @@ import android.view.WindowManager
  * - WS_EX_TOOLWINDOW   → FLAG_NOT_FOCUSABLE + 前台服务常驻（不占任务栏/最近任务）
  */
 class OverlayWindowManager(private val context: Context) {
+
+    companion object {
+        // All callers run on the main thread. Include hidden windows conservatively so
+        // visibility changes/animations never temporarily exceed the shared UID budget.
+        private val attached = mutableSetOf<OverlayWindowManager>()
+
+        private fun refreshTouchOpacity() {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+            val passive = attached.filter { it.isTouchThrough }
+            if (passive.isEmpty()) return
+            val maximum = passive.minOf { it.maximumTouchOpacity }
+            val cap = OverlayTouchOpacity.cap(maximum, passive.size)
+            passive.forEach { manager -> manager.applyAlpha(minOf(manager.opacity, cap)) }
+        }
+    }
+
+    private val maximumTouchOpacity = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        context.getSystemService(InputManager::class.java).maximumObscuringOpacityForTouch
+    } else 1f
+    private var isTouchThrough = false
+
+    /** Visual opacity belongs on LayoutParams, so Android's input dispatcher sees it. */
+    var opacity: Float = 1f
+        set(value) {
+            field = value.coerceIn(0f, 1f)
+            if (isTouchThrough && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                refreshTouchOpacity()
+            } else applyAlpha(field)
+        }
 
     private val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
@@ -48,13 +80,31 @@ class OverlayWindowManager(private val context: Context) {
             gravity = Gravity.TOP or Gravity.START
             this.x = this@OverlayWindowManager.x
             this.y = this@OverlayWindowManager.y
+            alpha = opacity
         }
     }
 
     fun add(v: View, locked: Boolean, focusable: Boolean = false) {
         remove()
-        view = v
-        runCatching { wm.addView(v, buildParams(locked, focusable)) }
+        isTouchThrough = locked
+        attached.add(this)
+        // Lower existing layers before attaching the new layer.
+        refreshTouchOpacity()
+        val params = buildParams(locked, focusable).apply {
+            if (locked && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) alpha = minOf(opacity, OverlayTouchOpacity.cap(
+                attached.filter { it.isTouchThrough }.minOf { it.maximumTouchOpacity },
+                attached.count { it.isTouchThrough },
+            ))
+        }
+        try {
+            wm.addView(v, params)
+            view = v
+        } catch (error: RuntimeException) {
+            attached.remove(this)
+            refreshTouchOpacity()
+            Log.e("OverlayWindowManager", "Unable to add overlay", error)
+            throw error
+        }
     }
 
     /** 应用当前 x/y/宽高；locked 传值则同步切换点击穿透标志 */
@@ -66,17 +116,31 @@ class OverlayWindowManager(private val context: Context) {
         p.width = width
         p.height = height
         if (locked != null) {
+            isTouchThrough = locked
             p.flags = if (locked) {
                 p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
             } else {
                 p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
             }
         }
-        runCatching { wm.updateViewLayout(v, p) }
+        if (!isTouchThrough || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) p.alpha = opacity
+        if (isTouchThrough) refreshTouchOpacity()
+        wm.updateViewLayout(v, p)
+        refreshTouchOpacity()
+    }
+
+    private fun applyAlpha(alpha: Float) {
+        val v = view ?: return
+        val params = v.layoutParams as? WindowManager.LayoutParams ?: return
+        if (params.alpha == alpha) return
+        params.alpha = alpha
+        wm.updateViewLayout(v, params)
     }
 
     fun remove() {
-        view?.let { runCatching { wm.removeView(it) } }
+        view?.let { wm.removeViewImmediate(it) }
         view = null
+        attached.remove(this)
+        refreshTouchOpacity()
     }
 }

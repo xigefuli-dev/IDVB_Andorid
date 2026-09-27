@@ -61,6 +61,16 @@ class IdvmImporterTest {
     }
 
     @Test
+    fun `变体组按清单顺序循环切换`() {
+        val catalog = MapCatalogDocument(variantGroups = listOf(
+            MapVariantGroupRecord("group", "class", 0, listOf("a", "b", "c"))
+        ))
+        assertEquals("b", catalog.nextVariantMapId("a"))
+        assertEquals("a", catalog.nextVariantMapId("c"))
+        assertEquals(null, catalog.nextVariantMapId("missing"))
+    }
+
+    @Test
     fun `合法包导入成功并落盘`() {
         val pkg = TestIdvmPackage.build(
             floors = listOf(
@@ -100,6 +110,31 @@ class IdvmImporterTest {
     }
 
     @Test
+    fun `兼容 Desktop 当前 IDVM 1_3 包并保留暂未使用字段`() {
+        val packageFile = writePackage(TestIdvmPackage.build(
+            formatMinor = 3,
+            mutateManifest = { manifest ->
+                manifest.copy(classes = manifest.classes.map { item ->
+                    item.copy(properties = item.properties.copy(scanFloorKey = "2f"))
+                })
+            },
+            mutateMetadata = { metadata -> metadata.copy(
+                tags = listOf(MetadataTag("9a8e6bca-7f74-4df3-8933-1e05015c7d17", "难度", "困难")),
+                recognition = RecognitionSettings(wholeImage = RecognitionWholeImage(enabled = true)),
+                floors = metadata.floors.map { floor -> floor.copy(
+                    freeCropPoints = listOf(NormalizedPoint(0.1, 0.1), NormalizedPoint(0.9, 0.1), NormalizedPoint(0.5, 0.9))
+                ) },
+            ) },
+        ))
+        val success = requireSuccess(
+            IdvmImporter().importPackage(packageFile, tmp.newFolder("maps-13"), MapCatalogDocument()) {}
+        )
+        assertEquals(1, success.importedClasses.size)
+        assertEquals(1, success.importedMaps.size)
+        assertEquals("2f", success.importedClasses.single().scanFloorKey)
+    }
+
+    @Test
     fun `导入 Desktop 权威识别图和侧门特征`() {
         val pkg = TestIdvmPackage.build(
             formatMinor = 2,
@@ -131,6 +166,32 @@ class IdvmImporterTest {
         assertEquals(1, feature.imageWidth)
         assertEquals(1, feature.imageHeight)
         assertTrue(File(outcome.mapsRoot, feature.imagePath).isFile)
+    }
+
+    @Test
+    fun `导入 Desktop VPSG 预制线图并登记到楼层`() {
+        val outcome = doImport(TestIdvmPackage.build(formatMinor = 2, floors = listOf(
+            FloorImage("1f", "1F", 1, TestIdvmPackage.PNG_1X1,
+                prebuiltLineBytes = TestIdvmPackage.PNG_1X1),
+        )))
+        val line = requireNotNull(requireSuccess(outcome.result).importedMaps.single()
+            .floors.single().prebuiltStructureLine)
+        assertEquals(1, line.width)
+        assertEquals(1, line.height)
+        assertEquals("test-algorithm", line.algorithmId)
+        assertTrue(File(outcome.mapsRoot, line.imagePath).readBytes()
+            .contentEquals(TestIdvmPackage.PNG_1X1))
+    }
+
+    @Test
+    fun `预制线图登记与包内哈希不符时拒绝导入`() {
+        val pkg = TestIdvmPackage.build(formatMinor = 2, floors = listOf(
+            FloorImage("1f", "1F", 1, TestIdvmPackage.PNG_1X1,
+                prebuiltLineBytes = TestIdvmPackage.PNG_1X1),
+        ), mutateMetadata = { metadata -> metadata.copy(floors = metadata.floors.map { floor ->
+            floor.copy(prebuiltStructureLine = floor.prebuiltStructureLine?.copy(sha256 = "0".repeat(64)))
+        }) })
+        assertTrue(requireFailure(doImport(pkg).result).contains("预制线图"))
     }
 
     @Test
@@ -306,5 +367,139 @@ class IdvmImporterTest {
         assertEquals(2, success.importedClasses.size)
         assertEquals(setOf("S1", "S2"), success.importedClasses.map { it.name }.toSet())
         assertEquals(2, success.importedMaps.size)
+    }
+
+    @Test
+    fun `非 ZIP 文件导入失败给出明确提示`() {
+        val nonZipFile = File(tmp.root, "invalid.idvm").apply { writeText("not a zip file content") }
+        val mapsRoot = tmp.newFolder("maps-invalid")
+        val result = IdvmImporter().importPackage(nonZipFile, mapsRoot, MapCatalogDocument()) {}
+        val reason = requireFailure(result)
+        assertTrue("应提示非 ZIP 格式：$reason", reason.contains("非 ZIP 格式"))
+    }
+
+    @Test
+    fun `全包 ZIP 容器包含多个 idvm 自动解包并聚合导入`() {
+        val pkg1 = TestIdvmPackage.build(
+            className = "S1",
+            classId = "11111111-1111-4111-8111-111111111111",
+            mapId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            mapName = "军工厂",
+        )
+        val pkg2 = TestIdvmPackage.build(
+            className = "S2",
+            classId = "22222222-2222-4222-8222-222222222222",
+            mapId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            mapName = "红教堂",
+        )
+
+        val bundleZip = File(tmp.root, "all_maps.zip")
+        java.util.zip.ZipOutputStream(bundleZip.outputStream().buffered()).use { zos ->
+            zos.putNextEntry(java.util.zip.ZipEntry("地图全包/s1.idvm"))
+            zos.write(pkg1.zipBytes)
+            zos.closeEntry()
+
+            zos.putNextEntry(java.util.zip.ZipEntry("地图全包/s2.idvm"))
+            zos.write(pkg2.zipBytes)
+            zos.closeEntry()
+        }
+
+        val mapsRoot = tmp.newFolder("maps-bundle")
+        var savedCatalog: MapCatalogDocument? = null
+        val result = IdvmImporter().importPackage(
+            bundleZip,
+            mapsRoot,
+            MapCatalogDocument(),
+            catalogSaver = { savedCatalog = it },
+        )
+        val success = requireSuccess(result)
+        assertEquals(2, success.importedClasses.size)
+        assertEquals(2, success.importedMaps.size)
+        assertEquals(setOf("S1", "S2"), success.importedClasses.map { it.name }.toSet())
+        assertEquals(2, savedCatalog?.maps?.size)
+    }
+
+    @Test
+    fun `单一子目录包裹的 IDVM 压缩包自动解包导入`() {
+        val pkg = TestIdvmPackage.build(
+            className = "S1",
+            mapName = "军工厂",
+        )
+        val wrappedZip = File(tmp.root, "wrapped.idvm")
+        java.util.zip.ZipOutputStream(wrappedZip.outputStream().buffered()).use { zos ->
+            java.util.zip.ZipInputStream(pkg.zipBytes.inputStream()).use { zis ->
+                var entry = zis.nextEntry
+                while (entry != null) {
+                    zos.putNextEntry(java.util.zip.ZipEntry("outer_folder/${entry.name}"))
+                    zis.copyTo(zos)
+                    zos.closeEntry()
+                    entry = zis.nextEntry
+                }
+            }
+        }
+
+        val mapsRoot = tmp.newFolder("maps-wrapped")
+        var savedCatalog: MapCatalogDocument? = null
+        val result = IdvmImporter().importPackage(
+            wrappedZip,
+            mapsRoot,
+            MapCatalogDocument(),
+            catalogSaver = { savedCatalog = it },
+        )
+        val success = requireSuccess(result)
+        assertEquals(1, success.importedClasses.size)
+        assertEquals("S1", success.importedClasses[0].name)
+        assertEquals(1, success.importedMaps.size)
+        assertEquals("军工厂", success.importedMaps[0].title)
+        assertEquals(1, savedCatalog?.maps?.size)
+    }
+
+    @Test
+    fun `包含多个 idvm 文件的文件夹整体导入`() {
+        val folder = tmp.newFolder("地图全包")
+        val pkg1 = TestIdvmPackage.build(className = "S1", mapName = "军工厂")
+        val pkg2 = TestIdvmPackage.build(className = "S2", mapName = "红教堂")
+        File(folder, "1.idvm").writeBytes(pkg1.zipBytes)
+        File(folder, "2.idvm").writeBytes(pkg2.zipBytes)
+
+        val mapsRoot = tmp.newFolder("maps-dir")
+        var savedCatalog: MapCatalogDocument? = null
+        val result = IdvmImporter().importPackage(
+            folder,
+            mapsRoot,
+            MapCatalogDocument(),
+            catalogSaver = { savedCatalog = it },
+        )
+        val success = requireSuccess(result)
+        assertEquals(2, success.importedClasses.size)
+        assertEquals(2, success.importedMaps.size)
+        assertEquals(2, savedCatalog?.maps?.size)
+    }
+
+    @Test
+    fun `解压后的 IDVM 目录直接导入`() {
+        val pkg = TestIdvmPackage.build(className = "S1", mapName = "军工厂")
+        val uncompressedDir = tmp.newFolder("uncompressed-idvm")
+        java.util.zip.ZipInputStream(pkg.zipBytes.inputStream()).use { zis ->
+            var entry = zis.nextEntry
+            while (entry != null) {
+                val dest = File(uncompressedDir, entry.name).apply { parentFile?.mkdirs() }
+                dest.outputStream().use { zis.copyTo(it) }
+                entry = zis.nextEntry
+            }
+        }
+
+        val mapsRoot = tmp.newFolder("maps-uncompressed")
+        var savedCatalog: MapCatalogDocument? = null
+        val result = IdvmImporter().importPackage(
+            uncompressedDir,
+            mapsRoot,
+            MapCatalogDocument(),
+            catalogSaver = { savedCatalog = it },
+        )
+        val success = requireSuccess(result)
+        assertEquals(1, success.importedClasses.size)
+        assertEquals("军工厂", success.importedMaps[0].title)
+        assertEquals(1, savedCatalog?.maps?.size)
     }
 }

@@ -30,6 +30,7 @@ import com.idvb.android.AppServices
 import com.idvb.android.idvm.IdvmImporter
 import com.idvb.android.idvm.ImportResult
 import com.idvb.android.ui.screens.maplist.importIdvmUri
+import com.idvb.android.ui.screens.maplist.importIdvmUris
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -46,12 +47,12 @@ fun ImportScreen(onImported: () -> Unit) {
     var result by remember { mutableStateOf<ImportResult?>(null) }
     var fileName by remember { mutableStateOf<String?>(null) }
 
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) {
             scope.launch {
                 importing = true
                 result = null
-                val (r, name) = withContext(Dispatchers.IO) { importIdvmUri(context, uri) }
+                val (r, name) = withContext(Dispatchers.IO) { importIdvmUris(context, uris) }
                 importing = false
                 result = r
                 fileName = name
@@ -69,7 +70,7 @@ fun ImportScreen(onImported: () -> Unit) {
     ) {
         Text("导入 IDVM 地图包", style = MaterialTheme.typography.headlineSmall)
         Text(
-            "从参考项目导出的 .idvm 格式地图包，导入后自动校验完整性并生成本地地图清单。",
+            "从参考项目导出的 .idvm 格式地图包或全包 ZIP 压缩包，导入后自动校验完整性并生成本地地图清单。支持按住文件多选同时导入。",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -83,7 +84,7 @@ fun ImportScreen(onImported: () -> Unit) {
                 CircularProgressIndicator(modifier = Modifier.padding(end = 8.dp), strokeWidth = 2.dp)
                 Text("正在导入…")
             } else {
-                Text("选择 .idvm 文件")
+                Text("选择地图包文件（支持多选 / 全包 ZIP）")
             }
         }
 
@@ -144,7 +145,7 @@ private fun HintCard() {
         Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("ℹ", style = MaterialTheme.typography.headlineSmall)
             Text(
-                "尚未导入。请选择通过 IDVM 导出器生成的 .idvm 地图包。",
+                "尚未导入。请选择通过 IDVM 导出器生成的 .idvm 地图包，或包含多个地图包的 ZIP 压缩包。",
                 style = MaterialTheme.typography.bodyMedium,
             )
         }

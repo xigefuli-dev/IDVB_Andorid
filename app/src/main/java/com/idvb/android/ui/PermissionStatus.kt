@@ -58,7 +58,6 @@ data class PermissionController(
 fun rememberPermissionController(): PermissionController {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    var screenCaptureGranted by remember { mutableStateOf(ScreenCaptureGrant.available) }
     var refreshTick by remember { mutableStateOf(0) }
     var onScreenCaptureGranted by remember { mutableStateOf<(() -> Unit)?>(null) }
 
@@ -68,7 +67,7 @@ fun rememberPermissionController(): PermissionController {
     val captureLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
-        screenCaptureGranted = result.resultCode == Activity.RESULT_OK && result.data != null
+        val screenCaptureGranted = result.resultCode == Activity.RESULT_OK && result.data != null
         ScreenCaptureGrant.update(result.resultCode, result.data)
         val continuation = onScreenCaptureGranted
         onScreenCaptureGranted = null
@@ -79,7 +78,10 @@ fun rememberPermissionController(): PermissionController {
     val requestScreenCapture = { onGranted: () -> Unit ->
         onScreenCaptureGranted = onGranted
         val manager = context.getSystemService(MediaProjectionManager::class.java)
-        captureLauncher.launch(manager.createScreenCaptureIntent())
+        val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            manager.createScreenCaptureIntent(android.media.projection.MediaProjectionConfig.createConfigForDefaultDisplay())
+        } else manager.createScreenCaptureIntent()
+        captureLauncher.launch(intent)
     }
 
     DisposableEffect(lifecycleOwner) {
@@ -91,7 +93,7 @@ fun rememberPermissionController(): PermissionController {
     }
 
     @Suppress("UNUSED_VARIABLE") val observedTick = refreshTick
-    val snapshot = permissionSnapshot(context, screenCaptureGranted)
+    val snapshot = permissionSnapshot(context, ScreenCaptureGrant.available)
     val requestNextMissing = {
         when {
             !snapshot.overlay -> context.startActivity(

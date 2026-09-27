@@ -68,6 +68,51 @@ object IdvmUtil {
  */
 object ImageProbe {
 
+    /** Read only image headers; map images can be hundreds of megabytes. */
+    fun dimensions(input: InputStream): Pair<Int, Int>? {
+        val first = input.read()
+        val second = input.read()
+        if (first == 0x89 && second == 0x50) {
+            val header = byteArrayOf(first.toByte(), second.toByte()) + ByteArray(22)
+            var offset = 2
+            while (offset < header.size) {
+                val n = input.read(header, offset, header.size - offset)
+                if (n <= 0) return null
+                offset += n
+            }
+            return dimensions(header)
+        }
+        if (first != 0xff || second != 0xd8) return null
+        while (true) {
+            var prefix = input.read()
+            if (prefix < 0) return null
+            if (prefix != 0xff) continue
+            var marker = input.read()
+            while (marker == 0xff) marker = input.read()
+            if (marker < 0 || marker == 0xd9 || marker == 0xda) return null
+            if (marker == 0x01 || marker in 0xd0..0xd8) continue
+            val hi = input.read()
+            val lo = input.read()
+            if (hi < 0 || lo < 0) return null
+            val length = (hi shl 8) or lo
+            if (length < 2) return null
+            if (marker in 0xc0..0xcf && marker != 0xc4 && marker != 0xc8 && marker != 0xcc) {
+                if (length < 7 || input.read() < 0) return null
+                val hHi = input.read(); val hLo = input.read()
+                val wHi = input.read(); val wLo = input.read()
+                if (hHi < 0 || hLo < 0 || wHi < 0 || wLo < 0) return null
+                val h = (hHi shl 8) or hLo
+                val w = (wHi shl 8) or wLo
+                return if (h > 0 && w > 0) w to h else null
+            }
+            var remaining = (length - 2).toLong()
+            while (remaining > 0) {
+                val skipped = input.skip(remaining)
+                if (skipped > 0) remaining -= skipped else if (input.read() >= 0) remaining-- else return null
+            }
+        }
+    }
+
     /** @return Pair(width, height)，无法识别时返回 null */
     fun dimensions(bytes: ByteArray): Pair<Int, Int>? {
         if (bytes.size >= 8) {

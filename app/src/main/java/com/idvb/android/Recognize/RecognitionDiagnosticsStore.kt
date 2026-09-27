@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.net.Uri
 import androidx.core.content.FileProvider
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -15,6 +16,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.time.Instant
 import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 import com.idvb.android.recognize.cv.OpenCvRuntime
 
@@ -74,9 +76,31 @@ class RecognitionDiagnosticsStore(context: Context) {
         }
     }
 
-    fun latestPackage(): File? = directory.listFiles { file ->
+    fun recentPackages(): List<File> = directory.listFiles { file ->
         file.isFile && file.name.startsWith("recognition-") && file.extension == "zip"
-    }?.maxByOrNull(File::lastModified)
+    }?.sortedByDescending(File::lastModified).orEmpty()
+
+    fun latestPackage(): File? = recentPackages().firstOrNull()
+
+    /** JSON is safe to copy without also copying the captured game screenshot. */
+    fun diagnosticsJson(packageFile: File): Result<String> = runCatching {
+        val source = requireRecentPackage(packageFile)
+        ZipFile(source).use { zip ->
+            val entry = zip.getEntry("diagnostics.json") ?: error("诊断包缺少 diagnostics.json")
+            zip.getInputStream(entry).bufferedReader(Charsets.UTF_8).use { it.readText() }
+        }
+    }
+
+    fun exportPackage(packageFile: File, context: Context, destination: Uri): Result<Unit> = runCatching {
+        val source = requireRecentPackage(packageFile)
+        val output = context.contentResolver.openOutputStream(destination)
+            ?: error("无法写入所选位置")
+        output.use { stream -> source.inputStream().use { it.copyTo(stream) } }
+    }
+
+    private fun requireRecentPackage(packageFile: File): File = recentPackages()
+        .firstOrNull { it.canonicalFile == packageFile.canonicalFile }
+        ?: error("诊断包已不存在")
 
     fun shareLatest(context: Context): Boolean {
         val packageFile = latestPackage() ?: return false
@@ -104,8 +128,12 @@ class RecognitionDiagnosticsStore(context: Context) {
     ): JsonObject = buildJsonObject {
         put("schemaVersion", RecognitionPortContract.DIAGNOSTICS_SCHEMA_VERSION)
         put("createdAt", Instant.ofEpochMilli(createdAt).toString())
-        put("route", result.diagnostics?.route ?: "unknown-or-debug-route")
-        put("desktopReferenceCommit", RecognitionPortContract.DESKTOP_SOURCE_COMMIT)
+        put("route", result.route ?: result.diagnostics?.route ?: "unknown-or-debug-route")
+        putNullable("desktopReferenceCommit", if (result.sparseGateDiagnostics == null)
+            RecognitionPortContract.DESKTOP_SOURCE_COMMIT else null)
+        if (result.sparseGateDiagnostics != null) {
+            put("desktopReferenceBasis", "SideEntranceScanPipeline.Part2/Part3 + ScanIdentityEvidence working-tree source; Android full-reference and gate-residual adaptations")
+        }
         put("sideEntranceFeatureAlgorithmVersion", RecognitionPortContract.SIDE_ENTRANCE_FEATURE_ALGORITHM_VERSION)
         put("openCvAvailable", OpenCvRuntime.available)
         put("openCvVersion", OpenCvRuntime.version)
@@ -122,6 +150,57 @@ class RecognitionDiagnosticsStore(context: Context) {
         })
         putNullable("classId", context.classId)
         putNullable("className", context.className)
+        result.vpsgDiagnostics?.let { scan ->
+            put("vpsgScan", buildJsonObject {
+                put("eligibleFloorCount", scan.eligibleFloorCount)
+                put("readyFloorCount", scan.readyFloorCount)
+                put("evaluatedFloorCount", scan.evaluatedFloorCount)
+                put("visibleEdgePoints", scan.visibleEdgePoints)
+                put("elapsedMilliseconds", scan.elapsedMilliseconds)
+                put("identityUnique", scan.identityUnique)
+                put("algorithm", scan.algorithm)
+                put("floorTimings", buildJsonArray {
+                    scan.floorTimings.forEach { floor -> add(buildJsonObject {
+                        put("mapId", floor.mapId)
+                        put("floorKey", floor.floorKey)
+                        put("elapsedMilliseconds", floor.elapsedMilliseconds)
+                        put("prepareMilliseconds", floor.prepareMilliseconds)
+                        put("translationMilliseconds", floor.translationMilliseconds)
+                        put("refinementMilliseconds", floor.refinementMilliseconds)
+                        put("verificationMilliseconds", floor.verificationMilliseconds)
+                        put("seedCount", floor.seedCount)
+                        put("refinedCount", floor.refinedCount)
+                        put("outcome", floor.outcome)
+                    }) }
+                })
+            })
+        }
+        result.sparseGateDiagnostics?.let { scan ->
+            put("sparseGateScan", buildJsonObject {
+                put("referenceEvidence", "recognition-structure+prebuilt-lines-v2")
+                put("elapsedMilliseconds", scan.elapsedMilliseconds)
+                put("preparationMilliseconds", scan.preparationMilliseconds)
+                put("searchAndVerificationMilliseconds", scan.searchAndVerificationMilliseconds)
+                put("registrationMilliseconds", scan.registrationMilliseconds)
+                put("evaluatedFloorCount", scan.evaluatedFloorCount)
+                put("visibleEdgePoints", scan.visibleEdgePoints)
+                put("retrievalComplete", scan.retrievalComplete)
+                put("supportedIdentityCount", scan.supportedIdentityCount)
+                put("identityUnique", scan.identityUnique)
+                put("floorEvidence", buildJsonArray {
+                    scan.floorEvidence.forEach { floor -> add(buildJsonObject {
+                        put("mapId", floor.mapId)
+                        put("floorKey", floor.floorKey)
+                        put("hypothesisCount", floor.hypothesisCount)
+                        put("supportedFraction", floor.supportedFraction)
+                        put("meanDistancePixels", floor.meanDistancePixels)
+                        put("longestConflictPixels", floor.longestConflictPixels)
+                        put("spatialConflict", floor.spatialConflict)
+                        put("supported", floor.supported)
+                    }) }
+                })
+            })
+        }
         result.diagnostics?.let { diagnostics ->
             val rules = diagnostics.sideEntranceConfig
             put("sideEntranceRules", buildJsonObject {

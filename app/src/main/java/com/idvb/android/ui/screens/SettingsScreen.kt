@@ -40,6 +40,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.idvb.android.BuildConfig
 import com.idvb.android.R
 import com.idvb.android.ui.theme.Deep
 import com.idvb.android.ui.theme.Ink
@@ -109,7 +110,7 @@ fun SettingsScreen(
                 fontWeight = FontWeight.Normal,
             )
             Text(
-                "IDVB for Android",
+                BuildConfig.VERSION_NAME,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

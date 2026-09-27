@@ -3,6 +3,7 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <!-- 悬浮窗叠加 -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <!-- 前台服务常驻（specialUse） -->
@@ -39,6 +40,56 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- 1. VIEW：匹配携带通用类型 (*/*) 且路径以后缀 .idvm 结尾的文件（解决微信/QQ等「用其他应用打开」找不到的问题） -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:host="*" />
+                <data android:mimeType="*/*" />
+                <!-- Android 12+ (API 31+) 后缀匹配与高级正则 -->
+                <data android:pathSuffix=".idvm" />
+                <data android:pathSuffix=".IDVM" />
+                <data android:pathAdvancedPattern=".*\\.[iI][dD][vV][mM]" />
+                <!-- 兼容 Android 11 及以下多层目录与单层目录点号匹配 -->
+                <data android:pathPattern=".*\\.idvm" />
+                <data android:pathPattern=".*\\.IDVM" />
+                <data android:pathPattern=".*\\..*\\.idvm" />
+                <data android:pathPattern=".*\\..*\\.IDVM" />
+                <data android:pathPattern=".*\\..*\\..*\\.idvm" />
+                <data android:pathPattern=".*\\..*\\..*\\.IDVM" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.idvm" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.IDVM" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.idvm" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.IDVM" />
+            </intent-filter>
+
+            <!-- 2. VIEW：匹配未指定 MIME 类型（type 为空）但路径以后缀 .idvm 结尾的 content/file URI -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:host="*" />
+                <data android:pathSuffix=".idvm" />
+                <data android:pathSuffix=".IDVM" />
+                <data android:pathAdvancedPattern=".*\\.[iI][dD][vV][mM]" />
+                <data android:pathPattern=".*\\.idvm" />
+                <data android:pathPattern=".*\\.IDVM" />
+                <data android:pathPattern=".*\\..*\\.idvm" />
+                <data android:pathPattern=".*\\..*\\.IDVM" />
+                <data android:pathPattern=".*\\..*\\..*\\.idvm" />
+                <data android:pathPattern=".*\\..*\\..*\\.IDVM" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.idvm" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.IDVM" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.idvm" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.IDVM" />
+            </intent-filter>
+
+            <!-- 3. VIEW：匹配明确二进制流/压缩包/自定义 MIME 类型的 content/file URI（不依赖 URI 路径包含后缀） -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -47,22 +98,45 @@
                 <data android:scheme="file" />
                 <data android:mimeType="application/octet-stream" />
                 <data android:mimeType="application/zip" />
+                <data android:mimeType="application/x-zip" />
                 <data android:mimeType="application/x-zip-compressed" />
+                <data android:mimeType="application/zip-compressed" />
+                <data android:mimeType="application/x-compress" />
+                <data android:mimeType="application/x-compressed" />
                 <data android:mimeType="application/vnd.idv.map" />
                 <data android:mimeType="application/vnd.idvb.map" />
                 <data android:mimeType="application/vnd.idvm" />
+                <data android:mimeType="application/idvm" />
+                <data android:mimeType="application/x-idvm" />
+                <data android:mimeType="application/binary" />
+                <data android:mimeType="application/x-binary" />
+                <data android:mimeType="application/unknown" />
+                <data android:mimeType="application/x-unknown" />
             </intent-filter>
-            <!-- 接收文件管理器、聊天软件等通过“分享”传来的 IDVM 地图包。 -->
+
+            <!-- 4. SEND & SEND_MULTIPLE：接收文件管理器、聊天软件（微信/QQ）等通过“分享”传来的 IDVM 地图包 -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <action android:name="android.intent.action.SEND_MULTIPLE" />
                 <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+                <data android:mimeType="application/*" />
                 <data android:mimeType="application/octet-stream" />
                 <data android:mimeType="application/zip" />
+                <data android:mimeType="application/x-zip" />
                 <data android:mimeType="application/x-zip-compressed" />
+                <data android:mimeType="application/zip-compressed" />
+                <data android:mimeType="application/x-compress" />
+                <data android:mimeType="application/x-compressed" />
                 <data android:mimeType="application/vnd.idv.map" />
                 <data android:mimeType="application/vnd.idvb.map" />
                 <data android:mimeType="application/vnd.idvm" />
+                <data android:mimeType="application/idvm" />
+                <data android:mimeType="application/x-idvm" />
+                <data android:mimeType="application/binary" />
+                <data android:mimeType="application/x-binary" />
+                <data android:mimeType="application/unknown" />
+                <data android:mimeType="application/x-unknown" />
             </intent-filter>
         </activity>
 

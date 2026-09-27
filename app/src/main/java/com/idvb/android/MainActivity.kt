@@ -32,6 +32,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ListAlt
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material3.FloatingActionButton
@@ -46,6 +47,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -69,6 +71,9 @@ import androidx.compose.animation.togetherWith
 import com.idvb.android.ui.screens.HomeScreen
 import com.idvb.android.ui.screens.maplist.MapListScreen
 import com.idvb.android.ui.screens.SettingsScreen
+import com.idvb.android.ui.screens.MapSubscriptionsScreen
+import com.idvb.android.ui.screens.SubscriptionDownloadFab
+import com.idvb.android.ui.screens.SubscriptionDownloadDialog
 import com.idvb.android.ui.screens.GeneralSettingsScreen
 import com.idvb.android.ui.screens.VisionSettingsScreen
 import com.idvb.android.data.ScreenCaptureMethod
@@ -80,24 +85,35 @@ import com.idvb.android.data.MapTemplate
 import com.idvb.android.data.TemplateFloor
 import android.net.Uri
 import com.idvb.android.ui.screens.maplist.importIdvmUri
+import com.idvb.android.ui.screens.maplist.importIdvmUris
 import com.idvb.android.ui.theme.IDVBTheme
 import com.idvb.android.ui.theme.Deep
 import com.idvb.android.ui.theme.SignalGreen
 import com.idvb.android.idvm.ImportResult
 import com.idvb.android.overlay.OverlayService
 import com.idvb.android.ui.rememberPermissionController
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private var catalogTick by mutableIntStateOf(0)
+    private var openHomeRequest by mutableIntStateOf(0)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
             IDVBTheme {
+                val context = LocalContext.current
+                val scope = rememberCoroutineScope()
                 var tab by rememberSaveable { mutableIntStateOf(0) }
                 var page by remember { mutableStateOf("main") }
                 var navigatingForward by remember { mutableStateOf(true) }
@@ -108,6 +124,43 @@ class MainActivity : ComponentActivity() {
                 var creationImages by remember { mutableStateOf<Map<String, Uri>>(emptyMap()) }
                 var creationSideDoors by remember { mutableStateOf(emptyList<com.idvb.android.idvm.NormalizedRect>()) }
                 val permissions = rememberPermissionController()
+
+                val hasMaps = remember(catalogTick, page, tab) {
+                    AppServices.repository.loadCatalog().maps.isNotEmpty()
+                }
+                var showImportGuideDialog by remember { mutableStateOf(false) }
+                var importing by remember { mutableStateOf(false) }
+                val downloadJobs by AppServices.communityDownloads.jobs.collectAsState()
+                val downloadRevision by AppServices.communityDownloads.completionRevision.collectAsState()
+                var showDownloadQueue by remember { mutableStateOf(false) }
+                LaunchedEffect(downloadRevision) { if (downloadRevision > 0) catalogTick++ }
+
+                val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+                    if (uris.isEmpty() || importing) return@rememberLauncherForActivityResult
+                    scope.launch {
+                        importing = true
+                        val (result, fileName) = withContext(Dispatchers.IO) { importIdvmUris(context, uris) }
+                        importing = false
+                        when (result) {
+                            is ImportResult.Success -> {
+                                catalogTick++
+                                Toast.makeText(context, "地图导入成功：$fileName", Toast.LENGTH_LONG).show()
+                            }
+                            is ImportResult.Failure -> {
+                                Toast.makeText(context, "导入失败：${result.reason}", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }
+                }
+
+                LaunchedEffect(openHomeRequest) {
+                    if (openHomeRequest > 0) {
+                        navigatingForward = false
+                        page = "main"
+                        tab = 0
+                        permissions.refresh()
+                    }
+                }
                 LaunchedEffect(page, tab) {
                     if (page == "main" && tab == 0) permissions.refresh()
                 }
@@ -116,21 +169,34 @@ class MainActivity : ComponentActivity() {
                     // 始终保留同一块布局空间，避免页面切换时高度变化造成“斜向”动画。
                     bottomBar = { MainBottomBar(tab = tab, visible = page == "main", onSelect = { selected -> navigatingForward = selected > tab; tab = selected }) },
                     floatingActionButton = {
+                        val permissionsReady = permissions.snapshot.allGranted || permissions.snapshot.onlyScreenCaptureMissing
+                        val ready = hasMaps && permissionsReady
+                        val description = if (!hasMaps) "导入地图" else if (ready) "启动服务" else "补全权限"
                         if (page == "main" && (tab == 0 || tab == 1)) ServiceStatusFab(
-                            ready = permissions.snapshot.allGranted || permissions.snapshot.onlyScreenCaptureMissing,
+                            ready = ready,
+                            description = description,
                             onClick = {
-                                if (permissions.snapshot.allGranted) {
-                                    OverlayService.start(this@MainActivity)
-                                    moveTaskToBack(true)
-                                } else if (permissions.snapshot.onlyScreenCaptureMissing &&
-                                    permissions.snapshot.captureMethod == ScreenCaptureMethod.MEDIA_PROJECTION) {
+                                if (!hasMaps) {
+                                    showImportGuideDialog = true
+                                } else if (permissions.snapshot.captureMethod == ScreenCaptureMethod.MEDIA_PROJECTION &&
+                                    permissions.snapshot.overlay &&
+                                    permissions.snapshot.notifications &&
+                                    permissions.snapshot.foregroundService &&
+                                    permissions.snapshot.mediaProjectionService &&
+                                    permissions.snapshot.batteryOptimization) {
                                     permissions.requestScreenCapture {
                                         OverlayService.start(this@MainActivity)
                                         moveTaskToBack(true)
                                     }
+                                } else if (permissions.snapshot.allGranted) {
+                                    OverlayService.start(this@MainActivity)
+                                    moveTaskToBack(true)
                                 } else permissions.requestNextMissing()
                             },
                         )
+                        if (page == "main" && tab == 2) SubscriptionDownloadFab(downloadJobs) {
+                            showDownloadQueue = true
+                        }
                     },
                 ) { innerPadding ->
                     Box(Modifier.fillMaxSize().padding(innerPadding)) {
@@ -218,9 +284,14 @@ class MainActivity : ComponentActivity() {
                                     )
                                 } }
                                 else -> when (currentTab) {
-                                    0 -> HomeScreen(permissions = permissions.snapshot)
+                                    0 -> HomeScreen(
+                                        permissions = permissions.snapshot,
+                                        hasMaps = hasMaps,
+                                    )
                                     1 -> MapListScreen(
                                         refreshTick = catalogTick,
+                                        onOpenImportGuide = { showImportGuideDialog = true },
+                                        onCatalogChanged = { catalogTick++ },
                                         onCreateMap = { classId, defaultTitle ->
                                             creationClassId = classId
                                             creationMapId = null
@@ -251,6 +322,7 @@ class MainActivity : ComponentActivity() {
                                             page = "map-images"
                                         },
                                     )
+                                    2 -> MapSubscriptionsScreen()
                                     else -> SettingsScreen(
                                         onOpenGeneral = { navigatingForward = true; page = "general-settings" },
                                         onOpenVision = { navigatingForward = true; page = "vision-settings" },
@@ -261,6 +333,39 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+                if (showImportGuideDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showImportGuideDialog = false },
+                        title = { Text("导入地图包") },
+                        text = {
+                            Text(
+                                "请下载地图包，然后选择“用其他应用打开”或者“分享”，选择 IDVB，随后地图包将会自动加载。",
+                                style = MaterialTheme.typography.bodyMedium,
+                                lineHeight = 22.sp,
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(onClick = { showImportGuideDialog = false }) {
+                                Text("我知道了")
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(
+                                onClick = {
+                                    showImportGuideDialog = false
+                                    importLauncher.launch(arrayOf("*/*"))
+                                }
+                            ) {
+                                Text("手动选择文件")
+                            }
+                        },
+                    )
+                }
+                if (showDownloadQueue) SubscriptionDownloadDialog(
+                    downloadJobs,
+                    onDismiss = { showDownloadQueue = false },
+                    onClear = { AppServices.communityDownloads.clearFinished() },
+                )
             }
         }
         handleFileIntent(intent)
@@ -269,15 +374,21 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (intent.action == ACTION_OPEN_HOME) openHomeRequest++
         handleFileIntent(intent)
+    }
+
+    companion object {
+        /** 通知栏进入应用时始终落在首页，不能遗留在外部设置跳转前的子页。 */
+        const val ACTION_OPEN_HOME = "com.idvb.android.OPEN_HOME"
     }
 
     private fun handleFileIntent(intent: Intent?) {
         val source = intent ?: return
         val uris = when (source.action) {
-            Intent.ACTION_VIEW -> listOfNotNull(source.data)
-            Intent.ACTION_SEND -> listOfNotNull(source.sharedStreamUri(), source.clipData?.firstUri()).distinct()
-            Intent.ACTION_SEND_MULTIPLE -> (source.sharedStreamUris() + source.clipData.allUris()).distinct()
+            Intent.ACTION_VIEW -> (listOfNotNull(source.data) + source.clipData.allUris()).distinct()
+            Intent.ACTION_SEND -> (listOfNotNull(source.sharedStreamUri(), source.data) + source.clipData.allUris()).distinct()
+            Intent.ACTION_SEND_MULTIPLE -> (source.sharedStreamUris() + source.clipData.allUris() + listOfNotNull(source.data)).distinct()
             else -> emptyList()
         }
         if (uris.isEmpty()) return
@@ -323,7 +434,11 @@ private fun android.content.ClipData?.allUris(): List<Uri> = buildList {
 }
 
 @Composable
-private fun ServiceStatusFab(ready: Boolean, onClick: () -> Unit) {
+private fun ServiceStatusFab(
+    ready: Boolean,
+    description: String = if (ready) "启动服务" else "补全权限",
+    onClick: () -> Unit,
+) {
     FloatingActionButton(
         onClick = onClick,
         shape = androidx.compose.foundation.shape.RoundedCornerShape(3.dp),
@@ -332,7 +447,7 @@ private fun ServiceStatusFab(ready: Boolean, onClick: () -> Unit) {
     ) {
         Icon(
             imageVector = if (ready) Icons.Rounded.PlayArrow else Icons.AutoMirrored.Rounded.ArrowForward,
-            contentDescription = if (ready) "启动服务" else "补全权限",
+            contentDescription = description,
             modifier = Modifier.size(28.dp),
         )
     }
@@ -343,6 +458,7 @@ private data class NavItem(val label: String, val icon: ImageVector)
 private val navItems = listOf(
     NavItem("首页", Icons.Outlined.Home),
     NavItem("列表", Icons.AutoMirrored.Outlined.ListAlt),
+    NavItem("订阅", Icons.Outlined.CloudDownload),
     NavItem("设置", Icons.Outlined.Settings),
 )
 

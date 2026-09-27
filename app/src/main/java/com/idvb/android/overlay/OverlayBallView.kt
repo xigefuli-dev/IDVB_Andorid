@@ -14,14 +14,21 @@ import android.widget.TextView
 /** 独立的小球控制窗；不依赖已废弃的整块地图悬浮层。 */
 class OverlayBallView(context: Context) : LinearLayout(context) {
     interface Listener {
-        fun onSearch(); fun onToggleGuide(); fun onNextFloor(); fun onFreeAdjust(); fun onCalibrate(); fun onClose()
+        fun onSearch(); fun onToggleGuide(); fun onNextFloor(); fun onNextVariant(); fun onFreeAdjust(); fun onCalibrate(); fun onClose()
         fun onMove(dx: Float, dy: Float)
         fun onMenuExpanded(expanded: Boolean)
     }
     var listener: Listener? = null
     private val eyeButton: TextView
     private val floorButton: TextView
+    private val variantButton: TextView
     private val morePanel: LinearLayout
+
+    fun setMenuOpensUp(opensUp: Boolean) {
+        gravity = Gravity.END or (if (opensUp) Gravity.BOTTOM else Gravity.TOP)
+        removeView(morePanel)
+        addView(morePanel, if (opensUp) 0 else childCount)
+    }
 
     var mapLocked: Boolean = false
         set(value) {
@@ -47,6 +54,11 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
             field = value
             updateFloorPresentation()
         }
+    var variantsAvailable: Boolean = false
+        set(value) {
+            field = value
+            variantButton.visibility = if (value) View.VISIBLE else View.GONE
+        }
 
     init {
         orientation = VERTICAL; gravity = Gravity.END
@@ -60,6 +72,7 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
             morePanel.visibility = if (morePanel.visibility == View.VISIBLE) View.GONE else View.VISIBLE
             listener?.onMenuExpanded(morePanel.visibility == View.VISIBLE)
         })
+        variantButton = ball("⇄", "切换地图变体") { listener?.onNextVariant() }.apply { visibility = View.GONE }; row.addView(variantButton)
         addView(row)
         morePanel = LinearLayout(context).apply {
             orientation = VERTICAL; gravity = Gravity.END; visibility = View.GONE; setPadding(0, dp(6), 0, 0)

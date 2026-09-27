@@ -52,6 +52,54 @@ data class RecognitionScanDiagnostics(
     val failureReason: String,
 )
 
+data class VpsgScanDiagnostics(
+    val eligibleFloorCount: Int,
+    val readyFloorCount: Int,
+    val evaluatedFloorCount: Int,
+    val visibleEdgePoints: Int,
+    val elapsedMilliseconds: Double,
+    val identityUnique: Boolean,
+    val algorithm: String = "vpsg-prebuilt-lines-v1",
+    val floorTimings: List<VpsgFloorTiming> = emptyList(),
+)
+
+data class VpsgFloorTiming(
+    val mapId: String,
+    val floorKey: String,
+    val elapsedMilliseconds: Double,
+    val prepareMilliseconds: Double,
+    val translationMilliseconds: Double,
+    val refinementMilliseconds: Double,
+    val verificationMilliseconds: Double,
+    val seedCount: Int,
+    val refinedCount: Int,
+    val outcome: String,
+)
+
+data class SparseGateScanDiagnostics(
+    val elapsedMilliseconds: Double,
+    val preparationMilliseconds: Double,
+    val searchAndVerificationMilliseconds: Double,
+    val registrationMilliseconds: Double,
+    val evaluatedFloorCount: Int,
+    val visibleEdgePoints: Int,
+    val retrievalComplete: Boolean,
+    val supportedIdentityCount: Int,
+    val identityUnique: Boolean,
+    val floorEvidence: List<SparseGateFloorEvidence>,
+)
+
+data class SparseGateFloorEvidence(
+    val mapId: String,
+    val floorKey: String,
+    val hypothesisCount: Int,
+    val supportedFraction: Double,
+    val meanDistancePixels: Double,
+    val longestConflictPixels: Double,
+    val spatialConflict: Boolean,
+    val supported: Boolean,
+)
+
 data class RecognitionResult(
     val capturedRegion: Bitmap,
     val candidates: List<RecognitionCandidate>,
@@ -62,6 +110,9 @@ data class RecognitionResult(
         capturedRegion.height.toDouble(),
     ),
     val diagnostics: RecognitionScanDiagnostics? = null,
+    val route: String? = null,
+    val vpsgDiagnostics: VpsgScanDiagnostics? = null,
+    val sparseGateDiagnostics: SparseGateScanDiagnostics? = null,
 )
 
 /** 后台扫描路线预留；当前只由前台触发实现调用。 */

@@ -13,7 +13,7 @@ object IdvmHeader {
     const val MAGIC = "IDVM"
     const val FORMAT_MAJOR = 1
     const val FORMAT_MINOR = 0
-    const val MAX_SUPPORTED_MINOR = 2
+    const val MAX_SUPPORTED_MINOR = 3
     private val SUPPORTED_MINORS = 0..MAX_SUPPORTED_MINOR
 
     /** 头部大小、flags、保留字段、manifest 摘要的固定布局 */

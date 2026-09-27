@@ -13,8 +13,7 @@ class GuideMapView(context: Context) : ImageView(context) {
         adjustViewBounds = false
     }
 
-    fun showBitmap(bitmap: Bitmap?, opacity: Float) {
-        alpha = opacity.coerceIn(.1f, 1f)
+    fun showBitmap(bitmap: Bitmap?) {
         setImageBitmap(bitmap)
     }
 }

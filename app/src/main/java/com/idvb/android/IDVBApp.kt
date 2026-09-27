@@ -3,6 +3,7 @@ package com.idvb.android
 import android.app.Application
 import android.content.Context
 import com.idvb.android.data.MapRepository
+import com.idvb.android.data.CommunityDownloadQueue
 import com.idvb.android.data.MapTemplateStore
 import com.idvb.android.data.OverlayPrefs
 import com.idvb.android.recognize.RecognitionDiagnosticsStore
@@ -31,4 +32,5 @@ object AppServices {
     val templates: MapTemplateStore by lazy { MapTemplateStore(context) }
     val prefs: OverlayPrefs by lazy { OverlayPrefs(context) }
     val recognitionDiagnostics: RecognitionDiagnosticsStore by lazy { RecognitionDiagnosticsStore(context) }
+    val communityDownloads: CommunityDownloadQueue by lazy { CommunityDownloadQueue(context) }
 }

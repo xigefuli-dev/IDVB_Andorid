@@ -25,6 +25,13 @@ data class ResolvedSideEntranceFeature(
     val height: Int,
 )
 
+data class ResolvedPrebuiltStructureLine(
+    val file: File,
+    val width: Int,
+    val height: Int,
+    val algorithmId: String,
+)
+
 data class FloorRecognitionAssets(
     /** 独立识别图；为空时应从楼层原图解码 [recognitionRegion]。 */
     val recognitionImageFile: File?,
@@ -33,6 +40,7 @@ data class FloorRecognitionAssets(
     val recognitionHeight: Int,
     val validMapBounds: NormalizedRect?,
     val sideEntranceFeature: ResolvedSideEntranceFeature?,
+    val prebuiltStructureLine: ResolvedPrebuiltStructureLine?,
 )
 
 /**
@@ -207,6 +215,7 @@ class MapRepository(context: Context) {
                         imageWidth = bounds.outWidth,
                         imageHeight = bounds.outHeight,
                         previewRegion = existingFloor.previewRegion ?: metadataFloor?.recognitionRegion,
+                        freeCropPoints = existingFloor.freeCropPoints.ifEmpty { metadataFloor?.freeCropPoints.orEmpty() },
                     )
                 } else {
                     FloorRecord(
@@ -346,6 +355,18 @@ class MapRepository(context: Context) {
         }.getOrNull()
     }
 
+    /** 旧版目录未保存多边形到清单时，从随包 metadata 恢复。 */
+    fun loadFreeCropPoints(mapId: String, floor: FloorRecord): List<NormalizedPoint> {
+        if (floor.freeCropPoints.size >= 3) return floor.freeCropPoints
+        return runCatching {
+            val file = File(mapsRoot, "$mapId/data/metadata.json")
+            if (!file.isFile) return emptyList()
+            json.decodeFromString<MetadataDocument>(file.readText()).floors
+                .firstOrNull { it.key.equals(floor.key, ignoreCase = true) }
+                ?.freeCropPoints.orEmpty()
+        }.getOrDefault(emptyList())
+    }
+
     /** 读取 Desktop IDVM 为指定楼层保存的人工遮瑕层。 */
     fun loadBackgroundLayers(mapId: String, floorKey: String): List<BackgroundLayer> = runCatching {
         val file = File(mapsRoot, "$mapId/data/anchors.json")
@@ -407,6 +428,20 @@ class MapRepository(context: Context) {
             }
         }
 
+        val storedLine = floorRecord.prebuiltStructureLine
+        val resolvedLine = storedLine?.let { line ->
+            resolveCatalogAsset(line.imagePath).takeIf { it.isFile && it.length() == line.fileLength }
+                ?.let { file ->
+                    ResolvedPrebuiltStructureLine(file, line.width, line.height, line.algorithmId)
+                }
+        } ?: metadataFloor?.prebuiltStructureLine?.let { line ->
+            resolvePortableDataAsset(mapId, line.file)
+                .takeIf { it.isFile && it.length() == line.fileLength }
+                ?.let { file ->
+                    ResolvedPrebuiltStructureLine(file, line.width, line.height, line.algorithmId)
+                }
+        }
+
         return FloorRecognitionAssets(
             recognitionImageFile = recognitionFile,
             recognitionRegion = recognitionRegion,
@@ -414,8 +449,17 @@ class MapRepository(context: Context) {
             recognitionHeight = recognitionHeight,
             validMapBounds = floorRecord.validMapBounds ?: metadataFloor?.validMapBounds,
             sideEntranceFeature = resolvedFeature,
+            prebuiltStructureLine = resolvedLine?.takeIf {
+                it.width == recognitionWidth && it.height == recognitionHeight
+            },
         )
     }
+
+    /** IDVM 1.3 地图标签；目录损坏时按无标签处理，不能阻断手动选择。 */
+    fun loadTags(mapId: String): List<MetadataTag> = runCatching {
+        val file = File(mapsRoot, "$mapId/data/metadata.json")
+        if (!file.isFile) emptyList() else json.decodeFromString<MetadataDocument>(file.readText()).tags
+    }.getOrDefault(emptyList())
 
     private fun loadMetadataFloor(mapId: String, floorKey: String): MetadataFloor? = runCatching {
         val file = File(mapsRoot, "$mapId/data/metadata.json")

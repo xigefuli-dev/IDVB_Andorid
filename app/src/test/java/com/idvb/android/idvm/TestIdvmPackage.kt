@@ -18,6 +18,7 @@ data class FloorImage(
     val sideEntranceFeatureCenterX: Double = 0.5,
     val sideEntranceFeatureCenterY: Double = 0.5,
     val sideEntranceFeatureRadius: Int = 1,
+    val prebuiltLineBytes: ByteArray? = null,
 )
 
 data class BuiltPackage(
@@ -57,10 +58,19 @@ object TestIdvmPackage {
         val featurePaths = floors.map { floor ->
             floor.sideEntranceFeatureBytes?.let { "$root/data/floor-${floor.sortOrder.toString().padStart(3, '0')}-side-entrance-feature.png" }
         }
+        val linePaths = floors.map { floor ->
+            floor.prebuiltLineBytes?.let { "$root/data/floor-${floor.sortOrder.toString().padStart(3, '0')}-prebuilt-structure.png" }
+        }
+        val algorithmPath = "$root/data/prebuilt-structure.idva"
+        val algorithmBytes = "test-idva-1.1".encodeToByteArray()
         val dims = floors.map { ImageProbe.dimensions(it.bytes) ?: (0 to 0) }
 
         val metadata = MetadataDocument(
-            schemaVersion = if (formatMinor >= 2) 2 else 1,
+            schemaVersion = when {
+                formatMinor >= 3 -> 3
+                formatMinor >= 2 -> 2
+                else -> 1
+            },
             map = MetadataMap(
                 id = mapId, classId = classId, title = mapName,
                 source = "manual", coordinateSystem = "normalized-top-left-y-down",
@@ -79,6 +89,22 @@ object TestIdvmPackage {
                             centerX = f.sideEntranceFeatureCenterX,
                             centerY = f.sideEntranceFeatureCenterY,
                             radius = f.sideEntranceFeatureRadius,
+                        )
+                    },
+                    prebuiltStructureLine = linePaths[i]?.let { path ->
+                        val line = requireNotNull(f.prebuiltLineBytes)
+                        val lineSize = requireNotNull(ImageProbe.dimensions(line))
+                        PrebuiltStructureLineMetadata(
+                            file = path,
+                            sha256 = IdvmUtil.sha256Hex(IdvmUtil.sha256(line)),
+                            sourceSha256 = IdvmUtil.sha256Hex(IdvmUtil.sha256(f.recognitionImageBytes ?: f.bytes)),
+                            width = lineSize.first,
+                            height = lineSize.second,
+                            fileLength = line.size.toLong(),
+                            algorithmId = "test-algorithm",
+                            algorithmFile = algorithmPath,
+                            algorithmSha256 = IdvmUtil.sha256Hex(IdvmUtil.sha256(algorithmBytes)),
+                            algorithmSchemaVersion = "1.1",
                         )
                     },
                 )
@@ -102,7 +128,9 @@ object TestIdvmPackage {
             floors.forEachIndexed { index, floor ->
                 recognitionImagePaths[index]?.let { path -> put(path, floor.recognitionImageBytes!!) }
                 featurePaths[index]?.let { path -> put(path, floor.sideEntranceFeatureBytes!!) }
+                linePaths[index]?.let { path -> put(path, floor.prebuiltLineBytes!!) }
             }
+            if (linePaths.any { it != null }) put(algorithmPath, algorithmBytes)
         }
         val payload: Map<String, ByteArray> = dataFiles +
             floors.zip(imagePaths).associate { (f, p) -> p to f.bytes } +
@@ -131,6 +159,7 @@ object TestIdvmPackage {
             capabilities = ManifestCapabilities(
                 variantGroups = formatMinor >= 1,
                 floorMarkerKeys = formatMinor >= 2,
+                mapTags = formatMinor >= 3,
             ),
         ).let(mutateManifest)
 

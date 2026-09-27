@@ -1,8 +1,5 @@
 package com.idvb.android.ui.screens.maplist
 
-import android.graphics.BitmapFactory
-import android.graphics.BitmapRegionDecoder
-import android.graphics.Rect
 import android.widget.Toast
 import android.util.LruCache
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -47,6 +44,8 @@ import com.idvb.android.ui.theme.SignalGreenDeep
 @Composable
 fun MapListScreen(
     refreshTick: Int,
+    onOpenImportGuide: () -> Unit = {},
+    onCatalogChanged: () -> Unit = {},
     onCreateMap: (String?, String) -> Unit = { _, _ -> },
     onOpenMap: (MapRecord) -> Unit = {},
 ) {
@@ -58,24 +57,6 @@ fun MapListScreen(
     var moreMenuOpen by remember { mutableStateOf(false) }
     var newClassDialog by remember { mutableStateOf(false) }
     var newClassName by remember { mutableStateOf("") }
-    var importing by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-
-    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri == null || importing) return@rememberLauncherForActivityResult
-        scope.launch {
-            importing = true
-            val (result, fileName) = withContext(Dispatchers.IO) { importIdvmUri(context, uri) }
-            importing = false
-            when (result) {
-                is ImportResult.Success -> {
-                    catalog = withContext(Dispatchers.IO) { AppServices.repository.loadCatalog() }
-                    Toast.makeText(context, "地图导入成功：$fileName", Toast.LENGTH_LONG).show()
-                }
-                is ImportResult.Failure -> Toast.makeText(context, "导入失败：${result.reason}", Toast.LENGTH_LONG).show()
-            }
-        }
-    }
 
     LaunchedEffect(refreshTick) { catalog = withContext(Dispatchers.IO) { AppServices.repository.loadCatalog() } }
     LaunchedEffect(catalog) {
@@ -117,7 +98,6 @@ fun MapListScreen(
                 Box {
                     IconButton(
                         onClick = { moreMenuOpen = true },
-                        enabled = !importing,
                         modifier = Modifier.size(48.dp),
                     ) {
                         Icon(Icons.Outlined.MoreVert, contentDescription = "更多")
@@ -142,12 +122,11 @@ fun MapListScreen(
                             },
                         )
                         DropdownMenuItem(
-                            text = { Text(if (importing) "正在导入…" else "导入地图包") },
+                            text = { Text("导入地图包") },
                             leadingIcon = { Icon(Icons.Outlined.Download, contentDescription = null) },
-                            enabled = !importing,
                             onClick = {
                                 moreMenuOpen = false
-                                importLauncher.launch(arrayOf("*/*"))
+                                onOpenImportGuide()
                             },
                         )
                         DropdownMenuItem(
@@ -208,6 +187,7 @@ fun MapListScreen(
                         catalog = updated
                         classId = created.id
                         AppServices.prefs.selectedMapClassId = created.id
+                        onCatalogChanged()
                         newClassDialog = false
                     },
                 ) { Text("创建") }
@@ -221,6 +201,7 @@ fun MapListScreen(
         confirmButton = { TextButton(onClick = {
             classId?.let(AppServices.repository::deleteClass)
             catalog = AppServices.repository.loadCatalog()
+            onCatalogChanged()
             deleteMode = false
         }) { Text("确认删除", color = MaterialTheme.colorScheme.error) } },
         dismissButton = { TextButton(onClick = { deleteMode = false }) { Text("取消") } },
@@ -273,59 +254,18 @@ private val previewCache = object : LruCache<String, android.graphics.Bitmap>(12
 }
 
 /**
- * 只解码 Desktop 保存的 recognitionRegion，不把整张大地图载入内存。
+ * 解码 Desktop 保存的 recognitionRegion，并按 freeCropPoints 裁出透明多边形。
  * 这同时避免高分辨率地图在列表页因内存压力而显示为空白。
  */
 private fun decodePreviewCrop(mapId: String, floor: FloorRecord): android.graphics.Bitmap? {
-    val cacheKey = "$mapId:${floor.imagePath}:${floor.previewRegion}"
+    val region = AppServices.repository.loadPreviewRegion(mapId, floor)
+    val points = AppServices.repository.loadFreeCropPoints(mapId, floor)
+    val cacheKey = "$mapId:${floor.imagePath}:$region:$points"
     previewCache.get(cacheKey)?.let { return it }
     val image = AppServices.repository.floorImageFile(mapId, floor.imagePath)
-    if (!image.isFile) return null
-    val region = floor.previewRegion ?: readLegacyPreviewRegion(mapId, floor.key)
-    val cropped = runCatching<android.graphics.Bitmap?> {
-        @Suppress("DEPRECATION")
-        val decoder = BitmapRegionDecoder.newInstance(image.absolutePath, false) ?: return null
-        try {
-            val normalized = region ?: NormalizedRect(0.0, 0.0, 1.0, 1.0)
-            val left = (normalized.x * decoder.width).toInt().coerceIn(0, decoder.width - 1)
-            val top = (normalized.y * decoder.height).toInt().coerceIn(0, decoder.height - 1)
-            val right = ((normalized.x + normalized.width) * decoder.width).toInt().coerceIn(left + 1, decoder.width)
-            val bottom = ((normalized.y + normalized.height) * decoder.height).toInt().coerceIn(top + 1, decoder.height)
-            val longest = maxOf(right - left, bottom - top)
-            var sample = 1
-            while (longest / sample > 720) sample *= 2
-            decoder.decodeRegion(Rect(left, top, right, bottom), BitmapFactory.Options().apply { inSampleSize = sample })
-        } finally {
-            @Suppress("DEPRECATION")
-            decoder.recycle()
-        }
-    }.getOrNull()
-    if (cropped != null) return cropped.also { previewCache.put(cacheKey, it) }
-    // 某些旧 Android 解码器不支持个别 PNG/JPEG 的区域解码，退化为采样整图后再裁切。
-    return runCatching {
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(image.absolutePath, bounds)
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
-        var sample = 1
-        while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 1024) sample *= 2
-        val source = BitmapFactory.decodeFile(image.absolutePath, BitmapFactory.Options().apply { inSampleSize = sample }) ?: return null
-        val normalized = region ?: NormalizedRect(0.0, 0.0, 1.0, 1.0)
-        val left = (normalized.x * source.width).toInt().coerceIn(0, source.width - 1)
-        val top = (normalized.y * source.height).toInt().coerceIn(0, source.height - 1)
-        val width = (normalized.width * source.width).toInt().coerceIn(1, source.width - left)
-        val height = (normalized.height * source.height).toInt().coerceIn(1, source.height - top)
-        android.graphics.Bitmap.createBitmap(source, left, top, width, height)
-    }.getOrNull()?.also { previewCache.put(cacheKey, it) }
+    return com.idvb.android.graphics.decodeMapRegion(image, region, 720, points)
+        ?.also { previewCache.put(cacheKey, it) }
 }
-
-/** 兼容修改前已导入的地图：从其原始 metadata.json 恢复裁切选择。 */
-private fun readLegacyPreviewRegion(mapId: String, floorKey: String): NormalizedRect? = runCatching {
-    val metadata = java.io.File(AppServices.repository.mapsRoot, "$mapId/data/metadata.json")
-    if (!metadata.isFile) return null
-    IdvmJson.instance.decodeFromString<MetadataDocument>(metadata.readText())
-        .floors.firstOrNull { it.key == floorKey }?.recognitionRegion
-}.getOrNull()
-
 @Composable
 private fun SkeletonGrid() {
     LazyVerticalGrid(

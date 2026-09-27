@@ -12,7 +12,9 @@ import android.view.MotionEvent
 import android.view.View
 import com.idvb.android.data.MapRepository
 import com.idvb.android.graphics.decodeMapRegion
+import com.idvb.android.idvm.MetadataTag
 import java.io.File
+import kotlin.concurrent.thread
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -22,6 +24,7 @@ class CandidateSelectionView(
     context: Context,
     private val result: RecognitionResult,
     private val repository: MapRepository,
+    private val manualSelection: Boolean = false,
 ) : View(context) {
     interface Listener { fun onSelected(candidate: RecognitionCandidate); fun onCancelled() }
     var listener: Listener? = null
@@ -29,14 +32,36 @@ class CandidateSelectionView(
     private val density = resources.displayMetrics.density
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
-    private val thumbnails: List<Bitmap?> = result.candidates.map(::createCandidatePreview)
+    private val thumbnails = MutableList<Bitmap?>(result.candidates.size) { null }
     private var scroll = 0f
     private var downY = 0f
     private var lastY = 0f
     private var moved = false
     private var armedManualIndex: Int? = null
+    private val mapTags = result.candidates.associate { it.map.id to repository.loadTags(it.map.id) }
+    private val tagGroups = ManualMapSelectionPolicy.groups(mapTags.values.flatten())
+    private val selectedTags = mutableMapOf<String, String>()
+    private var tagChipRects = emptyList<Pair<RectF, ManualTagGroup>>()
+    private var openTagGroup: ManualTagGroup? = null
+    private var tagOptionRects = emptyList<Pair<RectF, String>>()
+    private var previewsStarted = false
 
-    private val headerHeight get() = dp(82f)
+    private fun tagLayout(): List<Pair<RectF, ManualTagGroup>> {
+        var left = dp(12f)
+        var top = dp(64f)
+        return tagGroups.map { group ->
+            text.textSize = dp(10f); text.typeface = android.graphics.Typeface.DEFAULT
+            val chipWidth = (text.measureText("${group.name}：${selectedTags[group.id] ?: "全部"}") + dp(18f))
+                .coerceAtMost((width - dp(24f)).coerceAtLeast(dp(24f)))
+            if (left > dp(12f) && left + chipWidth > width - dp(12f)) {
+                left = dp(12f); top += dp(40f)
+            }
+            val rect = RectF(left, top, left + chipWidth, top + dp(34f))
+            left = rect.right + dp(6f)
+            rect to group
+        }
+    }
+    private val headerHeight get() = tagLayout().lastOrNull()?.first?.bottom?.plus(dp(12f)) ?: dp(82f)
     private val landscape get() = width > height
     private val cardHeight get() = dp(232f)
     private val cardGap get() = dp(10f)
@@ -49,40 +74,82 @@ class CandidateSelectionView(
     private val listTop get() = if (landscape) headerHeight else previewRect.bottom + dp(12f)
     private val cardWidth get() = (width - gridLeft - dp(16f) - cardGap) / 2f
     private val cancelRect get() = RectF(width - dp(92f), dp(14f), width - dp(18f), dp(54f))
+    private fun visibleIndices() = result.candidates.indices.filter { index ->
+        ManualMapSelectionPolicy.matches(mapTags[result.candidates[index].map.id].orEmpty(), selectedTags)
+    }
 
     override fun onDraw(canvas: Canvas) {
         canvas.drawColor(Color.rgb(17, 20, 23))
         text.textSize = dp(18f); text.typeface = android.graphics.Typeface.DEFAULT_BOLD
-        canvas.drawText("选择候选地图", dp(20f), dp(31f), text)
+        canvas.drawText(if (manualSelection) "手动选择地图" else "选择候选地图", dp(20f), dp(31f), text)
         val reliableCount = result.candidates.count { it.disposition == CandidateDisposition.RELIABLE }
         text.typeface = android.graphics.Typeface.DEFAULT
         text.textSize = dp(11f)
-        text.color = if (reliableCount > 0) Color.rgb(150, 225, 170) else Color.rgb(244, 190, 90)
-        canvas.drawText(
-            if (reliableCount > 0) "整图结构已确认 $reliableCount 张；其余地图仅可人工选择"
-            else "没有地图通过整图结构验证；如需继续，请人工核对后再确认",
+        text.color = if (manualSelection || reliableCount > 0) Color.rgb(150, 225, 170) else Color.rgb(244, 190, 90)
+        drawEllipsized(canvas,
+            if (manualSelection) "按标签筛选后选择地图"
+            else if (reliableCount > 0) "已确认 $reliableCount 张；其余请人工核对"
+            else "尚未确认，请核对后选择",
             dp(20f),
             dp(53f),
-            text,
+            cancelRect.left - dp(28f),
         )
         text.typeface = android.graphics.Typeface.DEFAULT
         paint.color = Color.rgb(50, 55, 60); canvas.drawRoundRect(cancelRect, dp(10f), dp(10f), paint)
         text.textAlign = Paint.Align.CENTER; text.textSize = dp(13f); canvas.drawText("取消", cancelRect.centerX(), cancelRect.centerY() + dp(5f), text); text.textAlign = Paint.Align.LEFT
+        drawTagSelectors(canvas)
 
         val livePreview = previewRect
         paint.color = Color.BLACK; canvas.drawRoundRect(livePreview, dp(12f), dp(12f), paint)
         drawBitmapFit(canvas, result.capturedRegion, livePreview)
 
         canvas.save(); canvas.clipRect(0, listTop.toInt(), width, height)
-        result.candidates.forEachIndexed { index, candidate ->
-            val row = index / 2
-            val column = index % 2
+        visibleIndices().forEachIndexed { visibleIndex, index ->
+            val candidate = result.candidates[index]
+            val row = visibleIndex / 2
+            val column = visibleIndex % 2
             val left = gridLeft + column * (cardWidth + cardGap)
             val top = listTop + row * (cardHeight + cardGap) - scroll
             if (top + cardHeight < listTop || top > height) return@forEachIndexed
             drawCandidate(canvas, index, candidate, thumbnails[index], left, top)
         }
         canvas.restore()
+        drawTagDropdown(canvas)
+    }
+
+    private fun drawTagSelectors(canvas: Canvas) {
+        val chips = tagLayout()
+        chips.forEach { (chip, group) ->
+            val value = selectedTags[group.id] ?: "全部"
+            text.textSize = dp(10f); text.typeface = android.graphics.Typeface.DEFAULT
+            val label = "${group.name}：$value"
+            paint.color = if (value == "全部") Color.rgb(50, 55, 60) else Color.rgb(32, 83, 57)
+            canvas.drawRoundRect(chip, dp(8f), dp(8f), paint)
+            text.color = Color.WHITE; text.textAlign = Paint.Align.CENTER
+            canvas.drawText(label, chip.centerX(), chip.centerY() + dp(4f), text)
+            text.textAlign = Paint.Align.LEFT
+        }
+        tagChipRects = chips
+    }
+
+    private fun drawTagDropdown(canvas: Canvas) {
+        val group = openTagGroup ?: return
+        val anchor = tagChipRects.firstOrNull { it.second.id == group.id }?.first ?: return
+        val values = listOf("全部") + group.values
+        val width = max(anchor.width(), text.apply { textSize = dp(12f) }.measureText(values.maxBy(String::length)) + dp(28f))
+            .coerceAtMost(this.width - dp(24f))
+        val left = (anchor.right - width).coerceIn(dp(12f), (this.width - dp(12f) - width).coerceAtLeast(dp(12f)))
+        val options = values.mapIndexed { index, value ->
+            RectF(left, anchor.bottom + index * cancelRect.height(), left + width, anchor.bottom + (index + 1) * cancelRect.height())
+                .also { rect ->
+                    paint.color = if (value == (selectedTags[group.id] ?: "全部")) Color.rgb(32, 83, 57) else Color.rgb(50, 55, 60)
+                    canvas.drawRect(rect, paint)
+                    text.color = Color.WHITE; text.textAlign = Paint.Align.CENTER
+                    canvas.drawText(value, rect.centerX(), rect.centerY() + dp(5f), text)
+                    text.textAlign = Paint.Align.LEFT
+                } to value
+        }
+        tagOptionRects = options
     }
 
     private fun drawCandidate(canvas: Canvas, index: Int, candidate: RecognitionCandidate, thumbnail: Bitmap?, left: Float, top: Float) {
@@ -95,7 +162,7 @@ class CandidateSelectionView(
         }
         canvas.drawRoundRect(card, dp(12f), dp(12f), paint)
         // 双列卡片上半部显示经过侧门定位后的实际视口裁剪。
-        val imageRect = RectF(card.left + dp(7f), card.top + dp(7f), card.right - dp(7f), card.bottom - dp(54f))
+        val imageRect = RectF(card.left + dp(7f), card.top + dp(7f), card.right - dp(7f), card.bottom - if (manualSelection) dp(32f) else dp(54f))
         paint.color = Color.BLACK; canvas.drawRoundRect(imageRect, dp(7f), dp(7f), paint)
         thumbnail?.let { drawBitmapFit(canvas, it, imageRect) }
         val x = card.left + dp(12f)
@@ -109,7 +176,7 @@ class CandidateSelectionView(
             CandidateDisposition.NEEDS_VERIFICATION -> Color.rgb(244, 190, 90)
             CandidateDisposition.CATALOG_ONLY -> Color.rgb(165, 170, 177)
         }
-        paint.color = Color.argb(220, 24, 28, 31)
+        if (!manualSelection) paint.color = Color.argb(220, 24, 28, 31)
         val statusWidth = text.apply { textSize = dp(10f); typeface = android.graphics.Typeface.DEFAULT_BOLD }
             .measureText(status) + dp(14f)
         val statusRect = RectF(
@@ -118,22 +185,26 @@ class CandidateSelectionView(
             imageRect.right - dp(6f),
             imageRect.top + dp(28f),
         )
-        canvas.drawRoundRect(statusRect, dp(8f), dp(8f), paint)
-        text.textAlign = Paint.Align.CENTER; text.color = statusColor
-        canvas.drawText(status, statusRect.centerX(), statusRect.centerY() + dp(4f), text)
-        text.textAlign = Paint.Align.LEFT
+        if (!manualSelection) {
+            canvas.drawRoundRect(statusRect, dp(8f), dp(8f), paint)
+            text.textAlign = Paint.Align.CENTER; text.color = statusColor
+            canvas.drawText(status, statusRect.centerX(), statusRect.centerY() + dp(4f), text)
+            text.textAlign = Paint.Align.LEFT
+        }
 
         text.textSize = dp(12f); text.typeface = android.graphics.Typeface.DEFAULT_BOLD
         text.color = Color.WHITE
-        drawEllipsized(canvas, candidate.map.title, x, card.bottom - dp(30f), card.width() - dp(24f))
-        text.textSize = dp(9f); text.typeface = android.graphics.Typeface.DEFAULT
-        text.color = statusColor
-        val evidence = if (armedManualIndex == index && candidate.disposition != CandidateDisposition.RELIABLE) {
-            "再次点击：作为人工选择锁定（结构未确认）"
-        } else {
-            candidate.evidenceLabel
+        drawEllipsized(canvas, candidate.map.title, x, card.bottom - if (manualSelection) dp(11f) else dp(30f), card.width() - dp(24f))
+        if (!manualSelection) {
+            text.textSize = dp(9f); text.typeface = android.graphics.Typeface.DEFAULT
+            text.color = statusColor
+            val evidence = if (armedManualIndex == index && candidate.disposition != CandidateDisposition.RELIABLE) {
+                "再次点击：作为人工选择锁定（结构未确认）"
+            } else {
+                candidate.evidenceLabel
+            }
+            drawEllipsized(canvas, evidence, x, card.bottom - dp(12f), card.width() - dp(24f))
         }
-        drawEllipsized(canvas, evidence, x, card.bottom - dp(12f), card.width() - dp(24f))
 
         if (armedManualIndex == index && candidate.disposition != CandidateDisposition.RELIABLE) {
             paint.style = Paint.Style.STROKE
@@ -150,7 +221,7 @@ class CandidateSelectionView(
             MotionEvent.ACTION_MOVE -> {
                 if (abs(event.y - downY) > dp(6f)) moved = true
                 if (moved && event.y >= listTop) {
-                    val rows = (result.candidates.size + 1) / 2
+                    val rows = (visibleIndices().size + 1) / 2
                     val maxScroll = max(0f, rows * (cardHeight + cardGap) - cardGap - (height - listTop))
                     scroll = (scroll - (event.y - lastY)).coerceIn(0f, maxScroll); invalidate()
                 }
@@ -158,14 +229,23 @@ class CandidateSelectionView(
             }
             MotionEvent.ACTION_UP -> if (!moved) {
                 if (cancelRect.contains(event.x, event.y)) listener?.onCancelled()
+                else if (tagOptionRects.firstOrNull { it.first.contains(event.x, event.y) }?.let { (_, value) ->
+                    val group = openTagGroup ?: return@let false
+                    if (value == "全部") selectedTags.remove(group.id) else selectedTags[group.id] = value
+                    openTagGroup = null; tagOptionRects = emptyList(); armedManualIndex = null; scroll = 0f; invalidate(); true
+                } == true) Unit
+                else if (tagChipRects.firstOrNull { it.first.contains(event.x, event.y) }?.let { (_, group) ->
+                    openTagGroup = if (openTagGroup?.id == group.id) null else group
+                    tagOptionRects = emptyList(); invalidate(); true
+                } == true) Unit
                 else if (event.y >= listTop) {
                     val column = ((event.x - gridLeft) / (cardWidth + cardGap)).toInt()
                     val row = ((event.y - listTop + scroll) / (cardHeight + cardGap)).toInt()
                     val localX = event.x - gridLeft - column * (cardWidth + cardGap)
                     val localY = event.y - listTop + scroll - row * (cardHeight + cardGap)
                     if (column in 0..1 && row >= 0 && localX in 0f..cardWidth && localY in 0f..cardHeight) {
-                        val index = row * 2 + column
-                        result.candidates.getOrNull(index)?.let { candidate ->
+                        val index = visibleIndices().getOrNull(row * 2 + column)
+                        index?.let { result.candidates[it] }?.let { candidate ->
                             val decision = CandidateSelectionPolicy.onTap(
                                 candidate.disposition,
                                 index,
@@ -190,6 +270,23 @@ class CandidateSelectionView(
         super.onDetachedFromWindow()
     }
 
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        if (previewsStarted) return
+        previewsStarted = true
+        thread(name = "idvb-map-previews", isDaemon = true) {
+            result.candidates.forEachIndexed { index, candidate ->
+                val preview = createCandidatePreview(candidate)
+                post {
+                    if (isAttachedToWindow) {
+                        thumbnails[index] = preview
+                        invalidate()
+                    } else if (preview != null && !preview.isRecycled) preview.recycle()
+                }
+            }
+        }
+    }
+
     private fun drawBitmapFit(canvas: Canvas, bitmap: Bitmap, dst: RectF) {
         val scale = minOf(dst.width() / bitmap.width, dst.height() / bitmap.height)
         val w = bitmap.width * scale; val h = bitmap.height * scale
@@ -204,6 +301,7 @@ class CandidateSelectionView(
         path: String,
         gate: com.idvb.android.idvm.NormalizedRect?,
         previewRegion: com.idvb.android.idvm.NormalizedRect?,
+        freeCropPoints: List<com.idvb.android.idvm.NormalizedPoint>,
     ): Bitmap? {
         val screenWidth = resources.displayMetrics.widthPixels
         val screenHeight = resources.displayMetrics.heightPixels
@@ -213,9 +311,10 @@ class CandidateSelectionView(
         val decodeTarget = (max(outputWidth, outputHeight) * 1.35f).toInt()
         // IDVM gate bounds are relative to recognitionRegion. Decode that region
         // directly so neither the full map nor pixels outside the selection can leak in.
-        val source = decodeMapRegion(File(path), previewRegion, decodeTarget) ?: return null
+        val source = decodeMapRegion(File(path), previewRegion, decodeTarget, freeCropPoints) ?: return null
         val output = Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(output); canvas.drawColor(Color.BLACK)
+        val previewPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
         val normalizedGateX = gate?.let { it.x + it.width / 2.0 } ?: .5
         val normalizedGateY = gate?.let { it.y + it.height / 2.0 } ?: .5
         val centerX = normalizedGateX.toFloat() * source.width
@@ -267,7 +366,7 @@ class CandidateSelectionView(
                 0f, 0f, 1f,
             ))
         }
-        canvas.drawBitmap(source, matrix, paint)
+        canvas.drawBitmap(source, matrix, previewPaint)
         source.recycle()
         return output
     }
@@ -285,7 +384,8 @@ class CandidateSelectionView(
             val sourceFile = recognitionFile ?: repository.floorImageFile(candidate.map.id, floor.imagePath)
             val sourceRegion = if (recognitionFile != null) null else assets.recognitionRegion
             val longest = max(result.capturedRegion.width, result.capturedRegion.height).coerceIn(480, 1200)
-            val source = decodeMapRegion(sourceFile, sourceRegion, longest)
+            val source = decodeMapRegion(sourceFile, sourceRegion, longest,
+                if (recognitionFile == null) repository.loadFreeCropPoints(candidate.map.id, floor) else emptyList())
             if (source != null) {
                 return renderStructureAlignedPreview(
                     source,
@@ -299,6 +399,7 @@ class CandidateSelectionView(
             repository.floorImageFile(candidate.map.id, floor.imagePath).path,
             repository.loadSideDoors(candidate.map.id, floor.key).firstOrNull(),
             repository.loadPreviewRegion(candidate.map.id, floor),
+            repository.loadFreeCropPoints(candidate.map.id, floor),
         )
     }
 
@@ -318,6 +419,7 @@ class CandidateSelectionView(
         val output = Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(output)
         canvas.drawColor(Color.BLACK)
+        val previewPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
         val viewportScale = outputWidth.toFloat() / frameWidth
         val matrix = Matrix().apply {
             setValues(floatArrayOf(
@@ -332,11 +434,21 @@ class CandidateSelectionView(
                 1f,
             ))
         }
-        canvas.drawBitmap(source, matrix, paint)
+        canvas.drawBitmap(source, matrix, previewPaint)
         source.recycle()
         return output
     }
     private fun dp(value: Float) = value * density
+}
+
+data class ManualTagGroup(val id: String, val name: String, val values: List<String>)
+
+internal object ManualMapSelectionPolicy {
+    fun groups(tags: List<MetadataTag>): List<ManualTagGroup> = tags.groupBy { it.groupId }
+        .map { (id, values) -> ManualTagGroup(id, values.first().groupName, values.map { it.value }.distinct()) }
+
+    fun matches(tags: List<MetadataTag>, selections: Map<String, String>): Boolean =
+        selections.all { (groupId, value) -> tags.any { it.groupId == groupId && it.value == value } }
 }
 
 internal object CandidateSelectionPolicy {
