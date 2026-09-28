@@ -7,6 +7,8 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.view.MotionEvent
 import android.view.View
+import android.os.Build
+import android.view.WindowInsets
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -33,16 +35,26 @@ class BlueprintCalibrationView(context: Context) : View(context) {
     private var selecting = false
     private var selection: RectF? = null
 
-    private val cancelRect get() = RectF(dp(20f), height - dp(66f), dp(112f), height - dp(18f))
-    private val resetRect get() = RectF(width / 2f - dp(46f), height - dp(66f), width / 2f + dp(46f), height - dp(18f))
-    private val confirmRect get() = RectF(width - dp(112f), height - dp(66f), width - dp(20f), height - dp(18f))
+    private val safeTop get() = if (Build.VERSION.SDK_INT >= 30) {
+        rootWindowInsets?.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())?.top ?: 0
+    } else rootWindowInsets?.systemWindowInsetTop ?: 0
+    private val safeBottom get() = if (Build.VERSION.SDK_INT >= 30) {
+        rootWindowInsets?.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())?.bottom ?: 0
+    } else rootWindowInsets?.systemWindowInsetBottom ?: 0
+    private val buttonWidth get() = min(dp(92f), (width - dp(56f)) / 3f)
+    private val cancelRect get() = RectF(dp(20f), height - safeBottom - dp(66f), dp(20f) + buttonWidth, height - safeBottom - dp(18f))
+    private val resetRect get() = RectF(width / 2f - buttonWidth / 2, height - safeBottom - dp(66f), width / 2f + buttonWidth / 2, height - safeBottom - dp(18f))
+    private val confirmRect get() = RectF(width - dp(20f) - buttonWidth, height - safeBottom - dp(66f), width - dp(20f), height - safeBottom - dp(18f))
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), mask)
-        val headerCenterX = width * 0.25f
-        text.textSize = dp(18f); canvas.drawText("蓝图模式 · 框选地图显示区域", headerCenterX, dp(42f), text)
-        text.textSize = dp(13f); canvas.drawText("触摸不会传递到其他应用", headerCenterX, dp(66f), text)
+        val headerCenterX = width / 2f
+        val title = "蓝图模式 · 框选地图显示区域"
+        text.textSize = dp(18f)
+        text.textSize *= min(1f, (width - dp(24f)) / text.measureText(title))
+        canvas.drawText(title, headerCenterX, safeTop + dp(42f), text)
+        text.textSize = dp(13f); canvas.drawText("触摸不会传递到其他应用", headerCenterX, safeTop + dp(66f), text)
         selection?.let {
             // 框内减弱滤镜，方便精确对齐底层游戏画面。
             canvas.save()
@@ -51,7 +63,9 @@ class BlueprintCalibrationView(context: Context) : View(context) {
             canvas.restore()
             canvas.drawRect(it, border)
             text.textSize = dp(12f)
-            canvas.drawText("${it.width().toInt()} × ${it.height().toInt()} px", it.centerX(), (it.top - dp(8f)).coerceAtLeast(dp(84f)), text)
+            val labelY = if (it.top - dp(8f) >= safeTop + dp(90f)) it.top - dp(8f)
+                else max(it.top + dp(18f), safeTop + dp(90f))
+            canvas.drawText("${it.width().toInt()} × ${it.height().toInt()} px", it.centerX(), labelY, text)
         }
         drawButton(canvas, cancelRect, "取消", button)
         drawButton(canvas, resetRect, "重选", button)

@@ -102,6 +102,11 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.idvb.android.tutorial.TutorialStore
+import com.idvb.android.tutorial.TutorialStep
+import com.idvb.android.tutorial.TutorialPanel
+import com.idvb.android.tutorial.TutorialPracticeActivity
+import androidx.compose.foundation.layout.heightIn
 
 class MainActivity : ComponentActivity() {
     private var catalogTick by mutableIntStateOf(0)
@@ -124,6 +129,28 @@ class MainActivity : ComponentActivity() {
                 var creationImages by remember { mutableStateOf<Map<String, Uri>>(emptyMap()) }
                 var creationSideDoors by remember { mutableStateOf(emptyList<com.idvb.android.idvm.NormalizedRect>()) }
                 val permissions = rememberPermissionController()
+                val tutorialStore = remember { TutorialStore.get(context) }
+                val tutorial by tutorialStore.state.collectAsState()
+                val openPractice = {
+                    tutorialStore.update { it.copy(practiceOpen = true) }
+                    startActivity(Intent(this@MainActivity, TutorialPracticeActivity::class.java))
+                }
+                LaunchedEffect(Unit) {
+                    if (savedInstanceState == null && tutorial.active && tutorial.practiceOpen && tutorial.step >= TutorialStep.LOBBY) {
+                        openPractice()
+                    }
+                }
+                LaunchedEffect(tutorial.active, tutorial.step) {
+                    if (!tutorial.active) return@LaunchedEffect
+                    val tutorialTab = when (tutorial.step) {
+                        TutorialStep.IMPORT -> 2
+                        TutorialStep.PERMISSIONS -> 0
+                        else -> null
+                    } ?: return@LaunchedEffect
+                    navigatingForward = tutorialTab > tab
+                    page = "main"
+                    tab = tutorialTab
+                }
 
                 val hasMaps = remember(catalogTick, page, tab) {
                     AppServices.repository.loadCatalog().maps.isNotEmpty()
@@ -169,7 +196,7 @@ class MainActivity : ComponentActivity() {
                     // 始终保留同一块布局空间，避免页面切换时高度变化造成“斜向”动画。
                     bottomBar = { MainBottomBar(tab = tab, visible = page == "main", onSelect = { selected -> navigatingForward = selected > tab; tab = selected }) },
                     floatingActionButton = {
-                        val permissionsReady = permissions.snapshot.allGranted || permissions.snapshot.onlyScreenCaptureMissing
+                        val permissionsReady = permissions.snapshot.readyToStart
                         val ready = hasMaps && permissionsReady
                         val description = if (!hasMaps) "导入地图" else if (ready) "启动服务" else "补全权限"
                         if (page == "main" && (tab == 0 || tab == 1)) ServiceStatusFab(
@@ -199,9 +226,18 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                 ) { innerPadding ->
-                    Box(Modifier.fillMaxSize().padding(innerPadding)) {
+                    Column(Modifier.fillMaxSize().padding(innerPadding)) {
+                        if (tutorial.active && page == "main") TutorialPanel(
+                            store = tutorialStore,
+                            hasMaps = hasMaps,
+                            permissionsReady = permissions.snapshot.readyToStart,
+                            onPractice = openPractice,
+                            onPause = { tutorialStore.update { it.copy(active = false) } },
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp),
+                        )
                         AnimatedContent(
                             targetState = page to tab,
+                            modifier = Modifier.weight(1f),
                             transitionSpec = {
                                 if (navigatingForward) {
                                     (fadeIn() + slideInHorizontally { it / 5 }) togetherWith
@@ -287,6 +323,8 @@ class MainActivity : ComponentActivity() {
                                     0 -> HomeScreen(
                                         permissions = permissions.snapshot,
                                         hasMaps = hasMaps,
+                                        onOpenTutorial = { tutorialStore.update { it.copy(active = true) } },
+                                        tutorialLabel = if (tutorial.step == TutorialStep.DONE) "新手教程 · 查看 / 重练" else "新手教程 · 继续第 ${tutorial.step.ordinal + 1} 段",
                                     )
                                     1 -> MapListScreen(
                                         refreshTick = catalogTick,

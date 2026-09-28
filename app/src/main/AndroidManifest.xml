@@ -32,6 +32,11 @@
         android:theme="@style/Theme.IDVBForAndroid">
 
         <activity
+            android:name=".tutorial.TutorialPracticeActivity"
+            android:exported="false"
+            android:screenOrientation="sensorLandscape" />
+
+        <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"

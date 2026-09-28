@@ -118,3 +118,13 @@ secrets.properties
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Screenshots explicitly supplied for the bundled interactive beginner tutorial.
+!app/src/main/assets/tutorial/lobby.png
+!app/src/main/assets/tutorial/calibration.png
+!app/src/main/assets/tutorial/side.png
+!app/src/main/assets/tutorial/game.png
+!app/src/main/assets/tutorial/map.png
+
+# Local verification captures, device data, and linked Gradle caches
+/.verify/

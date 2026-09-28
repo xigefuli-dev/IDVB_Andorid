@@ -60,6 +60,14 @@ class OverlayService : Service() {
         const val ACTION_CLOSE = "com.idvb.android.overlay.CLOSE"
         const val EXTRA_OPACITY = "opacity"
         const val EXTRA_FLOOR_DELTA = "floor_delta"
+        private var currentService: OverlayService? = null
+        private var practiceForeground = false
+
+        /** Main-thread lifecycle call; do not toggle the user's persisted visibility. */
+        fun setPracticeForeground(active: Boolean) {
+            practiceForeground = active
+            currentService?.applyPracticeVisibility()
+        }
 
         fun start(context: Context) = context.startForegroundService(Intent(context, OverlayService::class.java))
         fun stop(context: Context) = context.stopService(Intent(context, OverlayService::class.java))
@@ -142,6 +150,7 @@ class OverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        currentService = this
         getSharedPreferences("overlay", MODE_PRIVATE).registerOnSharedPreferenceChangeListener(capturePreferencesListener)
         val display = getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY)
         val displayContext = display?.let(::createDisplayContext) ?: this
@@ -190,7 +199,20 @@ class OverlayService : Service() {
             }
             else -> ensureBalls()
         }
+        if (intent?.action == null && OverlayState.state.value.running) {
+            com.idvb.android.tutorial.TutorialStore.get(this).update { it.copy(serviceStarted = true) }
+        }
+        applyPracticeVisibility()
         return START_STICKY
+    }
+
+    private fun applyPracticeVisibility() {
+        val visible = !practiceForeground && OverlayState.state.value.visible
+        balls?.visibility = if (visible && !scanning) android.view.View.VISIBLE else android.view.View.INVISIBLE
+        guideView?.visibility = if (visible && guideVisible && !scanning && adjustView == null) android.view.View.VISIBLE else android.view.View.INVISIBLE
+        listOf(blueprintView, adjustView, candidateView, scanProgressView).forEach {
+            it?.visibility = if (practiceForeground) android.view.View.INVISIBLE else android.view.View.VISIBLE
+        }
     }
 
     private fun ensureBalls() {
@@ -888,6 +910,7 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
+        if (currentService === this) currentService = null
         destroyed = true
         getSharedPreferences("overlay", MODE_PRIVATE).unregisterOnSharedPreferenceChangeListener(capturePreferencesListener)
         scanGeneration++
@@ -955,6 +978,7 @@ class OverlayService : Service() {
         window.x = window.x.coerceIn(0, (screen.first - window.width).coerceAtLeast(0))
         window.y = window.y.coerceIn(0, (screen.second - window.height).coerceAtLeast(0))
         window.update()
+        applyPracticeVisibility()
     }
 
     private fun ensureChannel() {

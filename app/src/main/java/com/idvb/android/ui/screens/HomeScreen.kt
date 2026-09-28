@@ -28,6 +28,8 @@ private data class PermissionItem(val title: String, val detail: String, val gra
 fun HomeScreen(
     permissions: PermissionSnapshot,
     hasMaps: Boolean = true,
+    onOpenTutorial: () -> Unit = {},
+    tutorialLabel: String = "新手教程",
 ) {
     val items = listOf(
         PermissionItem("悬浮窗", "在其他应用上层显示地图", permissions.overlay),
@@ -67,13 +69,13 @@ fun HomeScreen(
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .48f)),
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
             elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-            modifier = Modifier.fillMaxWidth().clickable(onClick = {}),
+            modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenTutorial),
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(18.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("新手教程", style = MaterialTheme.typography.titleLarge)
+                Text(tutorialLabel, style = MaterialTheme.typography.titleLarge)
                 Spacer(Modifier.weight(1f))
                 Text("→", style = MaterialTheme.typography.titleLarge)
             }

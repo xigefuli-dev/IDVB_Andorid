@@ -45,6 +45,10 @@ data class PermissionSnapshot(
     val onlyScreenCaptureMissing: Boolean
         get() = overlay && !screenCapture && notifications && foregroundService &&
             mediaProjectionService && batteryOptimization
+
+    /** MediaProjection asks for a fresh grant on start; accessibility must already be enabled. */
+    val readyToStart: Boolean
+        get() = allGranted || (captureMethod == ScreenCaptureMethod.MEDIA_PROJECTION && onlyScreenCaptureMissing)
 }
 
 data class PermissionController(

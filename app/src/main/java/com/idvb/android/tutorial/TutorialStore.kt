@@ -1,0 +1,36 @@
+package com.idvb.android.tutorial
+
+import android.content.Context
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+
+class TutorialStore private constructor(context: Context) {
+    private val prefs = context.getSharedPreferences("beginner_tutorial_v1", Context.MODE_PRIVATE)
+    private val json = Json { ignoreUnknownKeys = true }
+    private val mutable = MutableStateFlow(runCatching {
+        json.decodeFromString<TutorialProgress>(prefs.getString("progress", null) ?: "{}")
+    }.getOrDefault(TutorialProgress()))
+    val state = mutable.asStateFlow()
+
+    @Synchronized fun update(transform: (TutorialProgress) -> TutorialProgress) {
+        val next = transform(mutable.value)
+        if (next == mutable.value) return
+        // Persist the entire checkpoint atomically, including practice gestures.
+        // apply updates memory immediately and Android flushes it on lifecycle changes.
+        prefs.edit().putString("progress", json.encodeToString(next)).apply()
+        mutable.value = next
+    }
+
+    fun performed(step: TutorialStep, transform: (PracticeState) -> PracticeState) = update {
+        it.copy(performed = it.performed + step, practice = transform(it.practice))
+    }
+
+    companion object {
+        @Volatile private var instance: TutorialStore? = null
+        fun get(context: Context): TutorialStore = instance ?: synchronized(this) {
+            instance ?: TutorialStore(context.applicationContext).also { instance = it }
+        }
+    }
+}

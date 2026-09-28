@@ -5,19 +5,17 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Rect
 import android.graphics.RectF
-import android.graphics.Matrix
 import android.view.MotionEvent
 import android.view.View
+import android.os.Build
+import android.view.WindowInsets
 import com.idvb.android.data.MapRepository
 import com.idvb.android.graphics.decodeMapRegion
 import com.idvb.android.idvm.MetadataTag
-import java.io.File
 import kotlin.concurrent.thread
 import kotlin.math.abs
 import kotlin.math.max
-import kotlin.math.roundToInt
 
 /** 全屏原生候选窗：识别结果优先，目录中其余地图继续排在末尾。 */
 class CandidateSelectionView(
@@ -29,7 +27,7 @@ class CandidateSelectionView(
     interface Listener { fun onSelected(candidate: RecognitionCandidate); fun onCancelled() }
     var listener: Listener? = null
 
-    private val density = resources.displayMetrics.density
+    private val density get() = resources.displayMetrics.density
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
     private val thumbnails = MutableList<Bitmap?>(result.candidates.size) { null }
@@ -45,10 +43,21 @@ class CandidateSelectionView(
     private var openTagGroup: ManualTagGroup? = null
     private var tagOptionRects = emptyList<Pair<RectF, String>>()
     private var previewsStarted = false
+    private var tagMenuBounds: RectF? = null
+    private var tagMenuScroll = 0f
+    private var tagMenuMaxScroll = 0f
+    private var tagMenuGesture = false
+
+    private val safeTop get() = if (Build.VERSION.SDK_INT >= 30) {
+        rootWindowInsets?.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())?.top ?: 0
+    } else rootWindowInsets?.systemWindowInsetTop ?: 0
+    private val safeBottom get() = if (Build.VERSION.SDK_INT >= 30) {
+        rootWindowInsets?.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())?.bottom ?: 0
+    } else rootWindowInsets?.systemWindowInsetBottom ?: 0
 
     private fun tagLayout(): List<Pair<RectF, ManualTagGroup>> {
         var left = dp(12f)
-        var top = dp(64f)
+        var top = safeTop + dp(64f)
         return tagGroups.map { group ->
             text.textSize = dp(10f); text.typeface = android.graphics.Typeface.DEFAULT
             val chipWidth = (text.measureText("${group.name}：${selectedTags[group.id] ?: "全部"}") + dp(18f))
@@ -61,27 +70,42 @@ class CandidateSelectionView(
             rect to group
         }
     }
-    private val headerHeight get() = tagLayout().lastOrNull()?.first?.bottom?.plus(dp(12f)) ?: dp(82f)
+    private val headerHeight get() = tagLayout().lastOrNull()?.first?.bottom?.plus(dp(12f)) ?: (safeTop + dp(82f))
     private val landscape get() = width > height
-    private val cardHeight get() = dp(232f)
+    private val contentBottom get() = height - safeBottom - dp(12f)
+    private val cardHeight get() = minOf(dp(232f), (contentBottom - listTop).coerceAtLeast(dp(80f)))
     private val cardGap get() = dp(10f)
     private val previewRect get() = if (landscape) {
-        RectF(dp(16f), headerHeight, width * .34f, height - dp(16f))
+        RectF(dp(16f), headerHeight, width * .34f, contentBottom)
     } else {
-        RectF(dp(16f), headerHeight, width - dp(16f), headerHeight + dp(160f))
+        val available = (contentBottom - headerHeight - dp(192f)).coerceAtLeast(dp(48f))
+        val previewHeight = minOf(dp(160f), height * .22f, available)
+        RectF(dp(16f), headerHeight, width - dp(16f), headerHeight + previewHeight)
     }
     private val gridLeft get() = if (landscape) previewRect.right + dp(12f) else dp(12f)
     private val listTop get() = if (landscape) headerHeight else previewRect.bottom + dp(12f)
-    private val cardWidth get() = (width - gridLeft - dp(16f) - cardGap) / 2f
-    private val cancelRect get() = RectF(width - dp(92f), dp(14f), width - dp(18f), dp(54f))
+    private val columnCount get() = if ((width - gridLeft - dp(16f) - cardGap) / 2 >= dp(150f)) 2 else 1
+    private val cardWidth get() = (width - gridLeft - dp(16f) - cardGap * (columnCount - 1)) / columnCount
+    private val cancelRect get() = RectF(width - dp(92f), safeTop + dp(14f), width - dp(18f), safeTop + dp(54f))
     private fun visibleIndices() = result.candidates.indices.filter { index ->
         ManualMapSelectionPolicy.matches(mapTags[result.candidates[index].map.id].orEmpty(), selectedTags)
     }
 
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        // Rotation can change the column count; an old scroll offset may exceed
+        // the new list length or leave dropdown hit targets at stale positions.
+        scroll = 0f
+        armedManualIndex = null
+        openTagGroup = null
+        tagOptionRects = emptyList()
+        tagMenuBounds = null
+    }
+
     override fun onDraw(canvas: Canvas) {
         canvas.drawColor(Color.rgb(17, 20, 23))
-        text.textSize = dp(18f); text.typeface = android.graphics.Typeface.DEFAULT_BOLD
-        canvas.drawText(if (manualSelection) "手动选择地图" else "选择候选地图", dp(20f), dp(31f), text)
+        text.color = Color.WHITE; text.textSize = dp(18f); text.typeface = android.graphics.Typeface.DEFAULT_BOLD
+        drawEllipsized(canvas, if (manualSelection) "手动选择地图" else "选择候选地图", dp(20f), safeTop + dp(31f), cancelRect.left - dp(28f))
         val reliableCount = result.candidates.count { it.disposition == CandidateDisposition.RELIABLE }
         text.typeface = android.graphics.Typeface.DEFAULT
         text.textSize = dp(11f)
@@ -91,7 +115,7 @@ class CandidateSelectionView(
             else if (reliableCount > 0) "已确认 $reliableCount 张；其余请人工核对"
             else "尚未确认，请核对后选择",
             dp(20f),
-            dp(53f),
+            safeTop + dp(53f),
             cancelRect.left - dp(28f),
         )
         text.typeface = android.graphics.Typeface.DEFAULT
@@ -103,11 +127,11 @@ class CandidateSelectionView(
         paint.color = Color.BLACK; canvas.drawRoundRect(livePreview, dp(12f), dp(12f), paint)
         drawBitmapFit(canvas, result.capturedRegion, livePreview)
 
-        canvas.save(); canvas.clipRect(0, listTop.toInt(), width, height)
+        canvas.save(); canvas.clipRect(0f, listTop, width.toFloat(), contentBottom)
         visibleIndices().forEachIndexed { visibleIndex, index ->
             val candidate = result.candidates[index]
-            val row = visibleIndex / 2
-            val column = visibleIndex % 2
+            val row = visibleIndex / columnCount
+            val column = visibleIndex % columnCount
             val left = gridLeft + column * (cardWidth + cardGap)
             val top = listTop + row * (cardHeight + cardGap) - scroll
             if (top + cardHeight < listTop || top > height) return@forEachIndexed
@@ -139,16 +163,25 @@ class CandidateSelectionView(
         val width = max(anchor.width(), text.apply { textSize = dp(12f) }.measureText(values.maxBy(String::length)) + dp(28f))
             .coerceAtMost(this.width - dp(24f))
         val left = (anchor.right - width).coerceIn(dp(12f), (this.width - dp(12f) - width).coerceAtLeast(dp(12f)))
-        val options = values.mapIndexed { index, value ->
-            RectF(left, anchor.bottom + index * cancelRect.height(), left + width, anchor.bottom + (index + 1) * cancelRect.height())
+        val rowHeight = dp(40f)
+        val menuHeight = minOf(values.size * rowHeight, (contentBottom - safeTop - dp(8f)).coerceAtLeast(rowHeight))
+        val top = minOf(anchor.bottom, contentBottom - menuHeight).coerceAtLeast(safeTop + dp(8f))
+        val menu = RectF(left, top, left + width, top + menuHeight)
+        tagMenuBounds = menu
+        tagMenuMaxScroll = max(0f, values.size * rowHeight - menuHeight)
+        tagMenuScroll = tagMenuScroll.coerceIn(0f, tagMenuMaxScroll)
+        canvas.save(); canvas.clipRect(menu)
+        val options = values.mapIndexedNotNull { index, value ->
+            RectF(left, top + index * rowHeight - tagMenuScroll, left + width, top + (index + 1) * rowHeight - tagMenuScroll)
                 .also { rect ->
                     paint.color = if (value == (selectedTags[group.id] ?: "全部")) Color.rgb(32, 83, 57) else Color.rgb(50, 55, 60)
                     canvas.drawRect(rect, paint)
                     text.color = Color.WHITE; text.textAlign = Paint.Align.CENTER
                     canvas.drawText(value, rect.centerX(), rect.centerY() + dp(5f), text)
                     text.textAlign = Paint.Align.LEFT
-                } to value
+                }.let { rect -> if (rect.intersect(menu)) rect to value else null }
         }
+        canvas.restore()
         tagOptionRects = options
     }
 
@@ -161,11 +194,16 @@ class CandidateSelectionView(
             CandidateDisposition.CATALOG_ONLY -> Color.rgb(34, 37, 41)
         }
         canvas.drawRoundRect(card, dp(12f), dp(12f), paint)
-        // 双列卡片上半部显示经过侧门定位后的实际视口裁剪。
-        val imageRect = RectF(card.left + dp(7f), card.top + dp(7f), card.right - dp(7f), card.bottom - if (manualSelection) dp(32f) else dp(54f))
+        // 候选卡片展示完整地图裁剪区；识别姿态不参与缩略图布局。
+        val compact = card.height() < dp(180f)
+        val imageRect = if (compact) {
+            RectF(card.left + dp(7f), card.top + dp(7f),
+                card.left + dp(7f) + minOf(card.height() - dp(14f), card.width() * .5f), card.bottom - dp(7f))
+        } else RectF(card.left + dp(7f), card.top + dp(7f), card.right - dp(7f), card.bottom - if (manualSelection) dp(32f) else dp(54f))
         paint.color = Color.BLACK; canvas.drawRoundRect(imageRect, dp(7f), dp(7f), paint)
         thumbnail?.let { drawBitmapFit(canvas, it, imageRect) }
-        val x = card.left + dp(12f)
+        val x = if (compact) imageRect.right + dp(10f) else card.left + dp(12f)
+        val labelWidth = card.right - x - dp(12f)
         val status = when (candidate.disposition) {
             CandidateDisposition.RELIABLE -> "结构确认"
             CandidateDisposition.NEEDS_VERIFICATION -> "待人工确认"
@@ -179,10 +217,11 @@ class CandidateSelectionView(
         if (!manualSelection) paint.color = Color.argb(220, 24, 28, 31)
         val statusWidth = text.apply { textSize = dp(10f); typeface = android.graphics.Typeface.DEFAULT_BOLD }
             .measureText(status) + dp(14f)
+        val statusRight = if (compact) card.right - dp(7f) else imageRect.right
         val statusRect = RectF(
-            imageRect.right - statusWidth - dp(6f),
+            statusRight - statusWidth - dp(6f),
             imageRect.top + dp(6f),
-            imageRect.right - dp(6f),
+            statusRight - dp(6f),
             imageRect.top + dp(28f),
         )
         if (!manualSelection) {
@@ -194,7 +233,8 @@ class CandidateSelectionView(
 
         text.textSize = dp(12f); text.typeface = android.graphics.Typeface.DEFAULT_BOLD
         text.color = Color.WHITE
-        drawEllipsized(canvas, candidate.map.title, x, card.bottom - if (manualSelection) dp(11f) else dp(30f), card.width() - dp(24f))
+        drawEllipsized(canvas, candidate.map.title, x,
+            if (compact) card.top + dp(50f) else card.bottom - if (manualSelection) dp(11f) else dp(30f), labelWidth)
         if (!manualSelection) {
             text.textSize = dp(9f); text.typeface = android.graphics.Typeface.DEFAULT
             text.color = statusColor
@@ -203,7 +243,7 @@ class CandidateSelectionView(
             } else {
                 candidate.evidenceLabel
             }
-            drawEllipsized(canvas, evidence, x, card.bottom - dp(12f), card.width() - dp(24f))
+            drawEllipsized(canvas, evidence, x, if (compact) card.top + dp(68f) else card.bottom - dp(12f), labelWidth)
         }
 
         if (armedManualIndex == index && candidate.disposition != CandidateDisposition.RELIABLE) {
@@ -216,13 +256,39 @@ class CandidateSelectionView(
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            tagMenuGesture = openTagGroup != null && tagMenuBounds?.contains(event.x, event.y) == true
+            if (openTagGroup == null) tagMenuScroll = 0f
+        }
+        if (tagMenuGesture) {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> { downY = event.y; lastY = event.y; moved = false }
+                MotionEvent.ACTION_MOVE -> {
+                    if (abs(event.y - downY) > dp(6f)) moved = true
+                    tagMenuScroll = (tagMenuScroll + lastY - event.y).coerceIn(0f, tagMenuMaxScroll)
+                    lastY = event.y; invalidate()
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (!moved) tagOptionRects.firstOrNull { it.first.contains(event.x, event.y) }?.let { (_, value) ->
+                        openTagGroup?.let { group ->
+                            if (value == "全部") selectedTags.remove(group.id) else selectedTags[group.id] = value
+                        }
+                        openTagGroup = null; tagOptionRects = emptyList(); tagMenuBounds = null
+                        armedManualIndex = null; scroll = 0f; invalidate()
+                    }
+                    tagMenuGesture = false
+                }
+                MotionEvent.ACTION_CANCEL -> tagMenuGesture = false
+            }
+            return true
+        }
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> { downY = event.y; lastY = event.y; moved = false }
             MotionEvent.ACTION_MOVE -> {
                 if (abs(event.y - downY) > dp(6f)) moved = true
                 if (moved && event.y >= listTop) {
-                    val rows = (visibleIndices().size + 1) / 2
-                    val maxScroll = max(0f, rows * (cardHeight + cardGap) - cardGap - (height - listTop))
+                    val rows = (visibleIndices().size + columnCount - 1) / columnCount
+                    val maxScroll = max(0f, rows * (cardHeight + cardGap) - cardGap - (contentBottom - listTop))
                     scroll = (scroll - (event.y - lastY)).coerceIn(0f, maxScroll); invalidate()
                 }
                 lastY = event.y
@@ -236,15 +302,15 @@ class CandidateSelectionView(
                 } == true) Unit
                 else if (tagChipRects.firstOrNull { it.first.contains(event.x, event.y) }?.let { (_, group) ->
                     openTagGroup = if (openTagGroup?.id == group.id) null else group
-                    tagOptionRects = emptyList(); invalidate(); true
+                    tagOptionRects = emptyList(); tagMenuBounds = null; tagMenuScroll = 0f; invalidate(); true
                 } == true) Unit
-                else if (event.y >= listTop) {
+                else if (event.y >= listTop && event.y <= contentBottom) {
                     val column = ((event.x - gridLeft) / (cardWidth + cardGap)).toInt()
                     val row = ((event.y - listTop + scroll) / (cardHeight + cardGap)).toInt()
                     val localX = event.x - gridLeft - column * (cardWidth + cardGap)
                     val localY = event.y - listTop + scroll - row * (cardHeight + cardGap)
-                    if (column in 0..1 && row >= 0 && localX in 0f..cardWidth && localY in 0f..cardHeight) {
-                        val index = visibleIndices().getOrNull(row * 2 + column)
+                    if (column in 0 until columnCount && row >= 0 && localX in 0f..cardWidth && localY in 0f..cardHeight) {
+                        val index = visibleIndices().getOrNull(row * columnCount + column)
                         index?.let { result.candidates[it] }?.let { candidate ->
                             val decision = CandidateSelectionPolicy.onTap(
                                 candidate.disposition,
@@ -297,146 +363,24 @@ class CandidateSelectionView(
         while (shown.length > 4 && text.measureText(shown) > maxWidth) shown = shown.dropLast(2) + "…"
         canvas.drawText(shown, x, y, text)
     }
-    private fun createPositionedPreview(
-        path: String,
-        gate: com.idvb.android.idvm.NormalizedRect?,
-        previewRegion: com.idvb.android.idvm.NormalizedRect?,
-        freeCropPoints: List<com.idvb.android.idvm.NormalizedPoint>,
-    ): Bitmap? {
-        val screenWidth = resources.displayMetrics.widthPixels
-        val screenHeight = resources.displayMetrics.heightPixels
-        val expectedLandscape = screenWidth > screenHeight
-        val outputWidth = (screenWidth * if (expectedLandscape) .30f else .44f).toInt().coerceIn(400, 960)
-        val outputHeight = (177f * density).toInt().coerceIn(240, 560)
-        val decodeTarget = (max(outputWidth, outputHeight) * 1.35f).toInt()
-        // IDVM gate bounds are relative to recognitionRegion. Decode that region
-        // directly so neither the full map nor pixels outside the selection can leak in.
-        val source = decodeMapRegion(File(path), previewRegion, decodeTarget, freeCropPoints) ?: return null
-        val output = Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(output); canvas.drawColor(Color.BLACK)
-        val previewPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
-        val normalizedGateX = gate?.let { it.x + it.width / 2.0 } ?: .5
-        val normalizedGateY = gate?.let { it.y + it.height / 2.0 } ?: .5
-        val centerX = normalizedGateX.toFloat() * source.width
-        val centerY = normalizedGateY.toFloat() * source.height
-        // Keep the entire selected region visible, then use any spare black padding
-        // to move the whole side-door rectangle into the 12% safe boundary.
-        val targetX = outputWidth * .50f
-        val targetY = outputHeight * .65f
-        val safeLeft = outputWidth * .12f; val safeRight = outputWidth * .88f
-        val safeTop = outputHeight * .12f; val safeBottom = outputHeight * .88f
-        val gateLeft = (gate?.x ?: normalizedGateX).toFloat() * source.width
-        val gateRight = ((gate?.x ?: normalizedGateX) + (gate?.width ?: 0.0)).toFloat() * source.width
-        val gateTop = (gate?.y ?: normalizedGateY).toFloat() * source.height
-        val gateBottom = ((gate?.y ?: normalizedGateY) + (gate?.height ?: 0.0)).toFloat() * source.height
-        val fitScale = minOf(outputWidth.toFloat() / source.width, outputHeight.toFloat() / source.height)
-        fun ranges(scale: Float): Pair<Pair<Float, Float>, Pair<Float, Float>> {
-            val imageX = 0f to (outputWidth - source.width * scale)
-            val imageY = 0f to (outputHeight - source.height * scale)
-            if (gate == null) return imageX to imageY
-            val x = maxOf(imageX.first, safeLeft - gateLeft * scale) to
-                minOf(imageX.second, safeRight - gateRight * scale)
-            val y = maxOf(imageY.first, safeTop - gateTop * scale) to
-                minOf(imageY.second, safeBottom - gateBottom * scale)
-            return x to y
-        }
-        fun feasible(scale: Float): Boolean = ranges(scale).let {
-            it.first.first <= it.first.second && it.second.first <= it.second.second
-        }
-        var scale = fitScale
-        if (!feasible(scale)) {
-            var low = 0f
-            var high = fitScale
-            repeat(28) {
-                val middle = (low + high) / 2f
-                if (feasible(middle)) low = middle else high = middle
-            }
-            scale = low.coerceAtLeast(.01f)
-        }
-        val allowed = ranges(scale)
-        val desiredX = targetX - centerX * scale
-        val desiredY = targetY - centerY * scale
-        val translateX = desiredX.coerceIn(allowed.first.first, allowed.first.second)
-        val translateY = desiredY.coerceIn(allowed.second.first, allowed.second.second)
-        // 显式写入仿射矩阵，避免 postScale/postTranslate 在部分顺序下把平移再次缩放。
-        val matrix = Matrix().apply {
-            setValues(floatArrayOf(
-                scale, 0f, translateX,
-                0f, scale, translateY,
-                0f, 0f, 1f,
-            ))
-        }
-        canvas.drawBitmap(source, matrix, previewPaint)
-        source.recycle()
-        return output
-    }
-
-    private fun createCandidatePreview(candidate: RecognitionCandidate): Bitmap? {
+    internal fun createCandidatePreview(candidate: RecognitionCandidate): Bitmap? {
         val floor = candidate.map.floors.firstOrNull { it.key == candidate.floorKey }
             ?: candidate.map.floors.minByOrNull { it.sortOrder }
             ?: return null
-        val hasStructurePose = candidate.structureScale.isFinite() && candidate.structureScale > 0.0 &&
-            candidate.structureOffsetX.isFinite() && candidate.structureOffsetY.isFinite() &&
-            result.viewportBounds.isValid
-        if (hasStructurePose) {
-            val assets = repository.loadRecognitionAssets(candidate.map.id, floor)
-            val recognitionFile = assets.recognitionImageFile
-            val sourceFile = recognitionFile ?: repository.floorImageFile(candidate.map.id, floor.imagePath)
-            val sourceRegion = if (recognitionFile != null) null else assets.recognitionRegion
-            val longest = max(result.capturedRegion.width, result.capturedRegion.height).coerceIn(480, 1200)
-            val source = decodeMapRegion(sourceFile, sourceRegion, longest,
-                if (recognitionFile == null) repository.loadFreeCropPoints(candidate.map.id, floor) else emptyList())
-            if (source != null) {
-                return renderStructureAlignedPreview(
-                    source,
-                    assets.recognitionWidth.takeIf { it > 0 } ?: source.width,
-                    assets.recognitionHeight.takeIf { it > 0 } ?: source.height,
-                    candidate,
-                )
-            }
-        }
-        return createPositionedPreview(
-            repository.floorImageFile(candidate.map.id, floor.imagePath).path,
-            repository.loadSideDoors(candidate.map.id, floor.key).firstOrNull(),
-            repository.loadPreviewRegion(candidate.map.id, floor),
-            repository.loadFreeCropPoints(candidate.map.id, floor),
+        val assets = repository.loadRecognitionAssets(candidate.map.id, floor)
+        val recognitionFile = assets.recognitionImageFile
+        val sourceFile = recognitionFile ?: repository.floorImageFile(candidate.map.id, floor.imagePath)
+        // Decode the selected region before downsampling, keeping small crops sharp.
+        // A tentative match may have a tiny scale or an offscreen translation. Neither
+        // is a display transform: applying them to a full capture canvas hid the map.
+        val target = max(resources.displayMetrics.widthPixels / 2, (177f * density).toInt())
+            .coerceIn(400, 1200)
+        return decodeMapRegion(
+            sourceFile,
+            if (recognitionFile != null) null else assets.recognitionRegion,
+            target,
+            if (recognitionFile != null) emptyList() else repository.loadFreeCropPoints(candidate.map.id, floor),
         )
-    }
-
-    private fun renderStructureAlignedPreview(
-        source: Bitmap,
-        recognitionWidth: Int,
-        recognitionHeight: Int,
-        candidate: RecognitionCandidate,
-    ): Bitmap {
-        val frameWidth = result.capturedRegion.width.coerceAtLeast(1)
-        val frameHeight = result.capturedRegion.height.coerceAtLeast(1)
-        val metrics = resources.displayMetrics
-        val expectedLandscape = metrics.widthPixels > metrics.heightPixels
-        val outputWidth = (metrics.widthPixels * if (expectedLandscape) .30f else .44f)
-            .roundToInt().coerceIn(400, 960)
-        val outputHeight = (outputWidth * frameHeight.toDouble() / frameWidth).roundToInt().coerceAtLeast(1)
-        val output = Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(output)
-        canvas.drawColor(Color.BLACK)
-        val previewPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
-        val viewportScale = outputWidth.toFloat() / frameWidth
-        val matrix = Matrix().apply {
-            setValues(floatArrayOf(
-                (recognitionWidth.toDouble() / source.width * candidate.structureScale * viewportScale).toFloat(),
-                0f,
-                ((candidate.structureOffsetX - result.viewportBounds.x) * viewportScale).toFloat(),
-                0f,
-                (recognitionHeight.toDouble() / source.height * candidate.structureScale * viewportScale).toFloat(),
-                ((candidate.structureOffsetY - result.viewportBounds.y) * viewportScale).toFloat(),
-                0f,
-                0f,
-                1f,
-            ))
-        }
-        canvas.drawBitmap(source, matrix, previewPaint)
-        source.recycle()
-        return output
     }
     private fun dp(value: Float) = value * density
 }
