@@ -14,30 +14,29 @@ import org.opencv.core.*
 import org.opencv.imgproc.Imgproc
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.*
 
 /** Gate position removes the full-image translation search. Every map retains independent
  * scale basins; all visible pixels, variants and the final registered transform are checked. */
 internal class SparseGateRecognizer(private val repository: MapRepository) {
-    companion object { const val ROUTE = "side-gate-sparse-structure-v2" }
+    companion object { const val ROUTE = "side-gate-sparse-structure-v3" }
     private data class Input(val map: MapRecord, val floor: FloorRecord, val assets: FloorRecognitionAssets,
         val anchor: NormalizedRect) {
         val ax get() = (anchor.x+anchor.width/2)*assets.recognitionWidth
         val ay get() = (anchor.y+anchor.height/2)*assets.recognitionHeight
     }
     private data class Fit(val input: Input, val index: SparseGateSearch.Index,
-        val hypotheses: List<Pair<SparseGateSearch.Pose,SparseGateSearch.Evidence>>) {
+        val hypotheses: List<Pair<SparseGateSearch.Pose,SparseGateSearch.Evidence>>,
+        val formalRejected: Boolean = false) {
         val best = hypotheses.sortedWith(compareByDescending<Pair<SparseGateSearch.Pose,SparseGateSearch.Evidence>> { it.second.supported }
             .thenBy { it.second.cost }).first()
+        val supported get() = !formalRejected && best.second.supported
     }
 
-    fun recognize(frame: Bitmap, viewport: ScreenRect, maps: List<MapRecord>, gates: GateDetectionResult,
-        config: SideEntranceScanConfig, progress: ((Double)->Unit)? = null): RecognitionResult? {
-        if (gates.gates.isEmpty() || maps.isEmpty()) return null
-        val started = System.nanoTime()
-        val catalog = repository.loadCatalog()
-        val classes = catalog.classes.associateBy { it.id }
-        val inputs = maps.mapNotNull { map ->
+    private fun inputs(maps: List<MapRecord>): List<Input> {
+        val classes = repository.loadCatalog().classes.associateBy { it.id }
+        return maps.mapNotNull { map ->
             val key = classes[map.classId]?.scanFloorKey
             val floor = if (key == null) map.floors.minByOrNull { it.sortOrder } else map.floors.firstOrNull { it.key == key }
             floor ?: return@mapNotNull null
@@ -47,52 +46,110 @@ internal class SparseGateRecognizer(private val repository: MapRepository) {
                 return@mapNotNull null
             Input(map,floor,assets,anchor)
         }
+    }
+
+    private fun indexSource(input: Input) = input.assets.recognitionImageFile ?:
+        repository.floorImageFile(input.map.id,input.floor.imagePath)
+
+    private fun indexGeneration(input: Input): String {
+        val line = input.assets.prebuiltStructureLine!!.file
+        return "side-full-v3|${input.map.mapVersion}|${input.floor}|${line.canonicalPath}|${line.length()}|${line.lastModified()}"
+    }
+
+    private fun prepareIndex(input: Input): SparseGateSearch.Index {
+        val generation = indexGeneration(input)
+        return SparseGateSearch.load(indexSource(input),generation) {
+            val reference = loadReference(input)
+            try {
+                MapStructurePreprocessor.processReference(reference).use { features ->
+                    val line = CvImages.loadGray(input.assets.prebuiltStructureLine!!.file)
+                    try {
+                        Core.bitwise_or(features.edges,line,features.edges)
+                        val excluded = referenceAnnotations(reference)
+                        try {
+                            SparseGateSearch.build(features.edges,excluded).also {
+                                check(indexGeneration(input) == generation) { "Reference changed during preparation" }
+                            }
+                        } finally { excluded.release() }
+                    } finally { line.release() }
+                }
+            } finally { reference.release() }
+        }
+    }
+
+    /** Same indexes as recognition, prepared off the scan path. Two mobile workers,
+     * active class only, cancellation between floors; no full-library PC rebuild. */
+    fun prepare(maps: List<MapRecord>, isCurrent: () -> Boolean = { true }): Int {
+        val selected = inputs(maps)
+        if (selected.isEmpty()) return 0
+        if (!isCurrent()) return 0
+        SparseGateSearch.prepareKernel()
+        val workers = Executors.newFixedThreadPool(min(2,selected.size))
+        try {
+            val tasks = selected.map { input -> workers.submit(Callable {
+                if (isCurrent()) runCatching { prepareIndex(input) }
+                    .onFailure { Log.w("IDVB-Prepare","Index failed: ${input.map.id}",it) }
+            }) }
+            tasks.forEach { it.get() }
+            return if (!isCurrent()) 0 else selected.count {
+                SparseGateSearch.isCached(indexSource(it),indexGeneration(it))
+            }
+        } finally { workers.shutdown() }
+    }
+
+    fun recognize(frame: Bitmap, viewport: ScreenRect, maps: List<MapRecord>, gates: GateDetectionResult,
+        config: SideEntranceScanConfig, progress: ((Double)->Unit)? = null): RecognitionResult? {
+        if (gates.gates.isEmpty() || maps.isEmpty()) return null
+        val started = System.nanoTime()
+        val catalog = repository.loadCatalog()
+        val inputs = inputs(maps)
         // Legacy packages without any full-floor lines retain the old route.
         if (inputs.isEmpty()) return null
         val color = CvImages.bitmapToBgr(frame)
         try {
             VpsgLiveExtractor.extract(color).use { live ->
                 maskAnnotations(color,live)
+                val unobservedBoundaryPoints = VisibleWallEvidence.retainPhotometricWalls(color,live)
                 // Shared exclusion across all maps, including authored boxes larger than icons.
-                val maskWidth = inputs.maxOf { it.anchor.width*it.assets.recognitionWidth*config.maximumScale }
-                val maskHeight = inputs.maxOf { it.anchor.height*it.assets.recognitionHeight*config.maximumScale }
                 for (gate in gates.gates) {
-                    val width = max(maskWidth,gate.screenBounds.width)+18
-                    val height = max(maskHeight,gate.screenBounds.height)+18
+                    // Mask the observed icon, not the largest possible authored
+                    // anchor at the search ceiling. Wider zoom support must not
+                    // erase additional walls from every identity's observation.
+                    val width = gate.screenBounds.width * 1.5 + 18
+                    val height = gate.screenBounds.height * 1.5 + 18
                     mask(live,gate.screenBounds.centerX-viewport.x-width/2,
                         gate.screenBounds.centerY-viewport.y-height/2,width,height)
                 }
                 val dense = SparseGateSearch.pixels(live.edges)
                 val contours = SparseGateSearch.contours(live.edges)
-                val sample = SparseGateSearch.sample(dense,frame.width,frame.height,256)
-                val refineSample = SparseGateSearch.sample(dense,frame.width,frame.height,1024)
+                if (dense.size < 80 || contours.isEmpty()) {
+                    val elapsed = (System.nanoTime()-started)/1e6
+                    return RecognitionResult(frame, emptyList(), viewport, route=ROUTE,
+                        sparseGateDiagnostics=SparseGateScanDiagnostics(elapsed,elapsed,0.0,0.0,
+                            0,dense.size,false,0,false,emptyList()))
+                }
+                val sample = SparseGateSearch.sample(dense,frame.width,frame.height,128)
+                // Proposals use a bounded spatial sample; only the final dense
+                // verifier decides support. Do not run a 1024-point grid for
+                // every losing scale/offset basin on a mobile CPU.
+                val refineSample = sample
                 val preparedAt = System.nanoTime()
-                val executor = Executors.newFixedThreadPool(min(3,inputs.size))
+                val indexNanos = AtomicLong()
+                val fitNanos = AtomicLong()
+                // Foreground scan is short-lived; keep background preparation at
+                // two workers, and cap retrieval at four available CPU cores.
+                val executor = Executors.newFixedThreadPool(minOf(4,
+                    Runtime.getRuntime().availableProcessors().coerceAtLeast(1),inputs.size))
                 val futures = inputs.map { input -> executor.submit(Callable {
                     runCatching {
+                        val indexStarted = System.nanoTime()
                         // Use the same full-reference evidence policy for EVERY identity.
                         // Supplementing only the apparent winner could hide a competing map
                         // whose imported outer-wall layer also omitted internal structure.
-                        val lineFile = input.assets.prebuiltStructureLine!!.file
-                        val sourceFile = input.assets.recognitionImageFile ?:
-                            repository.floorImageFile(input.map.id,input.floor.imagePath)
-                        val index = SparseGateSearch.load(sourceFile,
-                            "side-full-v3|${input.map.mapVersion}|${input.floor}|${lineFile.canonicalPath}|${lineFile.length()}|${lineFile.lastModified()}") {
-                            val reference = loadReference(input)
-                            try {
-                                MapStructurePreprocessor.processReference(reference).use { features ->
-                                    val line = CvImages.loadGray(lineFile)
-                                    try {
-                                        Core.bitwise_or(features.edges,line,features.edges)
-                                        val excluded = referenceAnnotations(reference)
-                                        try { SparseGateSearch.build(features.edges, excluded) }
-                                        finally { excluded.release() }
-                                    }
-                                    finally { line.release() }
-                                }
-                            } finally { reference.release() }
-                        }
+                        val index = prepareIndex(input)
                         require(index.width == input.assets.recognitionWidth && index.height == input.assets.recognitionHeight)
+                        val indexFinished = System.nanoTime()
+                        indexNanos.addAndGet(indexFinished-indexStarted)
                         val hypotheses = ArrayList<Pair<SparseGateSearch.Pose,SparseGateSearch.Evidence>>()
                         for ((gateIndex,gate) in gates.gates.withIndex()) {
                             if (!gate.screenBounds.isValid) continue
@@ -122,30 +179,61 @@ internal class SparseGateRecognizer(private val repository: MapRepository) {
                                 }
                             }
                         }
+                        fitNanos.addAndGet(System.nanoTime()-indexFinished)
                         if (hypotheses.isEmpty()) null else Fit(input,index,hypotheses)
                     }.onFailure { Log.w("IDVB-Scan","Sparse gate floor failed: ${input.map.id}",it) }.getOrNull()
                 }) }
-                val fits = try {
+                val retrievedFits = try {
                     futures.mapIndexedNotNull { i,future ->
                         val fit = future.get(); progress?.invoke(.15+.65*(i+1)/futures.size); fit
                     }
                 } finally {
                     futures.forEach { runCatching { it.get() } }; executor.shutdown()
                 }
+                // A sparse supported pose is a proposal, not a confirmed identity.
+                // Apply the same formal verifier to every supported competitor
+                // before deciding whether the identity family is unique.
                 val searchedAt = System.nanoTime()
-                val complete = fits.size == maps.size && dense.size >= 80 && contours.isNotEmpty()
-                val supported = fits.filter { it.best.second.supported }
-                val best = supported.singleOrNull()
-                val variantPeers = catalog.variantGroups.filter { best?.input?.map?.id in it.mapIds }.flatMap { it.mapIds }.toSet()
-                val variantConflict = best != null && fits.any { it !== best && it.input.map.id in variantPeers &&
-                    it.hypotheses.any { (_,e) -> e.support >= .88 && (e.spatialConflict || e.longest >= 30) } }
+                var formalComplete = true
+                val registrations = HashMap<String, StructureRegistrationResult>()
+                val fits = retrievedFits.map { fit ->
+                    if (!fit.best.second.supported) return@map fit
+                    val registration = runCatching { register(color, viewport, fit, gates) }
+                        .onFailure {
+                            formalComplete = false
+                            Log.w("IDVB-Scan", "Formal verification failed: ${fit.input.map.id}", it)
+                        }.getOrNull()
+                    val transform = registration?.transform
+                    if (registration != null) registrations[fit.input.map.id] = registration
+                    val valid = registration?.accepted == true && transform != null &&
+                        transform.scale in config.minimumScale..config.maximumScale
+                    if (!valid) {
+                        Log.i("IDVB-Scan", "sparse formal rejected map=${fit.input.map.title} reason=${registration?.failureReason}")
+                        fit.copy(formalRejected = true)
+                    } else {
+                        registrations[fit.input.map.id] = registration!!
+                        val pose = fit.best.first.copy(scale=transform!!.scale,
+                            x=transform.offsetX-viewport.x,y=transform.offsetY-viewport.y)
+                        val evidence = SparseGateSearch.verify(fit.index,pose,dense,contours,frame.width,frame.height)
+                        val gate = gates.gates[pose.gate]
+                        val residual = hypot(pose.x+fit.input.ax*pose.scale-(gate.screenBounds.centerX-viewport.x),
+                            pose.y+fit.input.ay*pose.scale-(gate.screenBounds.centerY-viewport.y))
+                        fit.copy(hypotheses=listOf(pose to evidence),
+                            formalRejected=residual > config.maximumGateSpatialResidualPixels)
+                    }
+                }
+                val complete = formalComplete && fits.size == maps.size && dense.size >= 80 && contours.isNotEmpty()
+                val supported = fits.filter { it.supported }
+                val best = supported.minWithOrNull(compareBy<Fit> { it.best.second.cost }
+                    .thenByDescending { it.best.second.support }.thenBy { it.input.map.id })
+                val familyUnique = best != null && sameScanIdentityFamily(best.input.map.id,
+                    best.input.map.classId, supported.map { it.input.map.id }, catalog.variantGroups)
                 var registered: StructureRegistrationResult? = null
                 var finalPose = best?.best?.first
                 var finalEvidence = best?.best?.second
                 var unique = false
-                if (complete && best != null && !variantConflict) {
-                    registered = runCatching { register(color,viewport,best, gates) }
-                        .onFailure { Log.w("IDVB-Scan","Sparse gate formal registration failed",it) }.getOrNull()
+                if (complete && best != null && familyUnique) {
+                    registered = registrations[best.input.map.id]
                     val transform = registered?.transform
                     if (registered?.accepted == true && registered.best != null && registered.best.chamferPixels <= 3 && transform != null &&
                         transform.scale in config.minimumScale..config.maximumScale) {
@@ -159,18 +247,20 @@ internal class SparseGateRecognizer(private val repository: MapRepository) {
                     }
                 }
                 val finished = System.nanoTime()
-                val ranked = fits.sortedWith(compareByDescending<Fit> { it.best.second.supported }.thenBy { it.best.second.cost })
+                val ranked = fits.sortedWith(compareByDescending<Fit> { it.supported }.thenBy { it.best.second.cost })
                 val candidates = ranked.map { fit ->
                     val pose = if (fit === best) finalPose!! else fit.best.first
                     val evidence = if (fit === best) finalEvidence!! else fit.best.second
                     val gate = gates.gates[pose.gate]
                     val confirmed = fit === best && unique
                     Log.i("IDVB-Scan","sparse map=${fit.input.map.title} support=${evidence.support}"+
-                        " spatial=${evidence.spatialConflict} conflict=${evidence.longest} scale=${pose.scale} supported=${evidence.supported}"+
+                        " spatial=${evidence.spatialConflict} conflict=${evidence.longest} scale=${pose.scale} supported=${fit.supported} formalRejected=${fit.formalRejected}"+
                         " details=${evidence.conflictDetail}")
                     RecognitionCandidate(map=fit.input.map,floorKey=fit.input.floor.key,
                         disposition=if (confirmed) CandidateDisposition.RELIABLE else CandidateDisposition.NEEDS_VERIFICATION,
                         templateScore=pose.score, chamferPixels=evidence.mean,edgeCoverage=evidence.support,
+                        structureCompositeCost=evidence.cost,
+                        structureRejectionReason=registrations[fit.input.map.id]?.rejectionReason,
                         consistentStructurePartitions=evidence.cells,structureScale=pose.scale,
                         structureOffsetX=viewport.x+pose.x,structureOffsetY=viewport.y+pose.y,
                         occupancyCoverage=if (fit === best) registered?.best?.occupancyCoverage ?: 0.0 else 0.0,
@@ -186,13 +276,15 @@ internal class SparseGateRecognizer(private val repository: MapRepository) {
                 val elapsed = (finished-started)/1e6
                 Log.i("IDVB-Scan","sparse totalMs=$elapsed prepareMs=${(preparedAt-started)/1e6}"+
                     " searchVerifyMs=${(searchedAt-preparedAt)/1e6} formalMs=${(finished-searchedAt)/1e6}"+
+                    " indexWorkerMs=${indexNanos.get()/1e6} fitWorkerMs=${fitNanos.get()/1e6}"+
                     " evaluated=${fits.size}/${maps.size} points=${dense.size} supported=${supported.size} unique=$unique"+
+                    " unobservedBoundaryPoints=$unobservedBoundaryPoints"+
                     " formal=${registered?.failureReason}")
                 return RecognitionResult(frame,candidates+maps.filterNot { it.id in included }.map {
                     RecognitionCandidate(it,"",CandidateDisposition.CATALOG_ONLY,evidenceLabel="地图结构资料未完整评估")
                 },viewport,route=ROUTE,diagnostics=RecognitionScanDiagnostics(
                     route=ROUTE,gateDetection=gates,sideEntranceConfig=config,eligibleMapCount=maps.size,
-                    readyMapCount=inputs.size,rejectedCandidateCount=fits.count { !it.best.second.supported },
+                    readyMapCount=inputs.size,rejectedCandidateCount=fits.count { !it.supported },
                     structureVerificationCount=fits.size,reliableCandidateCount=if (unique) 1 else 0,
                     structureTotalMilliseconds=(finished-preparedAt)/1e6,
                     failureReason=if (unique) "" else if (!complete) "地图结构未完整评估" else "可见结构尚不能唯一确认地图"),
@@ -200,8 +292,9 @@ internal class SparseGateRecognizer(private val repository: MapRepository) {
                         (searchedAt-preparedAt)/1e6,(finished-searchedAt)/1e6,fits.size,dense.size,complete,supported.size,unique,
                         fits.map { fit ->
                             val evidence = if (fit === best) finalEvidence!! else fit.best.second
-                            SparseGateFloorEvidence(fit.input.map.id,fit.input.floor.key,fit.hypotheses.size,
-                                evidence.support,evidence.mean,evidence.longest,evidence.spatialConflict,evidence.supported)
+                            SparseGateFloorEvidence(fit.input.map.id,fit.input.floor.key,
+                                retrievedFits.first { it.input.map.id == fit.input.map.id }.hypotheses.size,
+                                evidence.support,evidence.mean,evidence.longest,evidence.spatialConflict,fit.supported)
                         }))
             }
         } finally { color.release() }
@@ -249,13 +342,19 @@ internal class SparseGateRecognizer(private val repository: MapRepository) {
         val hsv = Mat(); val markers = Mat(); val labels = Mat(); val stats = Mat(); val centroids = Mat()
         try {
             Imgproc.cvtColor(color,hsv,Imgproc.COLOR_BGR2HSV)
-            Core.inRange(hsv,Scalar(10.0,170.0,170.0),Scalar(90.0,255.0,255.0),markers)
+            // Red enemy markers and blue player badges are just as unobservable
+            // as yellow/green annotations. Leaving them in the wall evidence made
+            // a small viewport translation flip a 4x4 cell's conflict decision.
+            Core.inRange(hsv,Scalar(0.0,90.0,100.0),Scalar(179.0,255.0,255.0),markers)
             val count = Imgproc.connectedComponentsWithStats(markers,labels,stats,centroids)
             val data = IntArray(count*stats.cols()).also { stats.get(0,0,it) }; val stride = stats.cols()
             for (i in 1 until count) {
                 val at = i*stride; val width = data[at+Imgproc.CC_STAT_WIDTH]; val height = data[at+Imgproc.CC_STAT_HEIGHT]
-                if (data[at+Imgproc.CC_STAT_AREA] < 6 || width > 64 || height > 64) continue
-                val padding = max(8,ceil(max(width,height)*.75).toInt())
+                if (data[at+Imgproc.CC_STAT_AREA] < 6 || width !in 8..64 || height !in 8..64 ||
+                    max(width,height) > min(width,height)*2.5) continue
+                // Player badges carry a translucent direction cone beyond their
+                // colored center; that cone is also an overlay, not a wall.
+                val padding = max(8,ceil(max(width,height)*1.5).toInt())
                 mask(live,(data[at+Imgproc.CC_STAT_LEFT]-padding).toDouble(),(data[at+Imgproc.CC_STAT_TOP]-padding).toDouble(),
                     (width+2*padding).toDouble(),(height+2*padding).toDouble())
             }

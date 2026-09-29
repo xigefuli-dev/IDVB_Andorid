@@ -14,6 +14,19 @@ class OverlayPrefs(context: Context) {
     private val prefs = context.applicationContext
         .getSharedPreferences("overlay", Context.MODE_PRIVATE)
 
+    init {
+        // One-time upgrade migration, including previously saved false values.
+        // Keep subsequent user choices across launches and service restarts.
+        if (!prefs.getBoolean("scan_defaults_v2_applied", false)) {
+            prefs.edit()
+                .putBoolean("background_scan_enabled", true)
+                .putBoolean("show_unconfirmed_candidates", true)
+                .putBoolean("recognition_diagnostics_enabled", true)
+                .putBoolean("scan_defaults_v2_applied", true)
+                .apply()
+        }
+    }
+
     companion object {
         /** 默认透明度，对齐参考项目 MapOpacity=0.46 */
         const val DEFAULT_OPACITY = 0.46f
@@ -73,9 +86,14 @@ class OverlayPrefs(context: Context) {
         get() = prefs.getBoolean("manual_map_selection_enabled", false)
         set(value) = prefs.edit().putBoolean("manual_map_selection_enabled", value).apply()
 
+    /** 未唯一确认时提供候选，后台扫描时等待点击眼睛；关闭则保留原地图并等待重新扫描。 */
+    var showUnconfirmedCandidates: Boolean
+        get() = prefs.getBoolean("show_unconfirmed_candidates", true)
+        set(value) = prefs.edit().putBoolean("show_unconfirmed_candidates", value).apply()
+
     /** 保存真实扫描输入与候选证据，供 Desktop/Android 差分验证。 */
     var recognitionDiagnosticsEnabled: Boolean
-        get() = prefs.getBoolean("recognition_diagnostics_enabled", false)
+        get() = prefs.getBoolean("recognition_diagnostics_enabled", true)
         set(value) = prefs.edit().putBoolean("recognition_diagnostics_enabled", value).apply()
 
     /** 将攻略地图显示区域限制在屏幕范围内。 */

@@ -138,6 +138,10 @@ class VpsgLineScannerInstrumentedTest {
                         .recognize(frame, viewport, listOf(mapA, mapB)))
                     assertEquals(0, ambiguous.candidates.count { it.disposition == CandidateDisposition.RELIABLE })
                     assertEquals(2, ambiguous.vpsgDiagnostics?.evaluatedFloorCount)
+                    repository.saveCatalog(repository.loadCatalog().copy(variantGroups=listOf(
+                        com.idvb.android.idvm.MapVariantGroupRecord("ab",mapA.classId,0,listOf(mapA.id,mapB.id)))))
+                    val family = requireNotNull(VpsgLineScanner(repository).recognize(frame,viewport,listOf(mapA,mapB)))
+                    assertEquals(1,family.candidates.count { it.disposition == CandidateDisposition.RELIABLE })
                 } finally { reference.release() }
             }
         } finally {

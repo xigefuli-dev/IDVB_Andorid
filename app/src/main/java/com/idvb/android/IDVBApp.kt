@@ -17,6 +17,7 @@ class IDVBApp : Application() {
         super.onCreate()
         instance = this
         OpenCvRuntime.initialize()
+        AppServices.startRecognitionPreparation()
     }
 
     companion object {
@@ -33,4 +34,21 @@ object AppServices {
     val prefs: OverlayPrefs by lazy { OverlayPrefs(context) }
     val recognitionDiagnostics: RecognitionDiagnosticsStore by lazy { RecognitionDiagnosticsStore(context) }
     val communityDownloads: CommunityDownloadQueue by lazy { CommunityDownloadQueue(context) }
+    internal val scanPreparation by lazy {
+        com.idvb.android.recognize.RecognitionPreparation(repository) { prefs.selectedMapClassId }
+    }
+    private val scanPreferencesListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == "selected_map_class_id") scanPreparation.request()
+    }
+
+    private var preparationStarted = false
+
+    internal fun startRecognitionPreparation() {
+        if (!UsageConsent.isAccepted(context) || preparationStarted) return
+        preparationStarted = true
+        repository.onCatalogChanged = { scanPreparation.request() }
+        context.getSharedPreferences("overlay",Context.MODE_PRIVATE)
+            .registerOnSharedPreferenceChangeListener(scanPreferencesListener)
+        scanPreparation.request()
+    }
 }

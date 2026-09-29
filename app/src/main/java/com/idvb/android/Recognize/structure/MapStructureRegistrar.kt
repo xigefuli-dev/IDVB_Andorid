@@ -404,8 +404,13 @@ internal class MapStructureRegistrar(
         repeat(tuning.topCandidateCount) {
             val peak = Core.minMaxLoc(scores)
             if (!peak.minVal.isFinite()) return@repeat
-            val x = originX + (peak.minLoc.x * coordinateScaleX).roundToInt()
-            val y = originY + (peak.minLoc.y * coordinateScaleY).roundToInt()
+            // Pyramid rounding can place the last score pixel one pixel beyond
+            // the full-resolution patch domain. Keep the boundary hypothesis in
+            // bounds rather than letting a rival map abort the whole scan.
+            val x = (originX + (peak.minLoc.x * coordinateScaleX).roundToInt())
+                .coerceIn(0, distance.cols() - query.bounds.width)
+            val y = (originY + (peak.minLoc.y * coordinateScaleY).roundToInt())
+                .coerceIn(0, distance.rows() - query.bounds.height)
             val candidate = evaluate(
                 query, reference, distance, scale, referenceScale, viewport, validBounds,
                 x, y, usedGlobalSearch,

@@ -1,35 +1,20 @@
 package com.idvb.android.recognize.side
 
-import org.junit.Assert.assertEquals
+import org.junit.Assert.*
 import org.junit.Test
 
 class SideEntranceScanProfilesTest {
-    @Test
-    fun exactProfilesPreserveDesktopScaleFloors() {
-        assertEquals(.32, SideEntranceScanProfiles.resolve(1600, 900).minimumScale, 0.0)
-        assertEquals(.40, SideEntranceScanProfiles.resolve(1920, 1080).minimumScale, 0.0)
-        assertEquals(.45, SideEntranceScanProfiles.resolve(2560, 1440).minimumScale, 0.0)
-        assertEquals(.50, SideEntranceScanProfiles.resolve(2560, 1600).minimumScale, 0.0)
-    }
-
-    @Test
-    fun fuzzyMatchUsesDesktopOneHundredPixelTolerance() {
-        val config = SideEntranceScanProfiles.resolve(2500, 1400)
-        assertEquals(.45, config.minimumScale, 0.0)
-        assertEquals(4, config.scanParallelism)
-    }
-
-    @Test
-    fun aspectMatchUsesDesktopProfileOrder() {
-        val config = SideEntranceScanProfiles.resolve(1280, 720)
-        assertEquals(.40, config.minimumScale, 0.0)
-        assertEquals(.05, config.coarseScaleStep, 0.0)
-    }
-
-    @Test
-    fun unsupportedAspectFallsBackToDefaultRules() {
-        val config = SideEntranceScanProfiles.resolve(1000, 1000)
-        assertEquals(.55, config.minimumScale, 0.0)
-        assertEquals(2.2, config.maximumScale, 0.0)
+    @Test fun gameZoomRangeScalesWithResolutionAndOrientation() {
+        for ((w,h) in listOf(800 to 450,1280 to 720,1600 to 900,1920 to 1080,
+            2560 to 1440,3840 to 2160,5120 to 2880,3440 to 1440,2560 to 1600,1000 to 1000)) {
+            val density = minOf(w,h)/1440.0
+            val config = SideEntranceScanProfiles.resolve(w,h)
+            for (zoom in listOf(.25,.5,1.0,2.3744,3.5,4.0)) {
+                assertTrue("$w x $h zoom=$zoom", zoom*density in config.minimumScale..config.maximumScale)
+            }
+            val rotated = SideEntranceScanProfiles.resolve(h,w)
+            assertEquals(config.minimumScale,rotated.minimumScale,0.0)
+            assertEquals(config.maximumScale,rotated.maximumScale,0.0)
+        }
     }
 }

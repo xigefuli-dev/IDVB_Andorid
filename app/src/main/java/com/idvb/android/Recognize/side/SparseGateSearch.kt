@@ -4,6 +4,7 @@ import com.idvb.android.recognize.cv.CvImages
 import org.opencv.core.*
 import org.opencv.imgproc.Imgproc
 import java.io.File
+import java.util.concurrent.FutureTask
 import kotlin.math.*
 
 /** Gate-anchored retrieval and full-resolution identity evidence, ported from desktop
@@ -19,6 +20,11 @@ internal object SparseGateSearch {
     }
     class Index(val width: Int, val height: Int, private val distances: ByteArray,
         private val excluded: ByteArray? = null) {
+        companion object {
+            private val decoded = DoubleArray(256) { value ->
+                if (value <= 128) value/16.0 else (value-112)/2.0
+            }
+        }
         val bytes get() = distances.size + (excluded?.size ?: 0)
         fun observable(x: Double, y: Double): Boolean {
             if (x < 0 || y < 0 || x >= width || y >= height) return true
@@ -26,7 +32,7 @@ internal object SparseGateSearch {
         }
         private fun decode(at: Int): Double {
             val value = distances[at].toInt() and 255
-            return if (value <= 128) value / 16.0 else (value - 112) / 2.0
+            return decoded[value]
         }
         fun distance(x: Double, y: Double, scale: Double): Double {
             if (!x.isFinite() || !y.isFinite() || x < 0 || y < 0 || x >= width - 1 || y >= height - 1) return 50.0
@@ -35,37 +41,88 @@ internal object SparseGateSearch {
             return ((decode(at) * (1-fx) + decode(at+1)*fx)*(1-fy) +
                 (decode(at+width)*(1-fx) + decode(at+width+1)*fx)*fy)*scale
         }
-        fun score(points: List<Pixel>, scale: Double, x: Double, y: Double): Double {
+        fun score(points: List<Pixel>, scale: Double, x: Double, y: Double,
+            mustBeat: Double = Double.NEGATIVE_INFINITY): Double {
             var sum = 0.0
-            for (p in points) {
-                val d = distance((p.x-x)/scale, (p.y-y)/scale, scale)
+            val inverseScale = 1.0/scale
+            val minimumTotal = mustBeat * points.size - 1e-9
+            for (i in points.indices) {
+                val p = points[i]
+                val d = distance((p.x-x)*inverseScale, (p.y-y)*inverseScale, scale)
                 sum += if (d <= .8) 1.0 else if (d <= 2.5) .7 else if (d <= 5.5) .4 else 0.0
+                // Exact upper bound, not a weaker acceptance threshold. Even if
+                // every remaining point scores 1, this pose cannot replace best.
+                if ((i and 15) == 15 && sum + points.size - i - 1 < minimumTotal)
+                    return Double.NEGATIVE_INFINITY
             }
             return if (points.isEmpty()) 0.0 else sum/points.size
         }
     }
     private val cache = LinkedHashMap<String, Index>(32, .75f, true)
+    @Volatile var kernelPreparationMilliseconds = 0.0
+        private set
+    // ART otherwise compiles the interpolation/scoring loop during the first
+    // real scan. Exercise this small, input-independent kernel once in the
+    // background preparation phase; it produces no map evidence or result.
+    private val kernelPreparation = FutureTask {
+        val started = System.nanoTime()
+        val index = Index(64,64,ByteArray(64*64) { ((it%64)*4).toByte() })
+        val points = List(128) { Pixel(8+it%40,8+it/4%40) }
+        var checksum = 0.0
+        repeat(12_000) { step ->
+            checksum += index.score(points,.8+(step%9)*.05,(step%7).toDouble(),(step%5).toDouble())
+        }
+        repeat(4) {
+            val seed = Pose(1.0,0.0,0.0)
+            search(index,points,32.0,32.0,32.0,32.0,.5,2.0,0)
+            expand(index,seed,points,32.0,32.0,32.0,32.0,42.0,.5,2.0)
+            refine(index,seed,points,points,emptyList(),64,64,32.0,32.0,32.0,32.0,.5,2.0)
+        }
+        check(checksum.isFinite())
+        kernelPreparationMilliseconds = (System.nanoTime()-started)/1e6
+    }
+    fun prepareKernel() { kernelPreparation.run(); kernelPreparation.get() }
+    private val building = HashMap<Pair<Long,String>,FutureTask<Index>>()
     private var retained = 0L
-    fun clear() = synchronized(cache) { cache.clear(); retained = 0L }
+    private var epoch = 0L
+    fun clear() = synchronized(cache) { cache.clear(); retained = 0L; epoch++ }
+    private fun key(file: File, generation: String) =
+        "${file.canonicalPath}|$generation|${file.length()}|${file.lastModified()}"
+    fun isCached(file: File, generation: String): Boolean {
+        val key = key(file,generation)
+        return synchronized(cache) { cache.containsKey(key) }
+    }
     fun load(file: File, generation: String, create: (() -> Index)? = null): Index {
-        val prefix = file.canonicalPath + "|"
-        val key = "$prefix$generation|${file.length()}|${file.lastModified()}"
-        synchronized(cache) { cache[key]?.let { return it } }
-        val index = if (create != null) create() else {
-            val line = CvImages.loadGray(file)
-            try { build(line) } finally { line.release() }
-        }
-        synchronized(cache) {
+        val key = key(file,generation)
+        val (buildKey,task) = synchronized(cache) {
             cache[key]?.let { return it }
-            for (old in cache.keys.filter { it.startsWith(prefix) }) retained -= cache.remove(old)!!.bytes
-            if (index.bytes <= 64L*1024*1024) {
-                while (retained + index.bytes > 64L*1024*1024 && cache.isNotEmpty()) {
-                    val oldest = cache.entries.first(); retained -= oldest.value.bytes; cache.remove(oldest.key)
+            val buildKey = epoch to key
+            buildKey to building.getOrPut(buildKey) { FutureTask {
+                val index = if (create != null) create() else {
+                    val line = CvImages.loadGray(file)
+                    try { build(line) } finally { line.release() }
                 }
-                cache[key] = index; retained += index.bytes
-            }
+                check(key(file,generation) == key) { "Reference changed during index build" }
+                synchronized(cache) {
+                    if (epoch == buildKey.first && index.bytes <= 64L*1024*1024) {
+                        // Different generations may finish out of order. Retain by
+                        // exact key; the bounded LRU, not an old builder, evicts peers.
+                        while (retained+index.bytes > 64L*1024*1024 && cache.isNotEmpty()) {
+                            val oldest = cache.entries.first()
+                            retained -= oldest.value.bytes; cache.remove(oldest.key)
+                        }
+                        cache[key] = index; retained += index.bytes
+                    }
+                }
+                index
+            } }
         }
-        return index
+        try {
+            task.run() // FutureTask runs at most once, including foreground/preload races.
+            return task.get()
+        } finally {
+            synchronized(cache) { if (building[buildKey] === task && task.isDone) building.remove(buildKey) }
+        }
     }
     fun build(line: Mat, excluded: Mat? = null): Index {
         require(!line.empty() && line.channels() == 1)
@@ -113,19 +170,31 @@ internal object SparseGateSearch {
             }
         } finally { raw.forEach { it.release() }; hierarchy.release(); copy.release() }
     }
-    fun verify(index: Index, pose: Pose, points: List<Pixel>, contours: List<List<Pixel>>, width: Int, height: Int): Evidence {
+    fun verify(index: Index, pose: Pose, points: List<Pixel>, contours: List<List<Pixel>>, width: Int, height: Int,
+        acceptanceOnly: Boolean = false): Evidence {
         if (!pose.scale.isFinite() || pose.scale <= 0 || !pose.x.isFinite() || !pose.y.isFinite() || width <= 0 || height <= 0)
             return Evidence(0.0,50.0,0.0,true,0,0,"invalid-transform")
         var hits = 0; var sum = 0.0; var evaluated = 0
         val totals = IntArray(16); val supported = IntArray(16)
         fun distance(x: Int,y: Int) = index.distance((x-pose.x)/pose.scale,(y-pose.y)/pose.scale,pose.scale)
-        for (p in points) {
+        for ((pointIndex,p) in points.withIndex()) {
             if (!index.observable((p.x-pose.x)/pose.scale,(p.y-pose.y)/pose.scale)) continue
             evaluated++
             val d = distance(p.x,p.y); sum += d
             val cell = min(3,p.x*4/width)+4*min(3,p.y*4/height); totals[cell]++
             if (d <= 5.5) { hits++; supported[cell]++ }
+            if (acceptanceOnly && (pointIndex and 31) == 31) {
+                val remaining = points.size-pointIndex-1
+                // Excluded reference pixels can only reduce the remaining hits.
+                // Even the all-observable/all-supported upper bound cannot pass.
+                if (hits+remaining < .88*(evaluated+remaining))
+                    return Evidence(hits.toDouble()/evaluated,sum/evaluated,0.0,true,evaluated,0,"support-upper-bound")
+            }
         }
+        val spatial = totals.indices.any { totals[it] >= 30 && supported[it] < totals[it]*.70 }
+        if (acceptanceOnly && (spatial || contours.isEmpty() || evaluated < points.size*.5))
+            return Evidence(if (evaluated == 0) 0.0 else hits.toDouble()/evaluated,
+                if (evaluated == 0) 50.0 else sum/evaluated,0.0,true,evaluated,0,"spatial-support-conflict")
         var longest = 0.0
         var conflictDetail = ""
         for (contour in contours) {
@@ -145,7 +214,6 @@ internal object SparseGateSearch {
             }
             if (longest >= 30) break
         }
-        val spatial = totals.indices.any { totals[it] >= 30 && supported[it] < totals[it]*.70 }
         return Evidence(if (evaluated == 0) 0.0 else hits.toDouble()/evaluated,
             if (evaluated == 0) 50.0 else sum/evaluated, longest,
             spatial || contours.isEmpty() || evaluated < points.size * .5, evaluated, totals.indices.count { totals[it] >= 30 && supported[it] >= totals[it]*.70 },
@@ -176,7 +244,7 @@ internal object SparseGateSearch {
                 for (i in -n..n) {
                     val s = seed.scale*(1+i*fine); if (s !in minimum..maximum) continue
                     for (dx in -3..3) for (dy in -3..3) {
-                        val x = gx+dx-ax*s; val y = gy+dy-ay*s; val score = index.score(points,s,x,y)
+                        val x = gx+dx-ax*s; val y = gy+dy-ay*s; val score = index.score(points,s,x,y,best.score)
                         if (score > best.score) best = Pose(s,x,y,score,gate)
                     }
                 }
@@ -195,22 +263,39 @@ internal object SparseGateSearch {
         minimum: Double, maximum: Double, maximumGateResidual: Double = 42.0): Pair<Pose,Evidence>? {
         data class Proposal(val pose: Pose, val hits: Int, val distance: Double)
         val proposals = ArrayList<Proposal>()
+        val ordering = compareByDescending<Proposal> { it.hits }.thenBy { it.distance }
         for (step in -15..15) {
             val s = seed.scale*(1+step*.001); if (s !in minimum..maximum) continue
+            val inverseScale = 1.0/s
             val scaleProposals = ArrayList<Proposal>()
-            for (dx in -3..3) for (dy in -3..3) {
+            for (dx in -3..3) offsets@ for (dy in -3..3) {
                 val x = seed.x+ax*(seed.scale-s)+dx; val y = seed.y+ay*(seed.scale-s)+dy
                 if (hypot(x+ax*s-gx,y+ay*s-gy) > maximumGateResidual) continue
                 var hits = 0; var sum = 0.0
-                for (p in sample) {
-                    val d = index.distance((p.x-x)/s,(p.y-y)/s,s); sum += d; if (d <= 5.5) hits++
+                for (i in sample.indices) {
+                    val p = sample[i]
+                    val d = index.distance((p.x-x)*inverseScale,(p.y-y)*inverseScale,s); sum += d; if (d <= 5.5) hits++
+                    if ((i and 15) == 15 && scaleProposals.size == 8) {
+                        val worst = scaleProposals.last()
+                        val upperHits = hits+sample.size-i-1
+                        if (upperHits < worst.hits || upperHits == worst.hits && sum > worst.distance)
+                            continue@offsets
+                    }
+                }
+                if (scaleProposals.size == 8) {
+                    val worst = scaleProposals.last()
+                    // Stable ordering would immediately discard this proposal;
+                    // avoid allocating a pose and sorting the list for it.
+                    if (hits < worst.hits || hits == worst.hits && sum >= worst.distance) continue@offsets
                 }
                 scaleProposals += Proposal(Pose(s,x,y,seed.score,seed.gate),hits,sum)
+                scaleProposals.sortWith(ordering)
+                if (scaleProposals.size > 8) scaleProposals.removeAt(8)
             }
-            proposals += scaleProposals.sortedWith(compareByDescending<Proposal> { it.hits }.thenBy { it.distance }).take(8)
+            proposals += scaleProposals
         }
         for (p in proposals.sortedWith(compareByDescending<Proposal> { it.hits }.thenBy { it.distance })) {
-            val evidence = verify(index,p.pose,dense,contours,width,height)
+            val evidence = verify(index,p.pose,dense,contours,width,height,acceptanceOnly=true)
             if (evidence.supported) return p.pose to evidence
         }
         return null
@@ -221,7 +306,8 @@ internal object SparseGateSearch {
      * this never relaxes the dense verifier or the final registration checks. */
     fun expand(index: Index, seed: Pose, points: List<Pixel>, ax: Double, ay: Double,
         gx: Double, gy: Double, radius: Double, minimum: Double, maximum: Double): Pose {
-        var best = seed.copy(score=index.score(points,seed.scale,seed.x,seed.y))
+        val coarse = if (points.size <= 64) points else List(64) { points[it*points.size/64] }
+        var best = seed.copy(score=index.score(coarse,seed.scale,seed.x,seed.y))
         val extent = ceil(radius).toInt()
         for (step in -6..6) {
             val scale = seed.scale*(1+step*.005)
@@ -229,11 +315,12 @@ internal object SparseGateSearch {
             for (dx in -extent..extent step 6) for (dy in -extent..extent step 6) {
                 if (hypot(dx.toDouble(),dy.toDouble()) > radius) continue
                 val x = gx+dx-ax*scale; val y = gy+dy-ay*scale
-                val score = index.score(points,scale,x,y)
+                val score = index.score(coarse,scale,x,y,best.score)
                 if (score > best.score) best = Pose(scale,x,y,score,seed.gate)
             }
         }
         val center = best
+        best = best.copy(score=index.score(points,best.scale,best.x,best.y))
         for (step in -5..5) {
             val scale = center.scale*(1+step*.001)
             if (scale !in minimum..maximum) continue
@@ -242,7 +329,7 @@ internal object SparseGateSearch {
             for (dx in -3..3) for (dy in -3..3) {
                 val x = cx+dx; val y = cy+dy
                 if (hypot(x+ax*scale-gx,y+ay*scale-gy) > radius) continue
-                val score = index.score(points,scale,x,y)
+                val score = index.score(points,scale,x,y,best.score)
                 if (score > best.score) best = Pose(scale,x,y,score,seed.gate)
             }
         }

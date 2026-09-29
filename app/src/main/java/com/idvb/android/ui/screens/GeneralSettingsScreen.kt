@@ -41,6 +41,7 @@ fun GeneralSettingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     var backgroundScanEnabled by remember { mutableStateOf(AppServices.prefs.backgroundScanEnabled) }
     var manualMapSelectionEnabled by remember { mutableStateOf(AppServices.prefs.manualMapSelectionEnabled) }
+    var showUnconfirmedCandidates by remember { mutableStateOf(AppServices.prefs.showUnconfirmedCandidates) }
     var debugMode by remember { mutableStateOf(AppServices.prefs.debugMode) }
     var diagnosticsEnabled by remember { mutableStateOf(AppServices.prefs.recognitionDiagnosticsEnabled) }
     var recentDiagnostics by remember { mutableStateOf(AppServices.recognitionDiagnostics.recentPackages()) }
@@ -90,6 +91,18 @@ fun GeneralSettingsScreen(onBack: () -> Unit) {
             onCheckedChange = {
                 manualMapSelectionEnabled = it
                 AppServices.prefs.manualMapSelectionEnabled = it
+            },
+        )
+
+        Spacer(Modifier.height(10.dp))
+        SettingsToggleSection(
+            icon = Icons.Outlined.Search,
+            title = "扫描未确认时显示候选",
+            description = "开启后提供候选地图；后台扫描时点击 👁 查看，否则立即显示。关闭后提示未识别，等待下一次扫描",
+            checked = showUnconfirmedCandidates,
+            onCheckedChange = {
+                showUnconfirmedCandidates = it
+                AppServices.prefs.showUnconfirmedCandidates = it
             },
         )
 

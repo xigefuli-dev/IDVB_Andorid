@@ -40,6 +40,7 @@ data class ManifestClassProperties(
     @SerialName("removeBackground") val removeBackground: Boolean = false,
     /** Desktop 为地图类别指定的扫描楼层。 */
     @SerialName("scanFloorKey") val scanFloorKey: String? = null,
+    @SerialName("containsVectorRoutes") val containsVectorRoutes: Boolean = false,
 )
 
 @Serializable
@@ -89,6 +90,7 @@ data class ManifestCapabilities(
     @SerialName("variantGroups") val variantGroups: Boolean = false,
     @SerialName("floorMarkerKeys") val floorMarkerKeys: Boolean = false,
     @SerialName("mapTags") val mapTags: Boolean = false,
+    @SerialName("containsVectorRoutes") val containsVectorRoutes: Boolean = false,
 )
 
 @Serializable
@@ -104,6 +106,7 @@ data class IdvmManifest(
     @SerialName("variantGroups") val variantGroups: List<ManifestVariantGroup> = emptyList(),
     @SerialName("files") val files: List<ManifestFile>,
     @SerialName("capabilities") val capabilities: ManifestCapabilities,
+    @SerialName("supportedPlatforms") val supportedPlatforms: List<String> = emptyList(),
 )
 
 // ---------- metadata.json ----------

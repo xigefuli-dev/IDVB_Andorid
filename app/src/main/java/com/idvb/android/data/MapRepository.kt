@@ -55,8 +55,9 @@ class MapRepository(context: Context) {
     val mapsRoot: File = File(appContext.filesDir, "idvb/maps")
     private val catalogFile: File = File(mapsRoot, "maps.json")
     @Volatile private var cachedCatalog: MapCatalogDocument? = null
+    internal var onCatalogChanged: (() -> Unit)? = null
 
-    fun loadCatalog(): MapCatalogDocument {
+    @Synchronized fun loadCatalog(): MapCatalogDocument {
         cachedCatalog?.let { return it }
         recoverInterruptedImports()
         if (!catalogFile.exists()) return MapCatalogDocument().also { cachedCatalog = it }
@@ -68,7 +69,7 @@ class MapRepository(context: Context) {
         }.also { cachedCatalog = it }
     }
 
-    fun saveCatalog(doc: MapCatalogDocument) {
+    @Synchronized fun saveCatalog(doc: MapCatalogDocument) {
         mapsRoot.mkdirs()
         val text = json.encodeToString(MapCatalogDocument.serializer(), doc)
         val tmp = File(mapsRoot, "maps.json.tmp")
@@ -78,6 +79,7 @@ class MapRepository(context: Context) {
             tmp.delete()
         }
         cachedCatalog = doc
+        onCatalogChanged?.invoke()
     }
 
     /** 楼层原图绝对路径 */

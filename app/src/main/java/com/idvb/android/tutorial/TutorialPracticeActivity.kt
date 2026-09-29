@@ -24,6 +24,11 @@ class TutorialPracticeActivity : ComponentActivity() {
     private val store by lazy { TutorialStore.get(this) }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (!com.idvb.android.UsageConsent.isAccepted(this)) {
+            startActivity(android.content.Intent(this, com.idvb.android.MainActivity::class.java))
+            finish()
+            return
+        }
         enableEdgeToEdge()
         setContent {
             IDVBTheme {
@@ -115,7 +120,7 @@ private fun PracticeBoard(store: TutorialStore, modifier: Modifier) {
                         TextButton(onClick = {
                             if (!p.selected) message = "请先扫描并选中地图。"
                             else change { it.copy(mode = "adjust", menu = false, visible = true, changed = false) }
-                        }) { Text("自由调整") }
+                        }) { Text("小抄显示调整") }
                     }
                 }
             }

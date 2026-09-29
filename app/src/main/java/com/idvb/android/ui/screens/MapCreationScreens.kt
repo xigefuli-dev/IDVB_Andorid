@@ -57,7 +57,7 @@ fun TemplateManagerScreen(onBack: () -> Unit) {
     var selectedTemplateId by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
     val selectedTemplate = templates.firstOrNull { it.id == selectedTemplateId }
-    ScreenHeader("模板", onBack) {
+    ScreenLayout("模板", onBack, actions = {
         IconButton(onClick = {
             val template = selectedTemplate
             if (template == null) {
@@ -75,16 +75,17 @@ fun TemplateManagerScreen(onBack: () -> Unit) {
                 tint = if (selectedTemplate == null) LocalContentColor.current else MaterialTheme.colorScheme.error,
             )
         }
-    }
-    LazyColumn(Modifier.fillMaxSize().padding(top = 76.dp), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        items(templates, key = { it.id }) { template ->
-            val selected = template.id == selectedTemplateId
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .clickable { selectedTemplateId = if (selected) null else template.id },
-            ) {
-                TemplateCard(template, selected)
+    }) {
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            items(templates, key = { it.id }) { template ->
+                val selected = template.id == selectedTemplateId
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { selectedTemplateId = if (selected) null else template.id },
+                ) {
+                    TemplateCard(template, selected)
+                }
             }
         }
     }
@@ -96,11 +97,12 @@ fun TemplateManagerScreen(onBack: () -> Unit) {
 @Composable
 fun TemplatePickerScreen(onBack: () -> Unit, onSelect: (MapTemplate) -> Unit) {
     val templates = remember { AppServices.templates.load() }
-    ScreenHeader("选择模板", onBack)
-    LazyColumn(Modifier.fillMaxSize().padding(top = 76.dp), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item { Text("选择后，地图只能包含模板定义的楼层。", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-        items(templates, key = { it.id }) { template ->
-            Box(Modifier.clickable { onSelect(template) }) { TemplateCard(template) }
+    ScreenLayout("选择模板", onBack) {
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            item { Text("选择后，地图只能包含模板定义的楼层。", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            items(templates, key = { it.id }) { template ->
+                Box(Modifier.clickable { onSelect(template) }) { TemplateCard(template) }
+            }
         }
     }
 }
@@ -165,30 +167,31 @@ fun MapImagesScreen(
         if (uri != null && key != null) selected = selected + (key to uri)
         pickingFloor = null
     }
-    ScreenHeader(if (existingMapId == null) "创建地图" else "编辑地图", onBack) {
+    ScreenLayout(if (existingMapId == null) "创建地图" else "编辑地图", onBack, actions = {
         if (existingMapId != null) {
             IconButton(onClick = { confirmDelete = true }) {
                 Icon(Icons.Outlined.Delete, "删除地图", tint = MaterialTheme.colorScheme.error)
             }
         }
-    }
-    Column(Modifier.fillMaxSize().padding(top = 76.dp, start = 20.dp, end = 20.dp, bottom = 16.dp)) {
-        OutlinedTextField(title, { title = it }, Modifier.fillMaxWidth(), label = { Text("地图名称") }, singleLine = true)
-        Spacer(Modifier.height(16.dp))
-        template.floors.chunked(2).forEach { row ->
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                row.forEach { floor ->
-                    FloorImageSlot(floor, selected[floor.id], Modifier.weight(1f)) {
-                        pickingFloor = floor.id
-                        picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+    }) {
+        Column(Modifier.fillMaxSize().padding(start = 20.dp, end = 20.dp, bottom = 16.dp)) {
+            OutlinedTextField(title, { title = it }, Modifier.fillMaxWidth(), label = { Text("地图名称") }, singleLine = true)
+            Spacer(Modifier.height(16.dp))
+            template.floors.chunked(2).forEach { row ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    row.forEach { floor ->
+                        FloorImageSlot(floor, selected[floor.id], Modifier.weight(1f)) {
+                            pickingFloor = floor.id
+                            picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        }
                     }
+                    if (row.size == 1) Spacer(Modifier.weight(1f))
                 }
-                if (row.size == 1) Spacer(Modifier.weight(1f))
+                Spacer(Modifier.height(12.dp))
             }
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.weight(1f))
+            Button(onClick = { onNext(title.trim(), selected) }, enabled = title.isNotBlank() && selected.size == template.floors.size, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("下一步：标记门") }
         }
-        Spacer(Modifier.weight(1f))
-        Button(onClick = { onNext(title.trim(), selected) }, enabled = title.isNotBlank() && selected.size == template.floors.size, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("下一步：标记门") }
     }
     if (confirmDelete) AlertDialog(
         onDismissRequest = { confirmDelete = false },
@@ -239,100 +242,101 @@ fun GateMarkerScreen(
     var zoom by remember { mutableFloatStateOf(1f) }; var pan by remember { mutableStateOf(Offset.Zero) }
     var marks by remember(template.id, existingMapId) { mutableStateOf(initialSideDoors.map(::rectToStroke)) }; var currentStroke by remember { mutableStateOf<List<Offset>>(emptyList()) }; var canvasSize by remember { mutableStateOf(IntSize.Zero) }
     var saving by remember { mutableStateOf(false) }
-    ScreenHeader("标记门 · ${main.name}", onBack)
-    Column(Modifier.fillMaxSize().padding(top = 76.dp, bottom = 16.dp)) {
-        Text("第一项为主楼层。双指缩放/移动，单指在侧门位置涂抹。", Modifier.padding(horizontal = 20.dp, vertical = 8.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
-        androidx.compose.foundation.Canvas(Modifier.fillMaxWidth().weight(1f).background(Color.Black).onSizeChanged { canvasSize = it }.pointerInput(bitmap, canvasSize) {
-            awaitEachGesture {
-                var gestureZoom = zoom
-                var gesturePan = pan
-                fun normalized(position: Offset): Offset {
-                val bmp = bitmap ?: return Offset.Zero
-                val base = minOf(canvasSize.width.toFloat() / bmp.width, canvasSize.height.toFloat() / bmp.height)
-                val w = bmp.width * base; val h = bmp.height * base
-                    val untransformed = (position - gesturePan) / gestureZoom
-                return Offset(((untransformed.x - (canvasSize.width-w)/2) / w).coerceIn(0f,1f), ((untransformed.y - (canvasSize.height-h)/2) / h).coerceIn(0f,1f))
-                }
-                val first = awaitFirstDown(requireUnconsumed = false)
-                var isPainting = true
-                currentStroke = listOf(normalized(first.position))
-                do {
-                    val event = awaitPointerEvent()
-                    val pressed = event.changes.filter { it.pressed }
-                    if (pressed.size >= 2) {
-                        isPainting = false
-                        currentStroke = emptyList()
-                        val panChange = event.calculatePan()
-                        val centroid = event.calculateCentroid(useCurrent = true)
-                        val nextZoom = (gestureZoom * event.calculateZoom()).coerceIn(1f, 6f)
-                        val appliedZoom = nextZoom / gestureZoom
-                        // Keep the map point below the fingers stationary while scaling, then apply finger movement.
-                        gesturePan = centroid - (centroid - panChange - gesturePan) * appliedZoom
-                        gestureZoom = nextZoom
-                        zoom = gestureZoom
-                        pan = gesturePan
-                    } else if (isPainting && pressed.size == 1) {
-                        currentStroke = currentStroke + normalized(pressed.first().position)
+    ScreenLayout("标记门 · ${main.name}", onBack) {
+        Column(Modifier.fillMaxSize().padding(bottom = 16.dp)) {
+            Text("第一项为主楼层。双指缩放/移动，单指在侧门位置涂抹。", Modifier.padding(horizontal = 20.dp, vertical = 8.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            androidx.compose.foundation.Canvas(Modifier.fillMaxWidth().weight(1f).background(Color.Black).onSizeChanged { canvasSize = it }.pointerInput(bitmap, canvasSize) {
+                awaitEachGesture {
+                    var gestureZoom = zoom
+                    var gesturePan = pan
+                    fun normalized(position: Offset): Offset {
+                    val bmp = bitmap ?: return Offset.Zero
+                    val base = minOf(canvasSize.width.toFloat() / bmp.width, canvasSize.height.toFloat() / bmp.height)
+                    val w = bmp.width * base; val h = bmp.height * base
+                        val untransformed = (position - gesturePan) / gestureZoom
+                    return Offset(((untransformed.x - (canvasSize.width-w)/2) / w).coerceIn(0f,1f), ((untransformed.y - (canvasSize.height-h)/2) / h).coerceIn(0f,1f))
                     }
-                    event.changes.forEach { it.consume() }
-                } while (event.changes.any { it.pressed })
-                if (isPainting && currentStroke.isNotEmpty()) marks = marks + listOf(currentStroke)
-                currentStroke = emptyList()
-            }
-        }) {
-            val bmp = bitmap ?: return@Canvas
-            val base = minOf(size.width / bmp.width, size.height / bmp.height)
-            val w = bmp.width * base; val h = bmp.height * base; val origin = Offset((size.width-w)/2, (size.height-h)/2)
-            withTransform({ translate(pan.x, pan.y); scale(zoom, zoom, pivot = Offset.Zero) }) {
-                drawImage(bmp.asImageBitmap(), dstOffset = androidx.compose.ui.unit.IntOffset(origin.x.toInt(), origin.y.toInt()), dstSize = androidx.compose.ui.unit.IntSize(w.toInt(), h.toInt()))
-                (marks + listOf(currentStroke).filter { it.isNotEmpty() }).forEach { points ->
-                    if (points.size == 1) {
-                        val p = points.first()
-                        drawCircle(Color(0xFF63CF7B), 9f / zoom, Offset(origin.x + p.x*w, origin.y + p.y*h))
-                    } else {
-                        val path = Path().apply {
-                            val first = points.first(); moveTo(origin.x + first.x*w, origin.y + first.y*h)
-                            points.drop(1).forEach { point -> lineTo(origin.x + point.x*w, origin.y + point.y*h) }
+                    val first = awaitFirstDown(requireUnconsumed = false)
+                    var isPainting = true
+                    currentStroke = listOf(normalized(first.position))
+                    do {
+                        val event = awaitPointerEvent()
+                        val pressed = event.changes.filter { it.pressed }
+                        if (pressed.size >= 2) {
+                            isPainting = false
+                            currentStroke = emptyList()
+                            val panChange = event.calculatePan()
+                            val centroid = event.calculateCentroid(useCurrent = true)
+                            val nextZoom = (gestureZoom * event.calculateZoom()).coerceIn(1f, 6f)
+                            val appliedZoom = nextZoom / gestureZoom
+                            // Keep the map point below the fingers stationary while scaling, then apply finger movement.
+                            gesturePan = centroid - (centroid - panChange - gesturePan) * appliedZoom
+                            gestureZoom = nextZoom
+                            zoom = gestureZoom
+                            pan = gesturePan
+                        } else if (isPainting && pressed.size == 1) {
+                            currentStroke = currentStroke + normalized(pressed.first().position)
                         }
-                        drawPath(path, Color(0xFF63CF7B), style = Stroke(width = 18f/zoom, cap = androidx.compose.ui.graphics.StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round))
-                    }
+                        event.changes.forEach { it.consume() }
+                    } while (event.changes.any { it.pressed })
+                    if (isPainting && currentStroke.isNotEmpty()) marks = marks + listOf(currentStroke)
+                    currentStroke = emptyList()
                 }
-            }
-        }
-        Row(Modifier.padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("缩放", style = MaterialTheme.typography.labelLarge)
-            Slider(value = zoom, onValueChange = { nextZoom ->
-                val focus = Offset(canvasSize.width / 2f, canvasSize.height / 2f)
-                val appliedZoom = nextZoom / zoom
-                pan = focus - (focus - pan) * appliedZoom
-                zoom = nextZoom
-            }, valueRange = 1f..6f, modifier = Modifier.weight(1f).padding(start = 12.dp))
-            Text(String.format("%.1f×", zoom), style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(42.dp))
-        }
-        Row(Modifier.padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { OutlinedButton(onClick = { marks = emptyList() }, enabled = marks.isNotEmpty()) { Text("清除") }; Button(onClick = {
-            bitmap ?: return@Button; saving = true
-            val normalized = marks.map { stroke ->
-                val left = stroke.minOf { it.x }; val top = stroke.minOf { it.y }
-                val right = stroke.maxOf { it.x }; val bottom = stroke.maxOf { it.y }
-                NormalizedRect(left.toDouble(), top.toDouble(), (right-left).toDouble().coerceAtLeast(.005), (bottom-top).toDouble().coerceAtLeast(.005))
-            }
-            scope.launch {
-                try {
-                    withContext(Dispatchers.IO) {
-                        if (existingMapId == null) {
-                            AppServices.repository.createMap(classId, title, template, images, normalized, context.contentResolver)
+            }) {
+                val bmp = bitmap ?: return@Canvas
+                val base = minOf(size.width / bmp.width, size.height / bmp.height)
+                val w = bmp.width * base; val h = bmp.height * base; val origin = Offset((size.width-w)/2, (size.height-h)/2)
+                withTransform({ translate(pan.x, pan.y); scale(zoom, zoom, pivot = Offset.Zero) }) {
+                    drawImage(bmp.asImageBitmap(), dstOffset = androidx.compose.ui.unit.IntOffset(origin.x.toInt(), origin.y.toInt()), dstSize = androidx.compose.ui.unit.IntSize(w.toInt(), h.toInt()))
+                    (marks + listOf(currentStroke).filter { it.isNotEmpty() }).forEach { points ->
+                        if (points.size == 1) {
+                            val p = points.first()
+                            drawCircle(Color(0xFF63CF7B), 9f / zoom, Offset(origin.x + p.x*w, origin.y + p.y*h))
                         } else {
-                            AppServices.repository.updateMap(existingMapId, classId, title, template, images, normalized, context.contentResolver)
+                            val path = Path().apply {
+                                val first = points.first(); moveTo(origin.x + first.x*w, origin.y + first.y*h)
+                                points.drop(1).forEach { point -> lineTo(origin.x + point.x*w, origin.y + point.y*h) }
+                            }
+                            drawPath(path, Color(0xFF63CF7B), style = Stroke(width = 18f/zoom, cap = androidx.compose.ui.graphics.StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round))
                         }
                     }
-                    onSaved()
-                } catch (error: Exception) {
-                    Toast.makeText(context, "保存失败：${error.message ?: "未知错误"}", Toast.LENGTH_LONG).show()
-                } finally {
-                    saving = false
                 }
             }
-        }, enabled = marks.isNotEmpty() && !saving, modifier = Modifier.weight(1f)) { Text(if (saving) "保存中…" else "完成并保存") } }
+            Row(Modifier.padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("缩放", style = MaterialTheme.typography.labelLarge)
+                Slider(value = zoom, onValueChange = { nextZoom ->
+                    val focus = Offset(canvasSize.width / 2f, canvasSize.height / 2f)
+                    val appliedZoom = nextZoom / zoom
+                    pan = focus - (focus - pan) * appliedZoom
+                    zoom = nextZoom
+                }, valueRange = 1f..6f, modifier = Modifier.weight(1f).padding(start = 12.dp))
+                Text(String.format("%.1f×", zoom), style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(42.dp))
+            }
+            Row(Modifier.padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { OutlinedButton(onClick = { marks = emptyList() }, enabled = marks.isNotEmpty()) { Text("清除") }; Button(onClick = {
+                bitmap ?: return@Button; saving = true
+                val normalized = marks.map { stroke ->
+                    val left = stroke.minOf { it.x }; val top = stroke.minOf { it.y }
+                    val right = stroke.maxOf { it.x }; val bottom = stroke.maxOf { it.y }
+                    NormalizedRect(left.toDouble(), top.toDouble(), (right-left).toDouble().coerceAtLeast(.005), (bottom-top).toDouble().coerceAtLeast(.005))
+                }
+                scope.launch {
+                    try {
+                        withContext(Dispatchers.IO) {
+                            if (existingMapId == null) {
+                                AppServices.repository.createMap(classId, title, template, images, normalized, context.contentResolver)
+                            } else {
+                                AppServices.repository.updateMap(existingMapId, classId, title, template, images, normalized, context.contentResolver)
+                            }
+                        }
+                        onSaved()
+                    } catch (error: Exception) {
+                        Toast.makeText(context, "保存失败：${error.message ?: "未知错误"}", Toast.LENGTH_LONG).show()
+                    } finally {
+                        saving = false
+                    }
+                }
+            }, enabled = marks.isNotEmpty() && !saving, modifier = Modifier.weight(1f)) { Text(if (saving) "保存中…" else "完成并保存") } }
+        }
     }
 }
 
@@ -345,6 +349,19 @@ private fun rectToStroke(rect: NormalizedRect): List<Offset> = listOf(
 
 private fun openImageInputStream(context: android.content.Context, uri: Uri): java.io.InputStream? =
     if (uri.scheme == "file") uri.path?.let { java.io.File(it).inputStream() } else context.contentResolver.openInputStream(uri)
+
+@Composable
+private fun ScreenLayout(
+    title: String,
+    onBack: () -> Unit,
+    actions: @Composable RowScope.() -> Unit = {},
+    content: @Composable () -> Unit,
+) {
+    Column(Modifier.fillMaxSize()) {
+        ScreenHeader(title, onBack, actions)
+        Box(Modifier.fillMaxWidth().weight(1f)) { content() }
+    }
+}
 
 @Composable
 private fun ScreenHeader(title: String, onBack: () -> Unit, actions: @Composable RowScope.() -> Unit = {}) {

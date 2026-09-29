@@ -86,6 +86,8 @@ class OverlayService : Service() {
     private var scanProgressView: ScanProgressView? = null
     @Volatile private var scanGeneration = 0
     private var balls: OverlayBallView? = null
+    private var buttonLayout: OverlayButtonLayout? = null
+    private var ballMenu: OverlayBallMenuWindow? = null
     private var blueprintView: BlueprintCalibrationView? = null
     private var adjustView: BlueprintImageAdjustView? = null
     private var candidateView: CandidateSelectionView? = null
@@ -151,6 +153,7 @@ class OverlayService : Service() {
     override fun onCreate() {
         super.onCreate()
         currentService = this
+        if (com.idvb.android.UsageConsent.isAccepted(this)) AppServices.scanPreparation.request()
         getSharedPreferences("overlay", MODE_PRIVATE).registerOnSharedPreferenceChangeListener(capturePreferencesListener)
         val display = getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY)
         val displayContext = display?.let(::createDisplayContext) ?: this
@@ -167,6 +170,10 @@ class OverlayService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         ensureChannel(); startForegroundCompat()
+        if (!com.idvb.android.UsageConsent.isAccepted(this)) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
         if (intent?.action != ACTION_CLOSE) synchronizeCaptureSession()
         when (intent?.action) {
             ACTION_CLOSE -> stopSelf()
@@ -231,8 +238,8 @@ class OverlayService : Service() {
         val hasVariants = catalog.nextVariantMapId(currentMap?.id.orEmpty()) != null
         window.width = ((if (hasVariants) 264 else 212) * density).toInt(); window.height = (48 * density).toInt()
         window.x = (screen.first - window.width).coerceAtLeast(0); window.y = (screen.second * .28f).toInt()
-        var menuOpensUp = false
         balls = OverlayBallView(overlayContext).apply {
+            ballMenu = OverlayBallMenuWindow(overlayContext, window, morePanel, ::screenSize)
             mapLocked = currentMap != null
             identityVerified = currentMap?.let {
                 AppServices.prefs.lastMapIdentitySource == MapIdentitySource.STRUCTURE_VERIFIED
@@ -246,24 +253,10 @@ class OverlayService : Service() {
                 override fun onNextVariant() = nextVariant()
                 override fun onFreeAdjust() = enterFreeAdjustMode()
                 override fun onCalibrate() = enterBlueprintMode()
+                override fun onResetMap() = resetMapIdentity()
                 override fun onClose() = stopSelf()
                 override fun onMenuExpanded(expanded: Boolean) {
-                    val collapsedHeight = (48 * density).toInt()
-                    val expandedHeight = (190 * density).toInt()
-                    val heightChange = expandedHeight - collapsedHeight
-                    if (expanded) {
-                        val ballY = window.y
-                        val screenHeight = screenSize().second
-                        menuOpensUp = ballY + expandedHeight > screenHeight && ballY >= heightChange
-                        setMenuOpensUp(menuOpensUp)
-                        if (menuOpensUp) window.y = ballY - heightChange
-                        window.height = expandedHeight
-                    } else {
-                        if (menuOpensUp) window.y += heightChange
-                        window.height = collapsedHeight
-                        menuOpensUp = false
-                    }
-                    window.update()
+                    if (expanded) ballMenu?.show() else ballMenu?.hide()
                 }
                 override fun onMove(dx: Float, dy: Float) {
                     // 旋转不会重建前台服务，因此拖动时必须使用实时屏幕尺寸。
@@ -277,6 +270,7 @@ class OverlayService : Service() {
                         (currentScreen.second - window.height).coerceAtLeast(0),
                     )
                     window.update()
+                    ballMenu?.updatePosition()
                 }
             }
         }
@@ -287,6 +281,7 @@ class OverlayService : Service() {
         guideWindow.opacity = AppServices.prefs.opacity
         guideWindow.add(guideView!!, locked = true)
         window.add(balls!!, locked = false)
+        balls!!.post { if (!destroyed) buttonLayout = OverlayButtonLayout(overlayContext, balls!!, window, ::screenSize) }
         lastCaptureScreen = screen
         OverlayState.update { it.copy(running = true, visible = true, locked = false) }
     }
@@ -461,11 +456,11 @@ class OverlayService : Service() {
                             return@post
                         }
                         scanning = false
-                        finishScanProgress(generation, recognition.isSuccess)
                         diagnostics?.exceptionOrNull()?.let { error ->
                             Toast.makeText(this, "识别诊断保存失败：${error.message}", Toast.LENGTH_LONG).show()
                         }
                         recognition.onSuccess(::handleScanResult).onFailure { error ->
+                            finishScanProgress(generation, ScanOutcome.FAILED)
                             bitmap.recycle()
                             Toast.makeText(this, "扫描失败：${error.message}", Toast.LENGTH_LONG).show()
                         }
@@ -476,7 +471,7 @@ class OverlayService : Service() {
                         bitmap.recycle()
                         if (generation != scanGeneration) return@post
                         scanning = false
-                        finishScanProgress(generation, false)
+                        finishScanProgress(generation, ScanOutcome.FAILED)
                         balls?.visibility = android.view.View.VISIBLE
                         if (guideVisible) guideView?.visibility = android.view.View.VISIBLE
                         Toast.makeText(this, "识别线程已停止", Toast.LENGTH_LONG).show()
@@ -509,13 +504,13 @@ class OverlayService : Service() {
         }
     }
 
-    private fun finishScanProgress(generation: Int, success: Boolean) {
+    private fun finishScanProgress(generation: Int, outcome: ScanOutcome) {
         if (generation != scanGeneration) return
         val view = scanProgressView ?: return
-        view.finish(success)
+        view.finish(outcome)
         mainHandler.postDelayed({
             if (generation == scanGeneration && scanProgressView === view) hideScanProgress()
-        }, 1200L)
+        }, 2400L)
     }
 
     private fun hideScanProgress() {
@@ -581,7 +576,7 @@ class OverlayService : Service() {
             paint.color = Color.LTGRAY; paint.textSize = 20f
             drawText("已跳过屏幕捕获与识别算法", preview.width / 2f, preview.height / 2f + 34f, paint)
         }
-        handleScanResult(RecognitionResult(preview, high + references + remaining))
+        showCandidates(RecognitionResult(preview, high + references + remaining))
     }
 
     private fun handleScanResult(result: RecognitionResult) {
@@ -590,16 +585,62 @@ class OverlayService : Service() {
             clearPendingCandidates()
             candidateResult = result
             lockSelectedMap(confirmed)
+            finishScanProgress(scanGeneration, ScanOutcome.LOCKED)
             return
         }
-        if (!AppServices.prefs.backgroundScanEnabled) {
-            showCandidates(result)
+        if (AppServices.prefs.showUnconfirmedCandidates) {
+            // Background scans retain candidates until the eye button is pressed.
+            // Missing structural assets still permit explicit catalog selection.
+            val catalog = AppServices.repository.loadCatalog()
+            val included = result.candidates.mapTo(HashSet()) { it.map.id }
+            val remaining = catalog.maps.filter {
+                it.classId == resolveActiveClassId(catalog) && it.id !in included
+            }.map { map -> RecognitionCandidate(map, map.floors.minByOrNull { it.sortOrder }?.key.orEmpty(),
+                CandidateDisposition.CATALOG_ONLY, evidenceLabel = "目录手选 · 结构未确认") }
+            val candidates = result.copy(candidates = result.candidates + remaining)
+            if (AppServices.prefs.backgroundScanEnabled) {
+                closeCandidates(recycleCapture = true)
+                candidateResult = candidates
+                balls?.candidatesAvailable = true
+                Toast.makeText(this, "扫描候选已就绪，点击 👁 查看", Toast.LENGTH_SHORT).show()
+            } else {
+                showCandidates(candidates)
+            }
+            finishScanProgress(scanGeneration, ScanOutcome.CANDIDATES)
             return
         }
-        clearPendingCandidates()
-        candidateResult = result
-        balls?.candidatesAvailable = true
-        Toast.makeText(this, "扫描完成，已得出候选结果；点击 👁 查看", Toast.LENGTH_LONG).show()
+        closeCandidates(recycleCapture = true)
+        if (!result.capturedRegion.isRecycled) result.capturedRegion.recycle()
+        finishScanProgress(scanGeneration, ScanOutcome.NO_RESULT)
+        val retainedMap = if (currentMap != null) "；仍保留原地图" else ""
+        Toast.makeText(this, "未识别到地图：当前可见结构不足以确认，请调整后重扫$retainedMap", Toast.LENGTH_LONG).show()
+    }
+
+    private fun resetMapIdentity() {
+        cancelCaptureScan()
+        closeCandidates(recycleCapture = true)
+        blueprintWindow.remove()
+        blueprintView = null
+        adjustView = null
+        currentMap = null
+        floorIndex = 0
+        AppServices.prefs.lastMapId = null
+        AppServices.prefs.lastFloorKey = null
+        guideVisible = false
+        guideView?.visibility = android.view.View.INVISIBLE
+        guideView?.showBitmap(null)
+        guideBitmap?.let { if (!it.isRecycled) it.recycle() }
+        guideBitmap = null
+        balls?.apply {
+            mapLocked = false
+            identityVerified = null
+            floorLabel = "--"
+            guideVisible = false
+            variantsAvailable = false
+        }
+        resizeControls(false)
+        OverlayState.update { it.copy(mapTitle = null, floorLabel = null) }
+        Toast.makeText(this, "地图身份已重置，请重新扫描或选择地图", Toast.LENGTH_SHORT).show()
     }
 
     private fun showPendingCandidates(): Boolean {
@@ -733,10 +774,12 @@ class OverlayService : Service() {
     }
 
     private fun resizeControls(hasVariants: Boolean) {
+        if (buttonLayout?.separated == true) { buttonLayout?.refresh(); return }
         val screen = screenSize()
         window.width = ((if (hasVariants) 264 else 212) * overlayContext.resources.displayMetrics.density).toInt()
         window.x = window.x.coerceIn(0, (screen.first - window.width).coerceAtLeast(0))
         window.update()
+        ballMenu?.updatePosition()
     }
 
     private fun loadGuideFloor() {
@@ -924,6 +967,8 @@ class OverlayService : Service() {
         guideWindow.remove(); guideView = null
         guideBitmap?.let { if (!it.isRecycled) it.recycle() }; guideBitmap = null
         blueprintWindow.remove(); blueprintView = null; adjustView = null
+        ballMenu?.hide(); ballMenu = null
+        buttonLayout?.dispose(); buttonLayout = null
         window.remove(); balls = null; OverlayState.reset(); super.onDestroy()
     }
     override fun onBind(intent: Intent?): IBinder? = null
@@ -978,6 +1023,8 @@ class OverlayService : Service() {
         window.x = window.x.coerceIn(0, (screen.first - window.width).coerceAtLeast(0))
         window.y = window.y.coerceIn(0, (screen.second - window.height).coerceAtLeast(0))
         window.update()
+        ballMenu?.updatePosition()
+        buttonLayout?.refresh()
         applyPracticeVisibility()
     }
 

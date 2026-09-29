@@ -85,6 +85,7 @@ data class SparseGateScanDiagnostics(
     val visibleEdgePoints: Int,
     val retrievalComplete: Boolean,
     val supportedIdentityCount: Int,
+    /** True when support belongs to one map or one explicitly declared variant family. */
     val identityUnique: Boolean,
     val floorEvidence: List<SparseGateFloorEvidence>,
 )
@@ -113,6 +114,9 @@ data class RecognitionResult(
     val route: String? = null,
     val vpsgDiagnostics: VpsgScanDiagnostics? = null,
     val sparseGateDiagnostics: SparseGateScanDiagnostics? = null,
+    /** Input-to-processing pixel ratio. Evidence distances/counts use processing pixels;
+     * candidate transforms and gate bounds are returned in original screen pixels. */
+    val processingScale: Double = 1.0,
 )
 
 /** 后台扫描路线预留；当前只由前台触发实现调用。 */

@@ -10,6 +10,17 @@ import java.io.File
 
 class IdvmImporterTest {
 
+    @Test fun version14RequiresAndroidAndConsistentCapabilities() {
+        fun fixture(platforms: List<String>, vector: Boolean = false) = TestIdvmPackage.build(
+            formatMinor=4, mutateManifest={ it.copy(supportedPlatforms=platforms,
+                capabilities=it.capabilities.copy(floorMarkerKeys=true,mapTags=true,containsVectorRoutes=vector)) })
+        requireSuccess(doImport(fixture(listOf("android"))).result)
+        assertTrue(requireFailure(doImport(fixture(listOf("windows"))).result).contains("Android"))
+        assertTrue(requireFailure(doImport(fixture(emptyList())).result).contains("supportedPlatforms"))
+        assertTrue(requireFailure(doImport(fixture(listOf("android","android"))).result).contains("supportedPlatforms"))
+        assertTrue(requireFailure(doImport(fixture(listOf("android"),vector=true)).result).contains("矢量路线"))
+    }
+
     @get:Rule
     val tmp: TemporaryFolder = TemporaryFolder()
 

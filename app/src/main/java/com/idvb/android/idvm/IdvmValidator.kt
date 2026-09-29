@@ -29,12 +29,26 @@ object IdvmValidator {
             "header 与 manifest 的 IDVM 版本不一致或读取器版本不受支持"
         }
         require(manifest.packageType == "class-set") { "仅支持 class-set 类型的 IDVM 包" }
-        require(manifest.formatVersion in setOf("1.0", "1.1", "1.2", "1.3")) { "不支持的 IDVM 版本：${manifest.formatVersion}" }
+        require(manifest.formatVersion in setOf("1.0", "1.1", "1.2", "1.3", "1.4")) { "不支持的 IDVM 版本：${manifest.formatVersion}" }
         require(manifest.formatVersion != "1.0" || manifest.variantGroups.isEmpty()) { "IDVM 1.0 包不能声明变体组合" }
         require(manifest.formatVersion != "1.1" || manifest.capabilities.variantGroups) { "IDVM 1.1 包必须声明 variantGroups 能力" }
         require(manifest.formatVersion != "1.2" || manifest.capabilities.floorMarkerKeys) { "IDVM 1.2 包必须声明 floorMarkerKeys 能力" }
         require(manifest.formatVersion != "1.3" || (manifest.capabilities.floorMarkerKeys && manifest.capabilities.mapTags)) {
             "IDVM 1.3 包必须声明 floorMarkerKeys 和 mapTags 能力"
+        }
+        if (manifest.formatVersion == "1.4") {
+            require(manifest.capabilities.floorMarkerKeys && manifest.capabilities.mapTags) {
+                "IDVM 1.4 包必须声明 floorMarkerKeys 和 mapTags 能力"
+            }
+            val platforms = manifest.supportedPlatforms
+            require(platforms.isNotEmpty() && platforms.distinct().size == platforms.size &&
+                platforms.all { it in setOf("windows", "android", "ios", "web") }) {
+                "IDVM 1.4 supportedPlatforms 无效"
+            }
+            require("android" in platforms) { "该 IDVM 地图包未声明支持 Android" }
+            require(manifest.capabilities.containsVectorRoutes == manifest.classes.any { it.properties.containsVectorRoutes }) {
+                "IDVM 1.4 矢量路线能力与地图类声明不一致"
+            }
         }
 
         val manifestPackageId = manifest.packageId.lowercase()

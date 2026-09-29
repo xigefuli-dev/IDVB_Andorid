@@ -12,6 +12,13 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 /** Small, touch-through scan indicator modeled on Desktop's game overlay bar. */
+internal enum class ScanOutcome(val label: String, val status: String, val color: Int) {
+    LOCKED("已识别并锁定地图", "成功", Color.rgb(0, 186, 28)),
+    CANDIDATES("尚未确认地图，请选择候选", "待选择", Color.rgb(184, 112, 0)),
+    NO_RESULT("未识别到地图，请调整后重扫", "未识别", Color.rgb(184, 112, 0)),
+    FAILED("扫描失败，请重试", "失败", Color.rgb(179, 38, 30)),
+}
+
 internal class ScanProgressView(context: Context) : View(context) {
     private val density = resources.displayMetrics.density
     private val background = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(55, 82, 112); alpha = 235 }
@@ -23,7 +30,7 @@ internal class ScanProgressView(context: Context) : View(context) {
     private val bounds = RectF()
     private var progress = 0f
     private var label = "正在扫描地图…"
-    private var failed = false
+    private var outcome: ScanOutcome? = null
 
     fun report(value: Double, text: String) {
         if (value < progress) return
@@ -33,11 +40,11 @@ internal class ScanProgressView(context: Context) : View(context) {
         invalidate()
     }
 
-    fun finish(success: Boolean) {
+    fun finish(result: ScanOutcome) {
         progress = 1f
-        failed = !success
-        label = if (success) "扫描完成" else "扫描失败"
-        fill.color = if (success) Color.rgb(0, 186, 28) else Color.rgb(179, 38, 30)
+        outcome = result
+        label = result.label
+        fill.color = result.color
         contentDescription = label
         invalidate()
     }
@@ -55,7 +62,7 @@ internal class ScanProgressView(context: Context) : View(context) {
         val baseline = height / 2f - (labelPaint.ascent() + labelPaint.descent()) / 2f
         val left = 20f * density
         val right = width - 20f * density
-        val percentage = if (failed) "失败" else "${(progress * 100).roundToInt()}%"
+        val percentage = outcome?.status ?: "${(progress * 100).roundToInt()}%"
         val numberWidth = labelPaint.measureText(percentage)
         val available = (right - left - numberWidth - 14f * density).coerceAtLeast(0f)
         val displayLabel = android.text.TextUtils.ellipsize(

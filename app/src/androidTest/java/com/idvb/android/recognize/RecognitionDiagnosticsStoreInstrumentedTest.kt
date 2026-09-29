@@ -29,13 +29,15 @@ class RecognitionDiagnosticsStoreInstrumentedTest {
             val store = RecognitionDiagnosticsStore(context)
             val result = RecognitionResult(frame, emptyList(), sparseGateDiagnostics = SparseGateScanDiagnostics(
                 12.0, 2.0, 8.0, 2.0, 1, 500, true, 1, true,
-                listOf(SparseGateFloorEvidence("fixture", "1f", 2, .98, .8, 4.0, false, true))))
+                listOf(SparseGateFloorEvidence("fixture", "1f", 2, .98, .8, 4.0, false, true))),
+                processingScale = 2.0)
             val saved = store.record(frame, result,
                 CaptureDiagnosticsContext(32, 32, 0, 0, 32, 32, null, null)).getOrThrow()
             assertEquals(saved, store.recentPackages().single())
             val json = store.diagnosticsJson(saved).getOrThrow()
             assertTrue(json.contains("\"capturedImage\":\"captured.png\""))
             val parsed = org.json.JSONObject(json)
+            assertEquals(2.0, parsed.getDouble("processingScale"), 0.0)
             val sparse = parsed.getJSONObject("sparseGateScan")
             assertEquals(1, sparse.getInt("evaluatedFloorCount"))
             assertTrue(sparse.getBoolean("identityUnique"))

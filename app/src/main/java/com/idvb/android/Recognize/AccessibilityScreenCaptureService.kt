@@ -35,6 +35,10 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
                 callback(Result.failure(IllegalStateException("无障碍截图服务未启用")))
                 return
             }
+            if (!com.idvb.android.UsageConsent.isAccepted(service)) {
+                callback(Result.failure(IllegalStateException("请先打开 IDVB 并确认使用责任声明")))
+                return
+            }
             val completed = AtomicBoolean(false)
             val handler = Handler(Looper.getMainLooper())
             val timeout = Runnable {

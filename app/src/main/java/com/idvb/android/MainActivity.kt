@@ -114,6 +114,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (!UsageConsent.isAccepted(this)) {
+            UsageConsent.show(this)
+            return
+        }
+        AppServices.startRecognitionPreparation()
         enableEdgeToEdge()
         setContent {
             IDVBTheme {
@@ -422,6 +427,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleFileIntent(intent: Intent?) {
+        if (!UsageConsent.isAccepted(this)) return
         val source = intent ?: return
         val uris = when (source.action) {
             Intent.ACTION_VIEW -> (listOfNotNull(source.data) + source.clipData.allUris()).distinct()

@@ -52,6 +52,15 @@ object SideEntranceScanProfiles {
     )
 
     fun resolve(clientWidth: Int, clientHeight: Int): SideEntranceScanConfig {
+        val baseline = desktopProfile(clientWidth, clientHeight)
+        // Reference maps keep their authored pixel dimensions while Android games
+        // scale with the short screen edge. Aspect-only profile lookup must not
+        // give 720p and 4K the same absolute scale interval.
+        val density = minOf(clientWidth, clientHeight).coerceAtLeast(1) / 1440.0
+        return baseline.copy(minimumScale = .20 * density, maximumScale = 4.4 * density)
+    }
+
+    private fun desktopProfile(clientWidth: Int, clientHeight: Int): SideEntranceScanConfig {
         profiles.firstOrNull { it.width == clientWidth && it.height == clientHeight }?.let { return it.config }
         profiles.minByOrNull { abs(it.width - clientWidth) + abs(it.height - clientHeight) }
             ?.takeIf { abs(it.width - clientWidth) <= 100 && abs(it.height - clientHeight) <= 100 }

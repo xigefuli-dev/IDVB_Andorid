@@ -129,16 +129,16 @@ internal class VpsgLineScanner(private val repository: MapRepository,
                 val best = results.firstOrNull { it.qualified }
                 // Every scan floor must be evaluated before an identity can be unique.
                 val complete = floors.size == maps.size && results.size == floors.size
-                val variantPeers = repository.loadCatalog().variantGroups
-                    .filter { group -> best?.floor?.map?.id in group.mapIds }
-                    .flatMap { it.mapIds }.toSet()
+                val groups = repository.loadCatalog().variantGroups
+                val plausible = best?.let { accepted -> results.filter {
+                    it.qualified || it.score >= accepted.score - .09 && it.support >= .70
+                } }.orEmpty()
+                val familyUnique = best != null && com.idvb.android.recognize.sameScanIdentityFamily(
+                    best.floor.map.id, best.floor.map.classId, plausible.map { it.floor.map.id }, groups)
                 val competitor = best?.let { accepted ->
-                    results.firstOrNull { it.floor.map.id != accepted.floor.map.id &&
-                        (it.qualified ||
-                            it.score >= accepted.score - .09 && it.support >= .70 ||
-                            it.floor.map.id in variantPeers && it.support >= .88) }
+                    plausible.firstOrNull { it.floor.map.id != accepted.floor.map.id }
                 }
-                val unique = best != null && complete && competitor == null
+                val unique = best != null && complete && familyUnique
                 Log.i("IDVB-Scan", "vpsg totalMs=${(System.nanoTime() - started) / 1_000_000}" +
                     " eligible=${maps.size} ready=${floors.size} evaluated=${results.size}" +
                     " livePoints=${livePixels.size} unique=$unique")

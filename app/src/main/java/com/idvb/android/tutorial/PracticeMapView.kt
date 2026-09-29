@@ -21,7 +21,7 @@ class PracticeMapView(context: Context, private val store: TutorialStore) : View
     private var pinchDistance = 0f
     private var dragging = false
 
-    init { isFocusableInTouchMode = true; contentDescription = "模拟游戏画面；校准时拖动框选，自由调整时拖动或双指缩放" }
+    init { isFocusableInTouchMode = true; contentDescription = "模拟游戏画面；校准时拖动框选，小抄显示调整时拖动或双指缩放" }
 
     fun update(value: TutorialProgress) {
         progress = value

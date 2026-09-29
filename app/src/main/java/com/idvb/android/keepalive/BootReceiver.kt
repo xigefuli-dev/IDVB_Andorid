@@ -21,6 +21,7 @@ class BootReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent?) {
         if (intent?.action != Intent.ACTION_BOOT_COMPLETED) return
+        if (!com.idvb.android.UsageConsent.isAccepted(context)) return
         val prefs = AppServices.prefs
         if (!prefs.autoStartOnBoot) return
         if (prefs.lastMapId == null) return

@@ -140,6 +140,7 @@ class RecognitionDiagnosticsStore(context: Context) {
         put("capturedImage", "captured.png")
         put("frameWidth", frame.width)
         put("frameHeight", frame.height)
+        put("processingScale", result.processingScale)
         put("screenWidth", context.screenWidth)
         put("screenHeight", context.screenHeight)
         put("captureRegion", buildJsonObject {
@@ -178,6 +179,7 @@ class RecognitionDiagnosticsStore(context: Context) {
         result.sparseGateDiagnostics?.let { scan ->
             put("sparseGateScan", buildJsonObject {
                 put("referenceEvidence", "recognition-structure+prebuilt-lines-v2")
+                put("identitySelectionPolicy", "single-explicit-variant-family-minimum-structure-cost")
                 put("elapsedMilliseconds", scan.elapsedMilliseconds)
                 put("preparationMilliseconds", scan.preparationMilliseconds)
                 put("searchAndVerificationMilliseconds", scan.searchAndVerificationMilliseconds)

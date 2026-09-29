@@ -69,12 +69,34 @@ class SparseGateRecognizerInstrumentedTest {
                     val viewport=ScreenRect(100.0,50.0,320.0,240.0)
                     val gate=GateDetection(.95,1.0,ScreenRect(145.0,165.0,10.0,10.0))
                     val rules=SideEntranceScanConfig(minimumScale=.8,maximumScale=1.2)
-                    fun run(maps: List<MapRecord>, detected: List<GateDetection> = listOf(gate)):
+                    fun run(maps: List<MapRecord>, detected: List<GateDetection> = listOf(gate),
+                        groups: List<MapVariantGroupRecord> = emptyList()):
                         com.idvb.android.recognize.RecognitionResult {
-                        repo.saveCatalog(MapCatalogDocument(classes=listOf(ClassRecord("c","test",scanFloorKey="1f")),maps=maps))
+                        repo.saveCatalog(MapCatalogDocument(classes=listOf(ClassRecord("c","test",scanFloorKey="1f")),maps=maps,variantGroups=groups))
                         return requireNotNull(SparseGateRecognizer(repo).recognize(frame,viewport,maps,GateDetectionResult(gates=detected),rules))
                     }
                     SparseGateSearch.clear()
+                    var activeClass = "c"
+                    com.idvb.android.recognize.RecognitionPreparation(repo) { activeClass }.use { preparation ->
+                        repo.onCatalogChanged = { preparation.request() }
+                        try {
+                            repo.saveCatalog(MapCatalogDocument(classes=listOf(
+                                ClassRecord("c","test",scanFloorKey="1f"),
+                                ClassRecord("other","other",scanFloorKey="1f")),
+                                maps=listOf(a,b.copy(classId="other"))))
+                            val prepared = preparation.awaitIdle()
+                            assertEquals("c",prepared.classId)
+                            assertEquals(1,prepared.ready)
+                            assertEquals(1,prepared.total)
+                            activeClass = "other"
+                            repeat(8) { preparation.request() }
+                            assertEquals("other",preparation.awaitIdle().classId)
+                            repo.saveCatalog(repo.loadCatalog().copy(maps=listOf(a)))
+                            val updated = preparation.awaitIdle()
+                            assertEquals("other",updated.classId)
+                            assertEquals(0,updated.total)
+                        } finally { repo.onCatalogChanged = null }
+                    }
                     val single=run(listOf(a))
                     assertEquals(single.candidates.toString(),1,single.candidates.count { it.disposition==CandidateDisposition.RELIABLE })
                     assertEquals("a",single.automaticallyConfirmedCandidate()?.map?.id)
@@ -92,6 +114,14 @@ class SparseGateRecognizerInstrumentedTest {
                     assertEquals(0,duplicate.candidates.count { it.disposition==CandidateDisposition.RELIABLE })
                     assertEquals(2,duplicate.sparseGateDiagnostics!!.supportedIdentityCount)
                     assertNull(duplicate.automaticallyConfirmedCandidate())
+                    val family = run(listOf(a,b),groups=listOf(MapVariantGroupRecord("ab","c",0,listOf("a","b"))))
+                    assertEquals(2,family.sparseGateDiagnostics!!.supportedIdentityCount)
+                    assertEquals("a",family.automaticallyConfirmedCandidate()?.map?.id)
+                    val c=add("c")
+                    val overlap=run(listOf(a,b,c),groups=listOf(
+                        MapVariantGroupRecord("ab","c",0,listOf("a","b")),
+                        MapVariantGroupRecord("ac","c",1,listOf("a","c"))))
+                    assertNull(overlap.automaticallyConfirmedCandidate())
                     val missing=b.copy(floors=b.floors.map { it.copy(key="2f") })
                     val incomplete=run(listOf(a,missing))
                     assertEquals(0,incomplete.candidates.count { it.disposition==CandidateDisposition.RELIABLE })
@@ -115,6 +145,14 @@ class SparseGateRecognizerInstrumentedTest {
             assertEquals(20.0,index.distance(50.0,50.0,1.0),.3)
             assertEquals(50.0,index.distance(-1.0,50.0,1.0),0.0)
             val points=(5..150).map { SparseGateSearch.Pixel(30,it) }
+            for (x in -12..12) {
+                val exact = index.score(points,1.0,x.toDouble(),0.0)
+                for (cutoff in listOf(0.0,.4,.7,.95)) {
+                    val bounded = index.score(points,1.0,x.toDouble(),0.0,cutoff)
+                    if (exact >= cutoff) assertEquals(exact,bounded,0.0)
+                    else assertTrue(bounded == exact || bounded == Double.NEGATIVE_INFINITY)
+                }
+            }
             val contour=listOf(points.first(),points.last())
             assertTrue(SparseGateSearch.verify(index,SparseGateSearch.Pose(1.0,0.0,0.0),points,listOf(contour),200,160).supported)
             assertFalse(SparseGateSearch.verify(index,SparseGateSearch.Pose(-1.0,0.0,0.0),points,listOf(contour),200,160).supported)
