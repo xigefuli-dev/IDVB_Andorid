@@ -245,6 +245,7 @@ object IdvmValidator {
                 require(anchors.floors.keys == metaKeys) { "地图 $mapId：anchors.floors 与 metadata 楼层集合不一致" }
             }
             for ((floorKey, floorAnchors) in anchors.floors) {
+                floorAnchors.annotations.forEach { validateAnnotation(it) }
                 for (a in floorAnchors.anchors) {
                     require(a.role in setOf("required", "optional")) {
                         "地图 $mapId：anchor ${a.id} role 非法"
@@ -257,6 +258,24 @@ object IdvmValidator {
                 }
             }
         }
+    }
+
+    fun validateAnnotation(a: MapAnnotation) {
+        requireUuid(a.id, "annotation.id")
+        require(a.type in setOf("line", "text", "outline")) { "未知标注类型" }
+        require(if (a.color == null) a.colorIndex in 0..8 else a.color.matches(Regex("#[0-9a-fA-F]{6}"))) { "标注颜色无效" }
+        if (a.type == "line") {
+            val start = requireNotNull(a.start) { "线路缺少起点" }
+            val end = requireNotNull(a.end) { "线路缺少终点" }
+            for (p in listOf(start, end)) require(p.x.isFinite() && p.y.isFinite() && p.x in 0.0..1.0 && p.y in 0.0..1.0) { "线路坐标越界" }
+            require(kotlin.math.abs(start.x - end.x) > 1e-6 || kotlin.math.abs(start.y - end.y) > 1e-6) { "线路端点重合" }
+            a.bounds?.let { validateRect("annotation.bounds", it) }
+        } else {
+            validateRect("annotation.bounds", requireNotNull(a.bounds))
+            require(a.start == null && a.end == null) { "非线路标注不能包含端点" }
+        }
+        require(a.fontSize == null || (a.fontSize.isFinite() && a.fontSize in 1.0..256.0)) { "标注字号无效" }
+        require(a.fontFamily == null || (a.fontFamily.length <= 256 && a.fontFamily.none { it.isISOControl() })) { "标注字体无效" }
     }
 
     fun validateRect(context: String, r: NormalizedRect) {

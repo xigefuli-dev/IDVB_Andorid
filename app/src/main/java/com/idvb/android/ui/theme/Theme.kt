@@ -23,6 +23,7 @@ val DeepTwo = Color(0xFF24272E)
 val SignalGreen = Color(0xFF8EE85D)
 val SignalGreenDeep = Color(0xFF579A3B)
 val SignalGreenSoft = Color(0xFFC7EFAD)
+val AfdianPurple = Color(0xFF946CE6)
 
 private val LightColors = lightColorScheme(
     primary = Color(0xFF20301F), onPrimary = Color.White, primaryContainer = Color(0xFFB9E99C), onPrimaryContainer = Color(0xFF172414),

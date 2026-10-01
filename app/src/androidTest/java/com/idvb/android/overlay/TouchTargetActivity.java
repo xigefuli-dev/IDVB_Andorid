@@ -13,8 +13,19 @@ public class TouchTargetActivity extends Activity {
         super.onCreate(state);
         TextView target = new TextView(this);
         target.setGravity(Gravity.CENTER);
-        target.setText("Touches: 0");
-        target.setOnClickListener(view -> target.setText("Touches: " + (++touches)));
+        target.setText("Touches: 0 Status: IDLE");
+        target.setOnClickListener(view -> target.setText("Touches: " + (++touches) + " Status: CLICKED"));
+        target.setOnTouchListener((view, event) -> {
+            int action = event.getActionMasked();
+            if (action == android.view.MotionEvent.ACTION_DOWN) {
+                target.setText("Touches: " + touches + " Status: DOWN");
+            } else if (action == android.view.MotionEvent.ACTION_CANCEL) {
+                target.setText("Touches: " + touches + " Status: CANCEL");
+            } else if (action == android.view.MotionEvent.ACTION_UP) {
+                target.setText("Touches: " + touches + " Status: UP");
+            }
+            return false;
+        });
         setContentView(target);
     }
 }

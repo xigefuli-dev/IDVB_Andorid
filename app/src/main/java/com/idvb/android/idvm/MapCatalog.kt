@@ -69,6 +69,8 @@ data class ClassRecord(
     @SerialName("name") val name: String,
     @SerialName("removeBackground") val removeBackground: Boolean = false,
     @SerialName("scanFloorKey") val scanFloorKey: String? = null,
+    /** null 表示旧目录未记录能力，此时可从标注恢复。 */
+    val containsVectorRoutes: Boolean? = null,
 )
 
 @Serializable

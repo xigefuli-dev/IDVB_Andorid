@@ -3,4 +3,7 @@
     <files-path
         name="recognition_diagnostics"
         path="idvb/diagnostics/recognition/" />
+    <files-path
+        name="session_diagnostics"
+        path="idvb/diagnostics/sessions/" />
 </paths>

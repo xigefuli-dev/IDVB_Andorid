@@ -16,6 +16,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.Collections
+import com.idvb.android.idvm.ClassRecord
+import android.widget.ScrollView
 
 @RunWith(AndroidJUnit4::class)
 class OverlayMenuPositionInstrumentedTest {
@@ -33,6 +35,7 @@ class OverlayMenuPositionInstrumentedTest {
         lateinit var balls: OverlayBallView
         lateinit var menu: OverlayBallMenuWindow
         var menuForCleanup: OverlayBallMenuWindow? = null
+        var selectedClass: String? = null
         lateinit var more: View
         fun position(): Pair<Int, Int> {
             var result = 0 to 0
@@ -118,6 +121,12 @@ class OverlayMenuPositionInstrumentedTest {
                 menu = OverlayBallMenuWindow(context, controls, balls.morePanel) { screenWidth to screenHeight }
                 menuForCleanup = menu
                 balls.listener = object : OverlayBallView.Listener {
+                    override fun onChooseMapClass() {
+                        menu.toggleClasses(listOf(
+                            ClassRecord("s0", "S0 厄运之女 · 困难（示例）"),
+                            ClassRecord("s1", "S1 另一地图包"),
+                        ), "s0") { selectedClass = it.id }
+                    }
                     override fun onSearch() {}
                     override fun onToggleGuide() {}
                     override fun onNextFloor() {}
@@ -149,6 +158,23 @@ class OverlayMenuPositionInstrumentedTest {
             toggleAndCheck(false)
             toggleAndCheck(true)
             tap((balls.morePanel as LinearLayout).getChildAt(0))
+            instrumentation.waitForIdleSync()
+            lateinit var submenuItem: View
+            instrumentation.runOnMainSync {
+                val submenu = menu.submenuPanel as ScrollView
+                assertTrue(submenu.isAttachedToWindow)
+                val panelX = IntArray(2).also(balls.morePanel::getLocationOnScreen)[0]
+                val submenuX = IntArray(2).also(submenu::getLocationOnScreen)[0]
+                assertTrue("Submenu must appear beside the main menu",
+                    submenuX + submenu.width <= panelX || submenuX >= panelX + balls.morePanel.width)
+                submenuItem = (submenu.getChildAt(0) as LinearLayout).getChildAt(1)
+            }
+            tap(submenuItem)
+            instrumentation.waitForIdleSync()
+            assertEquals("s1", selectedClass)
+            assertFalse(menu.isSubmenuVisible())
+            assertTrue(balls.morePanel.isAttachedToWindow)
+            tap((balls.morePanel as LinearLayout).getChildAt(1))
             instrumentation.waitForIdleSync()
             assertFalse(balls.morePanel.isAttachedToWindow)
             toggleAndCheck(true)

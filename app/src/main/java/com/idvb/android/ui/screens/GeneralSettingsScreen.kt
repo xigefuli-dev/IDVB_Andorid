@@ -14,6 +14,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.BugReport
+import androidx.compose.material.icons.outlined.FitScreen
 import androidx.compose.material.icons.outlined.IosShare
 import androidx.compose.material.icons.outlined.Save
 import androidx.compose.material.icons.outlined.Search
@@ -42,6 +43,7 @@ fun GeneralSettingsScreen(onBack: () -> Unit) {
     var backgroundScanEnabled by remember { mutableStateOf(AppServices.prefs.backgroundScanEnabled) }
     var manualMapSelectionEnabled by remember { mutableStateOf(AppServices.prefs.manualMapSelectionEnabled) }
     var showUnconfirmedCandidates by remember { mutableStateOf(AppServices.prefs.showUnconfirmedCandidates) }
+    var showAlignmentOutput by remember { mutableStateOf(AppServices.prefs.showAlignmentOutput) }
     var debugMode by remember { mutableStateOf(AppServices.prefs.debugMode) }
     var diagnosticsEnabled by remember { mutableStateOf(AppServices.prefs.recognitionDiagnosticsEnabled) }
     var recentDiagnostics by remember { mutableStateOf(AppServices.recognitionDiagnostics.recentPackages()) }
@@ -103,6 +105,20 @@ fun GeneralSettingsScreen(onBack: () -> Unit) {
             onCheckedChange = {
                 showUnconfirmedCandidates = it
                 AppServices.prefs.showUnconfirmedCandidates = it
+            },
+        )
+
+        Spacer(Modifier.height(22.dp))
+        Text("贴合", style = MaterialTheme.typography.labelLarge, color = SignalGreenDeep)
+        Spacer(Modifier.height(10.dp))
+        SettingsToggleSection(
+            icon = Icons.Outlined.FitScreen,
+            title = "显示贴合输出",
+            description = "打开后才会显示贴合的状态通知信息",
+            checked = showAlignmentOutput,
+            onCheckedChange = {
+                showAlignmentOutput = it
+                AppServices.prefs.showAlignmentOutput = it
             },
         )
 
@@ -189,11 +205,12 @@ fun GeneralSettingsScreen(onBack: () -> Unit) {
             },
         )
         Text(
-            "识别诊断最多保留最近 10 份，只在开启后记录真实扫描。复制 JSON 不含截图；ZIP 包含原始游戏截图。",
+            "识别诊断按场次保留最近 20 场全部记录，只在开启后记录真实扫描。复制 JSON 不含截图；ZIP 包含原始游戏截图。反馈时可发送全部已保存场次。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 4.dp, vertical = 10.dp),
         )
+        AlignmentDiagnosticsSection()
         Spacer(Modifier.height(24.dp))
     }
 

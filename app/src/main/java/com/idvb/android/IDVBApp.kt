@@ -32,6 +32,8 @@ object AppServices {
     val repository: MapRepository by lazy { MapRepository(context) }
     val templates: MapTemplateStore by lazy { MapTemplateStore(context) }
     val prefs: OverlayPrefs by lazy { OverlayPrefs(context) }
+    val alignmentMethods by lazy { com.idvb.android.alignment.AlignmentRegistry.createDefault(repository) }
+    val alignmentDiagnostics by lazy { com.idvb.android.alignment.AlignmentDiagnosticsStore(context) }
     val recognitionDiagnostics: RecognitionDiagnosticsStore by lazy { RecognitionDiagnosticsStore(context) }
     val communityDownloads: CommunityDownloadQueue by lazy { CommunityDownloadQueue(context) }
     internal val scanPreparation by lazy {

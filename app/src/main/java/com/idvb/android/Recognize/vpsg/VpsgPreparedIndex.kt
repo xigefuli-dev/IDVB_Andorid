@@ -6,6 +6,11 @@ import org.opencv.core.Mat
 import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
 import java.io.File
+import com.idvb.android.alignment.AlignmentLogSink
+import com.idvb.android.alignment.AlignmentLogEvent
+import com.idvb.android.alignment.emit
+import com.idvb.android.alignment.measure
+import com.idvb.android.alignment.AlignmentCancellation
 
 /** Immutable managed bitsets: evicting an index cannot invalidate an active scan's reference. */
 internal object VpsgPreparedIndex {
@@ -15,39 +20,75 @@ internal object VpsgPreparedIndex {
 
     @Synchronized fun clear() { cache.clear(); bytes = 0 }
 
-    @Synchronized fun load(file: File, generation: String): VpsgFastSolver.Index {
+    @Synchronized fun load(file: File, generation: String, log: AlignmentLogSink = AlignmentLogSink.NONE): VpsgFastSolver.Index {
         // Include content generation, actual location, size and mtime. Reimports and changed packages
         // cannot reuse an old index just because the map/floor names are unchanged.
         val path = file.canonicalPath
         val key = "$path|$generation|${file.length()}|${file.lastModified()}"
-        cache[key]?.let { return it }
-        val gray = CvImages.loadGray(file)
+        cache[key]?.let {
+            log.emit(AlignmentLogEvent("vpsg.prepare-index.cache", "hit", mapOf("bytes" to bytes.toDouble(),
+                "edgeCount" to it.edgeCount.toDouble(), "referencePitch" to it.prior.pitch, "pitchRatio" to it.prior.ratio),
+                thresholds = mapOf("maximumCacheBytes" to MAX_BYTES.toDouble())))
+            return it
+        }
+        log.emit(AlignmentLogEvent("vpsg.prepare-index.cache", "miss"))
+        val gray = log.measure("vpsg.prepare-index.load") { CvImages.loadGray(file) }
         val binary = Mat()
         val k3 = Mat(); val k5 = Mat()
         try {
             require(!gray.empty()) { "Empty prebuilt line image" }
-            Imgproc.threshold(gray, binary, 127.0, 255.0, Imgproc.THRESH_BINARY)
+            log.measure("vpsg.prepare-index.binarize") { Imgproc.threshold(gray, binary, 127.0, 255.0, Imgproc.THRESH_BINARY) }
             val width = binary.cols(); val height = binary.rows()
             require(width >= 100 && height >= 100)
             val pixels = ByteArray(width * height).also { binary.get(0, 0, it) }
-            val projection = projection(pixels, width, height)
-            val prior = VpsgFastSolver.Correlation(projection).peak()
+            val projection = log.measure("vpsg.prepare-index.projection") { projection(pixels, width, height) }
+            val prior = log.measure("vpsg.prepare-index.autocorrelation") { VpsgFastSolver.Correlation(projection).peak() }
             for ((size, output) in listOf(3 to k3, 5 to k5)) {
                 val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(size.toDouble(), size.toDouble()))
-                try { Imgproc.dilate(binary, output, kernel) } finally { kernel.release() }
+                try { log.measure("vpsg.prepare-index.dilate-k$size") { Imgproc.dilate(binary, output, kernel) } }
+                finally { kernel.release() }
             }
             fun pack(mat: Mat): LongArray {
                 val data = ByteArray(width * height).also { mat.get(0, 0, it) }
                 val wordsPerRow = (width + 63) / 64
                 val words = LongArray(wordsPerRow * height)
-                for (y in 0 until height) for (x in 0 until width)
+                for (y in 0 until height) {
+                    AlignmentCancellation.checkpoint("vpsg.prepare-index.pack-row")
+                    for (x in 0 until width)
                     if ((data[y * width + x].toInt() and 255) > 128) {
                         val at = y * wordsPerRow + (x ushr 6)
                         words[at] = words[at] or (1L shl (x and 63))
                     }
+                }
                 return words
             }
-            val result = VpsgFastSolver.Index(width, height, pack(k3), pack(k5), prior, Core.countNonZero(binary))
+            val edges = log.measure("vpsg.prepare-index.edge-coordinates") {
+                val positions = IntArray(Core.countNonZero(binary))
+                var at = 0
+                for (i in pixels.indices) {
+                    if (i and 4095 == 0) AlignmentCancellation.checkpoint("vpsg.prepare-index.edge-block")
+                    if ((pixels[i].toInt() and 255) > 128) positions[at++] = i
+                }
+                positions
+            }
+            val distance = log.measure("vpsg.prepare-index.distance") {
+                val inverted = Mat(); val result = Mat()
+                try {
+                    Core.bitwise_not(binary, inverted)
+                    AlignmentCancellation.checkpoint("vpsg.prepare-index.distance-transform")
+                    Imgproc.distanceTransform(inverted, result, Imgproc.DIST_L2, Imgproc.DIST_MASK_PRECISE)
+                    FloatArray(width * height).also { result.get(0, 0, it) }
+                } finally { inverted.release(); result.release() }
+            }
+            val result = log.measure("vpsg.prepare-index.pack") {
+                VpsgFastSolver.Index(width, height, pack(k3), pack(k5), prior, edges.size, distance, edges)
+            }
+            if (log.enabled) log.emit(AlignmentLogEvent("vpsg.prepare-index.result", measurements = mapOf(
+                "width" to width.toDouble(), "height" to height.toDouble(), "bytes" to result.bytes.toDouble(),
+                "edgeCount" to result.edgeCount.toDouble(), "referencePitch" to prior.pitch, "pitchRatio" to prior.ratio),
+                thresholds = mapOf("binarizeThreshold" to 127.0, "minimumDimension" to 100.0,
+                    "k3" to 3.0, "k5" to 5.0, "maximumCacheBytes" to MAX_BYTES.toDouble()),
+                series = mapOf("referenceProjection" to projection.toList())))
             val obsolete = cache.keys.filter { it.startsWith("$path|") }
             for (old in obsolete) bytes -= cache.remove(old)!!.bytes
             if (result.bytes <= MAX_BYTES) {

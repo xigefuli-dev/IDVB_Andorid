@@ -29,6 +29,7 @@ data class CaptureDiagnosticsContext(
     val captureBottom: Int,
     val classId: String?,
     val className: String?,
+    val sessionId: String? = null,
 )
 
 /**
@@ -37,21 +38,24 @@ data class CaptureDiagnosticsContext(
  */
 class RecognitionDiagnosticsStore(context: Context) {
     private val appContext = context.applicationContext
-    private val directory = File(appContext.filesDir, "idvb/diagnostics/recognition")
+    private val history = com.idvb.android.diagnostics.DiagnosticHistory(File(appContext.filesDir, "idvb/diagnostics"))
 
     @Synchronized
     fun record(
         capturedFrame: Bitmap,
         result: RecognitionResult,
         captureContext: CaptureDiagnosticsContext,
-    ): Result<File> = runCatching {
+    ): Result<File> = synchronized(com.idvb.android.diagnostics.DiagnosticHistory.lock) { runCatching {
         require(!capturedFrame.isRecycled) { "原始扫描帧已经释放" }
+        val now = System.currentTimeMillis()
+        val directory = captureContext.sessionId?.let { history.directoryFor(it, "recognition") }
+            ?: history.directoryAt(now, "recognition")
         directory.mkdirs()
         require(directory.isDirectory) { "无法创建识别诊断目录" }
 
-        val now = System.currentTimeMillis()
-        val finalFile = File(directory, "recognition-$now.zip")
-        val temporary = File(directory, ".recognition-$now.tmp")
+        val suffix = "$now-${java.util.UUID.randomUUID()}"
+        val finalFile = File(directory, "recognition-$suffix.zip")
+        val temporary = File(directory, ".recognition-$suffix.tmp")
         temporary.delete()
         try {
             ZipOutputStream(FileOutputStream(temporary)).use { zip ->
@@ -69,16 +73,15 @@ class RecognitionDiagnosticsStore(context: Context) {
                 temporary.copyTo(finalFile, overwrite = true)
                 temporary.delete()
             }) { "无法提交识别诊断包" }
-            pruneOldPackages(keep = 10)
             finalFile
         } finally {
             temporary.delete()
         }
-    }
+    } }
 
-    fun recentPackages(): List<File> = directory.listFiles { file ->
+    fun recentPackages(): List<File> = history.files("recognition").filter { file ->
         file.isFile && file.name.startsWith("recognition-") && file.extension == "zip"
-    }?.sortedByDescending(File::lastModified).orEmpty()
+    }.sortedByDescending(File::lastModified)
 
     fun latestPackage(): File? = recentPackages().firstOrNull()
 
@@ -127,6 +130,7 @@ class RecognitionDiagnosticsStore(context: Context) {
         createdAt: Long,
     ): JsonObject = buildJsonObject {
         put("schemaVersion", RecognitionPortContract.DIAGNOSTICS_SCHEMA_VERSION)
+        putNullable("sessionId", context.sessionId)
         put("createdAt", Instant.ofEpochMilli(createdAt).toString())
         put("route", result.route ?: result.diagnostics?.route ?: "unknown-or-debug-route")
         putNullable("desktopReferenceCommit", if (result.sparseGateDiagnostics == null)
@@ -297,13 +301,6 @@ class RecognitionDiagnosticsStore(context: Context) {
         })
     }
 
-    private fun pruneOldPackages(keep: Int) {
-        directory.listFiles { file ->
-            file.isFile && file.name.startsWith("recognition-") && file.extension == "zip"
-        }?.sortedByDescending(File::lastModified)
-            ?.drop(keep.coerceAtLeast(1))
-            ?.forEach(File::delete)
-    }
 }
 
 private fun kotlinx.serialization.json.JsonObjectBuilder.putFinite(name: String, value: Double) {

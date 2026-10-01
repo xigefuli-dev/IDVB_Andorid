@@ -10,8 +10,11 @@ import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
+import com.idvb.android.alignment.AlignmentLogSink
+import com.idvb.android.alignment.AlignmentLogEvent
+import com.idvb.android.alignment.emit
 
-/** 通过系统无障碍截图 API 提供一次性截图，不读取或操作界面节点。 */
+/** 提供截图与用户配置位置的单次点击，不读取界面节点。 */
 class AccessibilityScreenCaptureService : AccessibilityService() {
     override fun onServiceConnected() {
         instance = this
@@ -29,32 +32,70 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
         @Volatile private var instance: AccessibilityScreenCaptureService? = null
         val available: Boolean get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && instance != null
 
-        fun capture(region: Rect, executor: Executor, callback: (Result<Bitmap>) -> Unit) {
+        fun click(x: Float, y: Float, callback: (Boolean) -> Unit) {
+            val service = instance
+            if (service == null || !com.idvb.android.UsageConsent.isAccepted(service) || !x.isFinite() || !y.isFinite() || x < 0 || y < 0) {
+                callback(false); return
+            }
+            val path = android.graphics.Path().apply { moveTo(x, y) }
+            val gesture = android.accessibilityservice.GestureDescription.Builder()
+                .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0, 40)).build()
+            val completed = AtomicBoolean(false)
+            val handler = Handler(Looper.getMainLooper())
+            val timeout = Runnable { if (completed.compareAndSet(false, true)) callback(false) }
+            fun finish(success: Boolean) {
+                if (completed.compareAndSet(false, true)) { handler.removeCallbacks(timeout); callback(success) }
+            }
+            handler.postDelayed(timeout, 1_000L)
+            val accepted = runCatching { service.dispatchGesture(gesture, object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: android.accessibilityservice.GestureDescription?) = finish(true)
+                override fun onCancelled(gestureDescription: android.accessibilityservice.GestureDescription?) = finish(false)
+            }, handler) }.getOrDefault(false)
+            if (!accepted) finish(false)
+        }
+
+        fun capture(region: Rect, executor: Executor, callback: (Result<Bitmap>) -> Unit,
+            log: AlignmentLogSink = AlignmentLogSink.NONE): () -> Unit {
             val service = instance
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || service == null) {
                 callback(Result.failure(IllegalStateException("无障碍截图服务未启用")))
-                return
+                return {}
             }
             if (!com.idvb.android.UsageConsent.isAccepted(service)) {
                 callback(Result.failure(IllegalStateException("请先打开 IDVB 并确认使用责任声明")))
-                return
+                return {}
             }
             val completed = AtomicBoolean(false)
             val handler = Handler(Looper.getMainLooper())
+            val retries = CaptureRetryController { delay, action ->
+                val runnable = Runnable(action)
+                handler.postDelayed(runnable, delay)
+                val cancel: () -> Unit = { handler.removeCallbacks(runnable) }
+                cancel
+            }
             val timeout = Runnable {
                 if (completed.compareAndSet(false, true)) {
+                    retries.stop()
                     callback(Result.failure(IllegalStateException("无障碍截图响应超时，请检查无障碍服务")))
                 }
             }
             fun finish(result: Result<Bitmap>) {
                 if (completed.compareAndSet(false, true)) {
+                    retries.stop()
                     handler.removeCallbacks(timeout)
                     callback(result)
                 } else result.getOrNull()?.recycle()
             }
             handler.postDelayed(timeout, 3_000L)
+            var attemptNumber = 0
+            var attemptStarted = 0L
+            lateinit var attempt: () -> Unit
             val screenshotCallback = object : TakeScreenshotCallback {
                 override fun onSuccess(result: ScreenshotResult) {
+                    if (completed.get()) { result.hardwareBuffer.close(); return }
+                    log.emit(AlignmentLogEvent("capture.accessibility.attempt", "captured",
+                        measurements = mapOf("attempt" to attemptNumber.toDouble()),
+                        durationNanos = System.nanoTime() - attemptStarted))
                     runCatching {
                         val buffer = result.hardwareBuffer
                         try {
@@ -83,12 +124,43 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
                 }
 
                 override fun onFailure(errorCode: Int) {
+                    if (completed.get()) return
+                    log.emit(AlignmentLogEvent("capture.accessibility.attempt", "error-$errorCode",
+                        measurements = mapOf("attempt" to attemptNumber.toDouble(), "errorCode" to errorCode.toDouble()),
+                        durationNanos = System.nanoTime() - attemptStarted))
+                    if (errorCode == ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT) {
+                        val waiting = System.nanoTime()
+                        val delay = retries.retry {
+                            log.emit(AlignmentLogEvent("capture.accessibility.retry-wait", "interval-too-short",
+                                durationNanos = System.nanoTime() - waiting))
+                            attempt()
+                        }
+                        if (delay != null) {
+                            log.emit(AlignmentLogEvent("capture.accessibility.retry-scheduled", "interval-too-short",
+                                measurements = mapOf("delayMs" to delay.toDouble()),
+                                thresholds = mapOf("maximumAttempts" to 9.0, "totalTimeoutMs" to 3_000.0)))
+                            return
+                        }
+                    }
                     finish(Result.failure(IllegalStateException("无障碍截图失败（$errorCode）")))
                 }
             }
-            runCatching {
-                service.takeScreenshot(Display.DEFAULT_DISPLAY, executor, screenshotCallback)
-            }.onFailure { finish(Result.failure(it)) }
+            attempt = {
+                if (!completed.get()) {
+                    attemptStarted = System.nanoTime(); attemptNumber++
+                    runCatching {
+                        if (!com.idvb.android.UsageConsent.isAccepted(service)) error("请先打开 IDVB 并确认使用责任声明")
+                        service.takeScreenshot(Display.DEFAULT_DISPLAY, executor, screenshotCallback)
+                    }.onFailure { finish(Result.failure(it)) }
+                }
+            }
+            attempt()
+            // Android cannot revoke an in-flight screenshot binder call. Stop timeout/crop work,
+            // acknowledge immediately, and close any late HardwareBuffer without decoding it.
+            return {
+                log.emit(AlignmentLogEvent("capture.accessibility.cancel", "pending-retry-and-decode-cancelled"))
+                finish(Result.failure(java.util.concurrent.CancellationException("截图请求已取消")))
+            }
         }
     }
 }

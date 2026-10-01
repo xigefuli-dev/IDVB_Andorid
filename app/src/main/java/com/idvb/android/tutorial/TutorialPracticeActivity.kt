@@ -17,6 +17,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import android.graphics.PointF
+import android.widget.Toast
 import com.idvb.android.overlay.OverlayService
 import com.idvb.android.ui.theme.IDVBTheme
 
@@ -109,18 +111,35 @@ private fun PracticeBoard(store: TutorialStore, modifier: Modifier) {
                         store.performed(TutorialStep.SWITCH) { it.copy(variant = 1 - it.variant) }
                         message = "已切换到相似图 ${if (p.variant == 0) "B" else "A"}，没有重新扫描。"
                     }, contentPadding = PaddingValues(8.dp)) { Text("⇆") }
-                    Button(onClick = { change { it.copy(menu = !it.menu) } }, contentPadding = PaddingValues(8.dp)) { Text("…") }
+                    Button(onClick = { change { it.copy(menu = !it.menu, packageMenu = false) } }, contentPadding = PaddingValues(8.dp)) { Text("…") }
                 }
-                if (p.menu) Surface(tonalElevation = 6.dp) {
-                    Column {
-                        TextButton(onClick = {
-                            if (!p.mapOpen || p.scene != "lobby") message = "请在校准练习中先打开游戏地图。"
-                            else change { it.copy(mode = "calibrate", menu = false) }
-                        }) { Text("校准显示区域") }
-                        TextButton(onClick = {
-                            if (!p.selected) message = "请先扫描并选中地图。"
-                            else change { it.copy(mode = "adjust", menu = false, visible = true, changed = false) }
-                        }) { Text("小抄显示调整") }
+                if (p.menu) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (p.packageMenu) Surface(Modifier.weight(1f), tonalElevation = 7.dp) {
+                        Column(Modifier.fillMaxWidth()) {
+                            TextButton(onClick = {
+                                if (progress.step == TutorialStep.PACKAGE) {
+                                    store.performed(TutorialStep.PACKAGE) { it.copy(packageMenu = false) }
+                                    message = "已选择 S0 厄运之女 · 困难（示例），子菜单已收起。"
+                                } else message = "请到“选用地图包”这一步再完成练习。"
+                            }, modifier = Modifier.fillMaxWidth()) { Text("S0 厄运之女 · 困难（示例）") }
+                            TextButton(onClick = { change { it.copy(packageMenu = false) } }) {
+                                Text("其他地图包（示例）")
+                            }
+                        }
+                    }
+                    Surface(if (p.packageMenu) Modifier.weight(1f) else Modifier.width(184.dp), tonalElevation = 6.dp) {
+                        Column(Modifier.fillMaxWidth()) {
+                            TextButton(onClick = { change { it.copy(packageMenu = !it.packageMenu) } }) { Text("选择地图包") }
+                            TextButton(onClick = {
+                                if (!p.mapOpen || p.scene != "lobby") message = "请在校准练习中先打开游戏地图。"
+                                else change { it.copy(mode = "calibrate", menu = false, packageMenu = false) }
+                            }) { Text("校准显示区域") }
+                            TextButton(onClick = { change { it.copy(mode = "assist", menu = false, packageMenu = false) } }) { Text("辅助触控") }
+                            TextButton(onClick = {
+                                if (!p.selected) message = "请先扫描并选中地图。"
+                                else change { it.copy(mode = "adjust", menu = false, packageMenu = false, visible = true, changed = false) }
+                            }) { Text("小抄显示调整") }
+                        }
                     }
                 }
             }
@@ -134,6 +153,25 @@ private fun PracticeBoard(store: TutorialStore, modifier: Modifier) {
                     }) { Text(if (p.mapOpen) "关闭游戏地图" else "打开游戏地图") }
                 }
             }
+        } else if (p.mode == "assist") {
+            val guideTargets = remember {
+                listOf(PointF(0.077f, 0.265f), PointF(0.938f, 0.253f))
+            }
+            val guideLabels = remember {
+                listOf("开图位置", "关图位置")
+            }
+            AndroidView(factory = { context ->
+                com.idvb.android.overlay.AssistTouchEditorView(context, p.assistPoints, guideTargets, guideLabels) { points ->
+                    if (points.isEmpty()) {
+                        change { it.copy(assistPoints = emptyList(), mode = "normal") }
+                    } else if (isPracticeAssistTouchValid(points)) {
+                        store.performed(TutorialStep.ASSIST_TOUCH) { it.copy(assistPoints = points, mode = "normal") }
+                        message = "开图与关图按键已保存，请点击右侧“检查”。"
+                    } else {
+                        Toast.makeText(context, "请将“打开”放到左上角小地图、“关闭”放到右上角关闭键", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }, modifier = Modifier.fillMaxSize())
         } else if (p.mode == "calibrate") {
             Row(Modifier.align(Alignment.BottomCenter).padding(8.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 Button(onClick = { change { it.copy(mode = "normal") } }) { Text("取消") }
@@ -141,7 +179,7 @@ private fun PracticeBoard(store: TutorialStore, modifier: Modifier) {
                 Button(onClick = {
                     if (isPracticeCalibrationValid(p.rect)) {
                         store.performed(TutorialStep.CALIBRATE) { it.copy(mode = "normal") }
-                        message = "练习区域已保存。正式游戏里也需要校准一次。"
+                        message = "练习区域已保存，请点击右侧“检查”。"
                     } else message = "请沿虚线框选整块地图画布，不要只圈一个房间。"
                 }) { Text("确认并保存") }
             }

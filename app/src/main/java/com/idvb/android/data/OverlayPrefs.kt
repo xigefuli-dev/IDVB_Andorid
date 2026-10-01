@@ -1,6 +1,7 @@
 package com.idvb.android.data
 
 import android.content.Context
+import android.os.Build
 
 enum class MapIdentitySource { STRUCTURE_VERIFIED, MANUAL_UNVERIFIED }
 enum class ScreenCaptureMethod { MEDIA_PROJECTION, ACCESSIBILITY }
@@ -19,9 +20,9 @@ class OverlayPrefs(context: Context) {
         // Keep subsequent user choices across launches and service restarts.
         if (!prefs.getBoolean("scan_defaults_v2_applied", false)) {
             prefs.edit()
-                .putBoolean("background_scan_enabled", true)
-                .putBoolean("show_unconfirmed_candidates", true)
-                .putBoolean("recognition_diagnostics_enabled", true)
+                .putBoolean("background_scan_enabled", DefaultSettings.BACKGROUND_SCAN)
+                .putBoolean("show_unconfirmed_candidates", DefaultSettings.SHOW_UNCONFIRMED_CANDIDATES)
+                .putBoolean("recognition_diagnostics_enabled", DefaultSettings.RECOGNITION_DIAGNOSTICS)
                 .putBoolean("scan_defaults_v2_applied", true)
                 .apply()
         }
@@ -29,7 +30,7 @@ class OverlayPrefs(context: Context) {
 
     companion object {
         /** 默认透明度，对齐参考项目 MapOpacity=0.46 */
-        const val DEFAULT_OPACITY = 0.46f
+        const val DEFAULT_OPACITY = DefaultSettings.OPACITY
         const val DEFAULT_W_RATIO = 0.6f
         const val DEFAULT_H_RATIO = 0.6f
     }
@@ -63,55 +64,90 @@ class OverlayPrefs(context: Context) {
         set(value) = prefs.edit().putFloat("opacity", value.coerceIn(0.1f, 1f)).apply()
 
     var locked: Boolean
-        get() = prefs.getBoolean("locked", false)
+        get() = prefs.getBoolean("locked", DefaultSettings.LOCKED)
         set(value) = prefs.edit().putBoolean("locked", value).apply()
+
+    /** 按下眼睛时打开，松手时关闭；旧安装也默认启用。 */
+    var holdToActivateEnabled: Boolean
+        get() = prefs.getBoolean("hold_to_activate_enabled", DefaultSettings.HOLD_TO_ACTIVATE)
+        set(value) = prefs.edit().putBoolean("hold_to_activate_enabled", value).apply()
+
+    var searchButtonAction: SearchButtonAction
+        get() = SearchButtonAction.fromStored(prefs.getString("search_button_action", null))
+        set(value) = prefs.edit().putString("search_button_action", value.name).apply()
+
+    var eyeButtonAction: EyeButtonAction
+        get() = EyeButtonAction.fromStored(prefs.getString("eye_button_action", null))
+        set(value) = prefs.edit().putString("eye_button_action", value.name).apply()
+
+    /** Stable registry ID, independent of the button action and open to new alignment methods. */
+    var alignmentMethodId: String
+        get() = prefs.getString("alignment_method_id", null)
+            ?: com.idvb.android.alignment.AlignmentRegistry.DEFAULT_METHOD_ID
+        set(value) = prefs.edit().putString("alignment_method_id", value).apply()
+
+    /** Numeric alignment traces remain available; this controls additional replay images/masks. */
+    var alignmentReplayInputsEnabled: Boolean
+        get() = prefs.getBoolean("alignment_replay_inputs_enabled", DefaultSettings.ALIGNMENT_REPLAY_INPUTS)
+        set(value) = prefs.edit().putBoolean("alignment_replay_inputs_enabled", value).apply()
 
     /** 开机自动恢复悬浮窗 */
     var autoStartOnBoot: Boolean
-        get() = prefs.getBoolean("auto_start_on_boot", false)
+        get() = prefs.getBoolean("auto_start_on_boot", DefaultSettings.AUTO_START_ON_BOOT)
         set(value) = prefs.edit().putBoolean("auto_start_on_boot", value).apply()
 
     /** 开发用候选界面模拟开关。 */
     var debugMode: Boolean
-        get() = prefs.getBoolean("debug_mode", false)
+        get() = prefs.getBoolean("debug_mode", DefaultSettings.DEBUG_MODE)
         set(value) = prefs.edit().putBoolean("debug_mode", value).apply()
 
     /** 扫描完成后暂存候选结果，等待用户点击悬浮窗的眼睛按钮再显示。 */
     var backgroundScanEnabled: Boolean
-        get() = prefs.getBoolean("background_scan_enabled", true)
+        get() = prefs.getBoolean("background_scan_enabled", DefaultSettings.BACKGROUND_SCAN)
         set(value) = prefs.edit().putBoolean("background_scan_enabled", value).apply()
 
     /** 放大镜直接打开按 IDVM 标签筛选的地图目录，不执行屏幕捕获。 */
     var manualMapSelectionEnabled: Boolean
-        get() = prefs.getBoolean("manual_map_selection_enabled", false)
+        get() = prefs.getBoolean("manual_map_selection_enabled", DefaultSettings.MANUAL_MAP_SELECTION)
         set(value) = prefs.edit().putBoolean("manual_map_selection_enabled", value).apply()
 
     /** 未唯一确认时提供候选，后台扫描时等待点击眼睛；关闭则保留原地图并等待重新扫描。 */
     var showUnconfirmedCandidates: Boolean
-        get() = prefs.getBoolean("show_unconfirmed_candidates", true)
+        get() = prefs.getBoolean("show_unconfirmed_candidates", DefaultSettings.SHOW_UNCONFIRMED_CANDIDATES)
         set(value) = prefs.edit().putBoolean("show_unconfirmed_candidates", value).apply()
 
     /** 保存真实扫描输入与候选证据，供 Desktop/Android 差分验证。 */
     var recognitionDiagnosticsEnabled: Boolean
-        get() = prefs.getBoolean("recognition_diagnostics_enabled", true)
+        get() = prefs.getBoolean("recognition_diagnostics_enabled", DefaultSettings.RECOGNITION_DIAGNOSTICS)
         set(value) = prefs.edit().putBoolean("recognition_diagnostics_enabled", value).apply()
+
+    /** 打开后才会显示贴合的状态通知信息，默认关闭。 */
+    var showAlignmentOutput: Boolean
+        get() = prefs.getBoolean("show_alignment_output", DefaultSettings.SHOW_ALIGNMENT_OUTPUT)
+        set(value) = prefs.edit().putBoolean("show_alignment_output", value).apply()
 
     /** 将攻略地图显示区域限制在屏幕范围内。 */
     var constrainGuideToScreen: Boolean
-        get() = prefs.getBoolean("constrain_guide_to_screen", false)
+        get() = prefs.getBoolean("constrain_guide_to_screen", DefaultSettings.CONSTRAIN_GUIDE_TO_SCREEN)
         set(value) = prefs.edit().putBoolean("constrain_guide_to_screen", value).apply()
 
     /** 显示攻略地图时按 Class 标记或楼层主色移除背景。 */
     var removeGuideBackground: Boolean
-        get() = prefs.getBoolean("remove_guide_background", false)
+        get() = prefs.getBoolean("remove_guide_background", DefaultSettings.REMOVE_GUIDE_BACKGROUND)
         set(value) = prefs.edit().putBoolean("remove_guide_background", value).apply()
 
-    /** 识别截图来源；默认保持原有的系统屏幕捕获链路。 */
+    var showRoutes: Boolean
+        get() = prefs.getBoolean("show_routes", DefaultSettings.SHOW_ROUTES)
+        set(value) = prefs.edit().putBoolean("show_routes", value).apply()
+
+    var routeLineThickness: Int
+        get() = prefs.getInt("route_line_thickness", DefaultSettings.ROUTE_LINE_THICKNESS).coerceIn(0, 3)
+        set(value) = prefs.edit().putInt("route_line_thickness", value.coerceIn(0, 3)).apply()
+
+    /** 固定使用无障碍；旧版屏幕捕获偏好不再生效。 */
     var screenCaptureMethod: ScreenCaptureMethod
-        get() = prefs.getString("screen_capture_method", null)
-            ?.let { runCatching { ScreenCaptureMethod.valueOf(it) }.getOrNull() }
-            ?: ScreenCaptureMethod.MEDIA_PROJECTION
-        set(value) = prefs.edit().putString("screen_capture_method", value.name).apply()
+        get() = ScreenCaptureMethod.ACCESSIBILITY
+        set(@Suppress("UNUSED_PARAMETER") value) = prefs.edit().remove("screen_capture_method").apply()
 
     /** 按当前方向保存蓝图校准区域，值为 0..1 的屏幕比例。 */
     fun setCaptureRegion(landscape: Boolean, left: Float, top: Float, right: Float, bottom: Float) {

@@ -53,6 +53,7 @@ class MapRepository(context: Context) {
     private val json: Json = IdvmJson.instance
 
     val mapsRoot: File = File(appContext.filesDir, "idvb/maps")
+    val alignmentReferenceCacheRoot: File get() = File(appContext.cacheDir, "alignment-reference").apply { mkdirs() }
     private val catalogFile: File = File(mapsRoot, "maps.json")
     @Volatile private var cachedCatalog: MapCatalogDocument? = null
     internal var onCatalogChanged: (() -> Unit)? = null
@@ -368,6 +369,14 @@ class MapRepository(context: Context) {
                 ?.freeCropPoints.orEmpty()
         }.getOrDefault(emptyList())
     }
+
+    fun loadRouteAnnotations(map: MapRecord, floorKey: String): List<MapAnnotation> = runCatching {
+        if (loadCatalog().classes.firstOrNull { it.id == map.classId }?.containsVectorRoutes == false)
+            return emptyList()
+        val file = File(mapsRoot, "${map.id}/data/anchors.json")
+        if (!file.isFile) return emptyList()
+        json.decodeFromString<AnchorsDocument>(file.readText()).floors[floorKey]?.annotations.orEmpty()
+    }.getOrDefault(emptyList())
 
     /** 读取 Desktop IDVM 为指定楼层保存的人工遮瑕层。 */
     fun loadBackgroundLayers(mapId: String, floorKey: String): List<BackgroundLayer> = runCatching {

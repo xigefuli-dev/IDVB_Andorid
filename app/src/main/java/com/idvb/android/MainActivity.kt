@@ -5,6 +5,7 @@ import android.os.Build
 import android.content.Intent
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.lifecycle.lifecycleScope
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -51,22 +53,29 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import com.idvb.android.ui.screens.HomeScreen
 import com.idvb.android.ui.screens.maplist.MapListScreen
@@ -76,6 +85,7 @@ import com.idvb.android.ui.screens.SubscriptionDownloadFab
 import com.idvb.android.ui.screens.SubscriptionDownloadDialog
 import com.idvb.android.ui.screens.GeneralSettingsScreen
 import com.idvb.android.ui.screens.VisionSettingsScreen
+import com.idvb.android.ui.screens.OperationSettingsScreen
 import com.idvb.android.data.ScreenCaptureMethod
 import com.idvb.android.ui.screens.TemplateManagerScreen
 import com.idvb.android.ui.screens.TemplatePickerScreen
@@ -98,6 +108,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -123,9 +134,16 @@ class MainActivity : ComponentActivity() {
         setContent {
             IDVBTheme {
                 val context = LocalContext.current
+                val density = LocalDensity.current
                 val scope = rememberCoroutineScope()
                 var tab by rememberSaveable { mutableIntStateOf(0) }
                 var page by remember { mutableStateOf("main") }
+                var showExitConfirmation by rememberSaveable { mutableStateOf(false) }
+                var navigationBarHeightPx by remember { mutableIntStateOf(0) }
+                val navigationBarHeight = with(density) { navigationBarHeightPx.toDp() }
+                val navigationBarVisibility = remember { MutableTransitionState(false) }.apply {
+                    targetState = page == "main"
+                }
                 var navigatingForward by remember { mutableStateOf(true) }
                 var creationClassId by remember { mutableStateOf<String?>(null) }
                 var creationMapId by remember { mutableStateOf<String?>(null) }
@@ -133,6 +151,17 @@ class MainActivity : ComponentActivity() {
                 var creationTitle by remember { mutableStateOf("") }
                 var creationImages by remember { mutableStateOf<Map<String, Uri>>(emptyMap()) }
                 var creationSideDoors by remember { mutableStateOf(emptyList<com.idvb.android.idvm.NormalizedRect>()) }
+                val navigateUp: () -> Unit = {
+                    navigatingForward = false
+                    page = when (page) {
+                        "gate-marker" -> "map-images"
+                        "map-images" -> if (creationMapId == null) "template-picker" else "main"
+                        else -> "main"
+                    }
+                }
+                BackHandler(enabled = !showExitConfirmation) {
+                    if (page == "main") showExitConfirmation = true else navigateUp()
+                }
                 val permissions = rememberPermissionController()
                 val tutorialStore = remember { TutorialStore.get(context) }
                 val tutorial by tutorialStore.state.collectAsState()
@@ -157,10 +186,11 @@ class MainActivity : ComponentActivity() {
                     tab = tutorialTab
                 }
 
-                val hasMaps = remember(catalogTick, page, tab) {
-                    AppServices.repository.loadCatalog().maps.isNotEmpty()
+                val hasMaps by produceState(initialValue = false, catalogTick) {
+                    value = withContext(Dispatchers.IO) { AppServices.repository.loadCatalog().maps.isNotEmpty() }
                 }
                 var showImportGuideDialog by remember { mutableStateOf(false) }
+                var showTutorialEntryDialog by rememberSaveable { mutableStateOf(false) }
                 var importing by remember { mutableStateOf(false) }
                 val downloadJobs by AppServices.communityDownloads.jobs.collectAsState()
                 val downloadRevision by AppServices.communityDownloads.completionRevision.collectAsState()
@@ -198,183 +228,213 @@ class MainActivity : ComponentActivity() {
                 }
                 Scaffold(
                     containerColor = MaterialTheme.colorScheme.background,
-                    // 始终保留同一块布局空间，避免页面切换时高度变化造成“斜向”动画。
-                    bottomBar = { MainBottomBar(tab = tab, visible = page == "main", onSelect = { selected -> navigatingForward = selected > tab; tab = selected }) },
                     floatingActionButton = {
-                        val permissionsReady = permissions.snapshot.readyToStart
-                        val ready = hasMaps && permissionsReady
-                        val description = if (!hasMaps) "导入地图" else if (ready) "启动服务" else "补全权限"
-                        if (page == "main" && (tab == 0 || tab == 1)) ServiceStatusFab(
-                            ready = ready,
-                            description = description,
-                            onClick = {
-                                if (!hasMaps) {
-                                    showImportGuideDialog = true
-                                } else if (permissions.snapshot.captureMethod == ScreenCaptureMethod.MEDIA_PROJECTION &&
-                                    permissions.snapshot.overlay &&
-                                    permissions.snapshot.notifications &&
-                                    permissions.snapshot.foregroundService &&
-                                    permissions.snapshot.mediaProjectionService &&
-                                    permissions.snapshot.batteryOptimization) {
-                                    permissions.requestScreenCapture {
+                        if (page == "main") Box(Modifier.padding(bottom = navigationBarHeight)) {
+                            val permissionsReady = permissions.snapshot.readyToStart
+                            val ready = hasMaps && permissionsReady
+                            val description = if (!hasMaps) "导入地图" else if (ready) "启动服务" else "补全权限"
+                            if (page == "main" && (tab == 0 || tab == 1)) ServiceStatusFab(
+                                ready = ready,
+                                description = description,
+                                onClick = {
+                                    if (!hasMaps) {
+                                        showImportGuideDialog = true
+                                    } else if (permissions.snapshot.captureMethod == ScreenCaptureMethod.MEDIA_PROJECTION &&
+                                        permissions.snapshot.overlay &&
+                                        permissions.snapshot.notifications &&
+                                        permissions.snapshot.foregroundService &&
+                                        permissions.snapshot.mediaProjectionService &&
+                                        permissions.snapshot.batteryOptimization) {
+                                        permissions.requestScreenCapture {
+                                            OverlayService.start(this@MainActivity)
+                                        }
+                                    } else if (permissions.snapshot.allGranted) {
                                         OverlayService.start(this@MainActivity)
-                                        moveTaskToBack(true)
-                                    }
-                                } else if (permissions.snapshot.allGranted) {
-                                    OverlayService.start(this@MainActivity)
-                                    moveTaskToBack(true)
-                                } else permissions.requestNextMissing()
-                            },
-                        )
-                        if (page == "main" && tab == 2) SubscriptionDownloadFab(downloadJobs) {
-                            showDownloadQueue = true
+                                    } else permissions.requestNextMissing()
+                                },
+                            )
+                            if (page == "main" && tab == 2) SubscriptionDownloadFab(downloadJobs) {
+                                showDownloadQueue = true
+                            }
                         }
                     },
                 ) { innerPadding ->
-                    Column(Modifier.fillMaxSize().padding(innerPadding)) {
-                        if (tutorial.active && page == "main") TutorialPanel(
-                            store = tutorialStore,
-                            hasMaps = hasMaps,
-                            permissionsReady = permissions.snapshot.readyToStart,
-                            onPractice = openPractice,
-                            onPause = { tutorialStore.update { it.copy(active = false) } },
-                            modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp),
-                        )
+                    val bottomInsetPx = with(density) { innerPadding.calculateBottomPadding().roundToPx() }
+                    // 所有页面共用固定视口；导航栏空间只在主页内容内部预留。
+                    Box(Modifier.fillMaxSize().padding(innerPadding).consumeWindowInsets(innerPadding)) {
                         AnimatedContent(
                             targetState = page to tab,
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.TopStart,
                             transitionSpec = {
-                                if (navigatingForward) {
-                                    (fadeIn() + slideInHorizontally { it / 5 }) togetherWith
-                                        (fadeOut() + slideOutHorizontally { -it / 5 })
-                                } else {
-                                    (fadeIn() + slideInHorizontally { -it / 5 }) togetherWith
-                                        (fadeOut() + slideOutHorizontally { it / 5 })
-                                }
+                                (slideInHorizontally(animationSpec = tween(300, easing = FastOutSlowInEasing)) {
+                                    if (navigatingForward) it else -it
+                                } togetherWith slideOutHorizontally(animationSpec = tween(300, easing = FastOutSlowInEasing)) {
+                                    if (navigatingForward) -it else it
+                                }).using(null)
                             },
                             label = "page-transition",
                         ) { (currentPage, currentTab) ->
-                            when (currentPage) {
-                                "templates" -> TemplateManagerScreen { navigatingForward = false; page = "main" }
-                                "general-settings" -> GeneralSettingsScreen { navigatingForward = false; page = "main" }
-                                "vision-settings" -> VisionSettingsScreen { navigatingForward = false; page = "main" }
-                                "template-picker" -> TemplatePickerScreen(onBack = { navigatingForward = false; page = "main" }) {
-                                    creationMapId = null
-                                    creationSideDoors = emptyList()
-                                    creationTemplate = it
-                                    creationImages = emptyMap()
-                                    navigatingForward = true
-                                    page = "map-images"
-                                }
-                                "map-images" -> creationTemplate?.let { template ->
-                                    MapImagesScreen(
-                                        template = template,
-                                        defaultTitle = creationTitle,
-                                        initialImages = creationImages,
-                                        existingMapId = creationMapId,
-                                        onBack = {
-                                            navigatingForward = false
-                                            page = if (creationMapId == null) "template-picker" else "main"
-                                        },
-                                        onDelete = {
-                                            creationMapId?.let { mapId ->
-                                                AppServices.repository.loadCatalog().maps
-                                                    .firstOrNull { it.id == mapId }
-                                                    ?.let(AppServices.repository::deleteMap)
-                                                if (AppServices.prefs.lastMapId == mapId) {
-                                                    AppServices.prefs.lastMapId = null
-                                                    AppServices.prefs.lastFloorKey = null
-                                                }
-                                            }
-                                            catalogTick++
-                                            tab = 1
+                            // 整页平移复用绘制层，避免动画每帧重绘文字、图标和卡片。
+                            Column(Modifier.fillMaxSize().graphicsLayer().padding(bottom = if (currentPage == "main") navigationBarHeight else 0.dp)) {
+                                if (tutorial.active && currentPage == "main") TutorialPanel(
+                                    store = tutorialStore,
+                                    hasMaps = hasMaps,
+                                    permissionsReady = permissions.snapshot.readyToStart,
+                                    onPractice = openPractice,
+                                    onPause = { tutorialStore.update { it.copy(active = false) } },
+                                    modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp),
+                                )
+                                Box(Modifier.weight(1f)) {
+                                    when (currentPage) {
+                                        "templates" -> TemplateManagerScreen(onBack = navigateUp)
+                                        "general-settings" -> GeneralSettingsScreen(onBack = navigateUp)
+                                        "vision-settings" -> VisionSettingsScreen(onBack = navigateUp)
+                                        "operation-settings" -> OperationSettingsScreen(onBack = navigateUp)
+                                        "template-picker" -> TemplatePickerScreen(onBack = navigateUp) {
                                             creationMapId = null
-                                            creationTemplate = null
-                                            creationImages = emptyMap()
                                             creationSideDoors = emptyList()
-                                            navigatingForward = false
-                                            page = "main"
-                                        },
-                                        onNext = { title, images ->
-                                            creationTitle = title
-                                            creationImages = images
-                                            navigatingForward = true
-                                            page = "gate-marker"
-                                        },
-                                    )
-                                }
-                                "gate-marker" -> creationTemplate?.let { template -> creationClassId?.let { targetClass ->
-                                    GateMarkerScreen(
-                                        template = template,
-                                        title = creationTitle,
-                                        images = creationImages,
-                                        classId = targetClass,
-                                        onBack = { navigatingForward = false; page = "map-images" },
-                                        onSaved = {
-                                            catalogTick++
-                                            tab = 1
-                                            creationMapId = null
-                                            creationTemplate = null
+                                            creationTemplate = it
                                             creationImages = emptyMap()
-                                            creationSideDoors = emptyList()
-                                            navigatingForward = false
-                                            page = "main"
-                                        },
-                                        existingMapId = creationMapId,
-                                        initialSideDoors = creationSideDoors,
-                                    )
-                                } }
-                                else -> when (currentTab) {
-                                    0 -> HomeScreen(
-                                        permissions = permissions.snapshot,
-                                        hasMaps = hasMaps,
-                                        onOpenTutorial = { tutorialStore.update { it.copy(active = true) } },
-                                        tutorialLabel = if (tutorial.step == TutorialStep.DONE) "新手教程 · 查看 / 重练" else "新手教程 · 继续第 ${tutorial.step.ordinal + 1} 段",
-                                    )
-                                    1 -> MapListScreen(
-                                        refreshTick = catalogTick,
-                                        onOpenImportGuide = { showImportGuideDialog = true },
-                                        onCatalogChanged = { catalogTick++ },
-                                        onCreateMap = { classId, defaultTitle ->
-                                            creationClassId = classId
-                                            creationMapId = null
-                                            creationTemplate = null
-                                            creationTitle = defaultTitle
-                                            creationImages = emptyMap()
-                                            creationSideDoors = emptyList()
-                                            navigatingForward = true
-                                            page = "template-picker"
-                                        },
-                                        onOpenMap = { map ->
-                                            val floors = map.floors.sortedBy { it.sortOrder }
-                                            creationClassId = map.classId
-                                            creationMapId = map.id
-                                            creationTemplate = MapTemplate(
-                                                id = "saved-${map.id}",
-                                                name = map.title,
-                                                floors = floors.map { TemplateFloor(it.key, it.displayName) },
-                                            )
-                                            creationTitle = map.title
-                                            creationImages = floors.associate { floor ->
-                                                floor.key to Uri.fromFile(AppServices.repository.floorImageFile(map.id, floor.imagePath))
-                                            }
-                                            creationSideDoors = floors.firstOrNull()?.let { floor ->
-                                                AppServices.repository.loadSideDoorsForEditing(map.id, floor)
-                                            }.orEmpty()
                                             navigatingForward = true
                                             page = "map-images"
-                                        },
-                                    )
-                                    2 -> MapSubscriptionsScreen()
-                                    else -> SettingsScreen(
-                                        onOpenGeneral = { navigatingForward = true; page = "general-settings" },
-                                        onOpenVision = { navigatingForward = true; page = "vision-settings" },
-                                        onOpenTemplates = { navigatingForward = true; page = "templates" },
-                                    )
+                                        }
+                                        "map-images" -> creationTemplate?.let { template ->
+                                            MapImagesScreen(
+                                                template = template,
+                                                defaultTitle = creationTitle,
+                                                initialImages = creationImages,
+                                                existingMapId = creationMapId,
+                                                onBack = navigateUp,
+                                                onDelete = {
+                                                    creationMapId?.let { mapId ->
+                                                        AppServices.repository.loadCatalog().maps
+                                                            .firstOrNull { it.id == mapId }
+                                                            ?.let(AppServices.repository::deleteMap)
+                                                        if (AppServices.prefs.lastMapId == mapId) {
+                                                            AppServices.prefs.lastMapId = null
+                                                            AppServices.prefs.lastFloorKey = null
+                                                        }
+                                                    }
+                                                    catalogTick++
+                                                    tab = 1
+                                                    creationMapId = null
+                                                    creationTemplate = null
+                                                    creationImages = emptyMap()
+                                                    creationSideDoors = emptyList()
+                                                    navigatingForward = false
+                                                    page = "main"
+                                                },
+                                                onNext = { title, images ->
+                                                    creationTitle = title
+                                                    creationImages = images
+                                                    navigatingForward = true
+                                                    page = "gate-marker"
+                                                },
+                                            )
+                                        }
+                                        "gate-marker" -> creationTemplate?.let { template -> creationClassId?.let { targetClass ->
+                                            GateMarkerScreen(
+                                                template = template,
+                                                title = creationTitle,
+                                                images = creationImages,
+                                                classId = targetClass,
+                                                onBack = navigateUp,
+                                                onSaved = {
+                                                    catalogTick++
+                                                    tab = 1
+                                                    creationMapId = null
+                                                    creationTemplate = null
+                                                    creationImages = emptyMap()
+                                                    creationSideDoors = emptyList()
+                                                    navigatingForward = false
+                                                    page = "main"
+                                                },
+                                                existingMapId = creationMapId,
+                                                initialSideDoors = creationSideDoors,
+                                            )
+                                        } }
+                                        else -> when (currentTab) {
+                                            0 -> HomeScreen(
+                                                permissions = permissions.snapshot,
+                                                hasMaps = hasMaps,
+                                                onOpenTutorial = { showTutorialEntryDialog = true },
+                                                tutorialLabel = if (tutorial.step == TutorialStep.DONE) "新手教程 · 查看 / 重练" else "新手教程 · 继续第 ${tutorial.step.ordinal + 1} 段",
+                                            )
+                                            1 -> MapListScreen(
+                                                refreshTick = catalogTick,
+                                                onOpenImportGuide = { showImportGuideDialog = true },
+                                                onCatalogChanged = { catalogTick++ },
+                                                onCreateMap = { classId, defaultTitle ->
+                                                    creationClassId = classId
+                                                    creationMapId = null
+                                                    creationTemplate = null
+                                                    creationTitle = defaultTitle
+                                                    creationImages = emptyMap()
+                                                    creationSideDoors = emptyList()
+                                                    navigatingForward = true
+                                                    page = "template-picker"
+                                                },
+                                                onOpenMap = { map ->
+                                                    val floors = map.floors.sortedBy { it.sortOrder }
+                                                    creationClassId = map.classId
+                                                    creationMapId = map.id
+                                                    creationTemplate = MapTemplate(
+                                                        id = "saved-${map.id}",
+                                                        name = map.title,
+                                                        floors = floors.map { TemplateFloor(it.key, it.displayName) },
+                                                    )
+                                                    creationTitle = map.title
+                                                    creationImages = floors.associate { floor ->
+                                                        floor.key to Uri.fromFile(AppServices.repository.floorImageFile(map.id, floor.imagePath))
+                                                    }
+                                                    creationSideDoors = floors.firstOrNull()?.let { floor ->
+                                                        AppServices.repository.loadSideDoorsForEditing(map.id, floor)
+                                                    }.orEmpty()
+                                                    navigatingForward = true
+                                                    page = "map-images"
+                                                },
+                                            )
+                                            2 -> MapSubscriptionsScreen()
+                                            else -> SettingsScreen(
+                                                onOpenGeneral = { navigatingForward = true; page = "general-settings" },
+                                                onOpenVision = { navigatingForward = true; page = "vision-settings" },
+                                                onOpenOperation = { navigatingForward = true; page = "operation-settings" },
+                                                onOpenTemplates = { navigatingForward = true; page = "templates" },
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
+                        AnimatedVisibility(
+                            visibleState = navigationBarVisibility,
+                            modifier = Modifier.align(Alignment.BottomCenter),
+                            // 位移采用实测高度和系统安全区，起止位置始终在窗口可视区域下方。
+                            enter = slideInVertically(animationSpec = tween(300, easing = FastOutSlowInEasing)) { it + bottomInsetPx },
+                            exit = slideOutVertically(animationSpec = tween(300, easing = FastOutSlowInEasing)) { it + bottomInsetPx },
+                            label = "bottom-navigation",
+                        ) {
+                            MainBottomBar(
+                                tab = tab,
+                                modifier = Modifier.onSizeChanged { navigationBarHeightPx = it.height }.clipToBounds().graphicsLayer(),
+                                onSelect = { selected -> navigatingForward = selected > tab; tab = selected },
+                            )
+                        }
                     }
+                }
+                if (showExitConfirmation) {
+                    AlertDialog(
+                        onDismissRequest = { showExitConfirmation = false },
+                        title = { Text("确认退出") },
+                        text = { Text("确定要退出 IDVB 吗？") },
+                        confirmButton = {
+                            TextButton(onClick = { finish() }) { Text("退出") }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showExitConfirmation = false }) { Text("取消") }
+                        },
+                    )
                 }
                 if (showImportGuideDialog) {
                     AlertDialog(
@@ -400,6 +460,33 @@ class MainActivity : ComponentActivity() {
                                 }
                             ) {
                                 Text("手动选择文件")
+                            }
+                        },
+                    )
+                }
+                if (showTutorialEntryDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showTutorialEntryDialog = false },
+                        title = { Text("新手教程") },
+                        text = {
+                            Text(
+                                "请务必认真进行新手教程，非必要时不要跳过。",
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(
+                                onClick = {
+                                    showTutorialEntryDialog = false
+                                    tutorialStore.update { it.copy(active = true) }
+                                }
+                            ) {
+                                Text("确认")
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showTutorialEntryDialog = false }) {
+                                Text("取消")
                             }
                         },
                     )
@@ -507,11 +594,10 @@ private val navItems = listOf(
 )
 
 @Composable
-private fun MainBottomBar(tab: Int, visible: Boolean = true, onSelect: (Int) -> Unit) {
+private fun MainBottomBar(tab: Int, modifier: Modifier = Modifier, onSelect: (Int) -> Unit) {
     Box(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .graphicsLayer { alpha = if (visible) 1f else 0f }
             .background(Color.Transparent)
             .windowInsetsPadding(WindowInsets.navigationBars)
             .padding(horizontal = 14.dp, vertical = 10.dp),

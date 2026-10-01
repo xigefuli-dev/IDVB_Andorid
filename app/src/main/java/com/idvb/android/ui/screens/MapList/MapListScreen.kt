@@ -58,6 +58,14 @@ fun MapListScreen(
     var newClassDialog by remember { mutableStateOf(false) }
     var newClassName by remember { mutableStateOf("") }
 
+    DisposableEffect(context) {
+        val preferences = context.getSharedPreferences("overlay", android.content.Context.MODE_PRIVATE)
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == "selected_map_class_id") classId = AppServices.prefs.selectedMapClassId
+        }
+        preferences.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { preferences.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
     LaunchedEffect(refreshTick) { catalog = withContext(Dispatchers.IO) { AppServices.repository.loadCatalog() } }
     LaunchedEffect(catalog) {
         val doc = catalog ?: return@LaunchedEffect

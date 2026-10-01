@@ -1,0 +1,8 @@
+# Shared-media APIs and device paths require explicit review. Keep test evidence private.
+MediaStore|MediaScannerConnection|ACTION_MEDIA_SCANNER_SCAN_FILE
+content://media(?:/|\b)
+getExternal(?:Files|Cache|Media|Storage)\w*|external(?:Files|Cache|Media)\w*
+DIRECTORY_(?:PICTURES|DCIM|DOWNLOADS)|DownloadManager|setDestinationInExternal\w*
+/sdcard(?:/|\b)|/storage/emulated(?:/|\b)|/mnt/sdcard(?:/|\b)
+WRITE_EXTERNAL_STORAGE|MANAGE_EXTERNAL_STORAGE|requestLegacyExternalStorage
+<(?:root-path|external-path|external-files-path|external-cache-path)\b

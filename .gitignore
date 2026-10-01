@@ -82,6 +82,8 @@ captures/
 !app/src/main/res/drawable-nodpi/ic_launcher_art.png
 !app/src/main/res/mipmap-*/ic_launcher.webp
 !app/src/main/res/mipmap-*/ic_launcher_round.webp
+!app/src/main/res/drawable/sponsor_poster.png
+!app/src/main/res/drawable-nodpi/sponsor_poster.png
 
 # Documentation and other non-code content
 *.md
@@ -128,3 +130,10 @@ desktop.ini
 
 # Local verification captures, device data, and linked Gradle caches
 /.verify/
+/.idvb-build-count
+/.idvb-build-count.lock
+
+# Repository safety instructions are source guidance, not verification data.
+!/AGENTS.md
+!/tools/media-storage-boundary.rules
+!/app/src/androidTest/assets/private-test-evidence.contract

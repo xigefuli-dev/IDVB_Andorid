@@ -49,6 +49,7 @@ object TestIdvmPackage {
         mutateHeaderBytes: (ByteArray) -> ByteArray = { it },
         corruptHeaderSha: Boolean = false,
         extraEntries: Map<String, ByteArray> = emptyMap(),
+        mutateAnchors: (AnchorsDocument) -> AnchorsDocument = { it },
     ): BuiltPackage {
         val root = "maps/${mapId.replace("-", "")}" 
         val imagePaths = floors.map { "$root/maps/floor-${it.sortOrder.toString().padStart(3, '0')}.png" }
@@ -116,7 +117,7 @@ object TestIdvmPackage {
             floors = floors.associate { f ->
                 f.key to FloorAnchors(anchors = emptyList(), wholeImageIgnoreRegions = emptyList())
             },
-        )
+        ).let(mutateAnchors)
 
         val json = IdvmJson.instance
         val dataFiles = mapOf(

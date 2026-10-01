@@ -96,8 +96,11 @@ fun rememberPermissionController(): PermissionController {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    @Suppress("UNUSED_VARIABLE") val observedTick = refreshTick
-    val snapshot = permissionSnapshot(context, ScreenCaptureGrant.available)
+    val screenCaptureAvailable = ScreenCaptureGrant.available
+    val captureMethod = AppServices.prefs.screenCaptureMethod
+    val snapshot = remember(context, refreshTick, screenCaptureAvailable, captureMethod) {
+        permissionSnapshot(context, screenCaptureAvailable, captureMethod)
+    }
     val requestNextMissing = {
         when {
             !snapshot.overlay -> context.startActivity(
@@ -132,8 +135,7 @@ fun openAccessibilityServiceSettings(context: Context) {
     }
 }
 
-private fun permissionSnapshot(context: Context, screenCaptureGranted: Boolean): PermissionSnapshot {
-    val captureMethod = AppServices.prefs.screenCaptureMethod
+private fun permissionSnapshot(context: Context, screenCaptureGranted: Boolean, captureMethod: ScreenCaptureMethod): PermissionSnapshot {
     val notifications = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
     } else {

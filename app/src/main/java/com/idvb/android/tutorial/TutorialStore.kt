@@ -27,6 +27,17 @@ class TutorialStore private constructor(context: Context) {
         it.copy(performed = it.performed + step, practice = transform(it.practice))
     }
 
+    fun recordCheckPassed() {
+        val target = System.currentTimeMillis() + 15_000L
+        prefs.edit().putLong("cooldown_until", target).apply()
+    }
+
+    fun checkCooldownRemaining(): Int {
+        val target = prefs.getLong("cooldown_until", 0L)
+        val remaining = target - System.currentTimeMillis()
+        return if (remaining > 0) ((remaining + 999L) / 1000L).toInt() else 0
+    }
+
     companion object {
         @Volatile private var instance: TutorialStore? = null
         fun get(context: Context): TutorialStore = instance ?: synchronized(this) {

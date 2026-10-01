@@ -30,6 +30,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.material.icons.outlined.Feedback
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -42,6 +47,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.idvb.android.BuildConfig
 import com.idvb.android.R
+import androidx.compose.material.icons.outlined.VolunteerActivism
+import com.idvb.android.ui.theme.AfdianPurple
 import com.idvb.android.ui.theme.Deep
 import com.idvb.android.ui.theme.Ink
 import com.idvb.android.ui.theme.InkSoft
@@ -57,8 +64,9 @@ private data class SettingEntry(
 )
 
 private val productEntries = listOf(
-    SettingEntry("关于", "版本、许可与项目信息", Icons.Outlined.Info, SignalGreenDeep),
+    SettingEntry("反馈问题", "提交问题与建议，无需登录", Icons.Outlined.Feedback, SignalGreenDeep),
     SettingEntry("检查更新", "获取最新版本", Icons.Outlined.SystemUpdate, SignalGreenDeep),
+    SettingEntry("赞助！", "支持项目持续开发", Icons.Outlined.VolunteerActivism, AfdianPurple),
 )
 
 private val featureEntries = listOf(
@@ -72,9 +80,14 @@ private val featureEntries = listOf(
 fun SettingsScreen(
     onOpenGeneral: () -> Unit = {},
     onOpenVision: () -> Unit = {},
+    onOpenOperation: () -> Unit = {},
     onOpenTemplates: () -> Unit = {},
 ) {
     val context = LocalContext.current
+    var showFeedback by rememberSaveable { mutableStateOf(false) }
+    var showSponsor by rememberSaveable { mutableStateOf(false) }
+    if (showFeedback) FeedbackDialog(onDismiss = { showFeedback = false })
+    if (showSponsor) SponsorDialog(onDismiss = { showSponsor = false })
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -110,21 +123,31 @@ fun SettingsScreen(
                 fontWeight = FontWeight.Normal,
             )
             Text(
-                BuildConfig.VERSION_NAME,
+                BuildConfig.PRODUCT_VERSION,
                 style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                BuildConfig.BUILD_VERSION,
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
 
         Spacer(Modifier.height(28.dp))
         SettingSection("IDVB", productEntries) {
-            Toast.makeText(context, it.title + "：暂未实现", Toast.LENGTH_SHORT).show()
+            when (it.title) {
+                "反馈问题" -> showFeedback = true
+                "赞助！" -> showSponsor = true
+                else -> Toast.makeText(context, it.title + "：暂未实现", Toast.LENGTH_SHORT).show()
+            }
         }
         Spacer(Modifier.height(22.dp))
         SettingSection("功能设置", featureEntries) {
             when (it.title) {
                 "通用" -> onOpenGeneral()
                 "视觉" -> onOpenVision()
+                "操作" -> onOpenOperation()
                 "模板" -> onOpenTemplates()
                 else -> Toast.makeText(context, it.title + "设置：暂未实现", Toast.LENGTH_SHORT).show()
             }

@@ -23,7 +23,8 @@ class TutorialProgressTest {
         assertFalse(TutorialProgress(step = TutorialStep.PERMISSIONS).canPass(hasMaps = true))
         assertTrue(TutorialProgress(step = TutorialStep.PERMISSIONS).canPass(permissionsReady = true))
         assertFalse(TutorialProgress(step = TutorialStep.START).canPass(permissionsReady = true))
-        assertTrue(TutorialProgress(step = TutorialStep.START, serviceStarted = true).canPass())
+        assertFalse(TutorialProgress(step = TutorialStep.START, serviceStarted = true).canPass())
+        assertTrue(TutorialProgress(step = TutorialStep.START).canPass(overlayVisible = true))
     }
 
     @Test fun `skipping supplies sample prerequisites but does not pass an exercise`() {
@@ -62,5 +63,31 @@ class TutorialProgressTest {
         val p = TutorialProgress(step = TutorialStep.SHOW, performed = setOf(TutorialStep.SHOW))
         assertFalse(p.canPass())
         assertTrue(p.copy(practice = p.practice.copy(visible = true)).canPass())
+    }
+
+    @Test fun `calibrate title and assist touch copy are updated`() {
+        assertEquals("首次使用先校准地图", TutorialStep.CALIBRATE.title)
+        assertFalse(TutorialStep.ASSIST_TOUCH.instructions.contains("白条仅作装饰"))
+    }
+
+    @Test fun `assist touch validation checks corner placements near center with reasonable tolerance`() {
+        val exact = listOf(0.077f, 0.265f, 0.938f, 0.253f)
+        assertTrue(isPracticeAssistTouchValid(exact))
+        val swapped = listOf(0.938f, 0.253f, 0.077f, 0.265f)
+        assertTrue(isPracticeAssistTouchValid(swapped))
+
+        val withinTolerance = listOf(0.12f, 0.29f, 0.90f, 0.22f)
+        assertTrue(isPracticeAssistTouchValid(withinTolerance))
+
+        val outsideTolerance = listOf(0.5f, 0.5f, 0.938f, 0.253f)
+        assertFalse(isPracticeAssistTouchValid(outsideTolerance))
+
+        val invalidCount = listOf(0.077f, 0.265f)
+        assertFalse(isPracticeAssistTouchValid(invalidCount))
+
+        val p = TutorialProgress(step = TutorialStep.ASSIST_TOUCH, performed = setOf(TutorialStep.ASSIST_TOUCH))
+        assertFalse(p.canPass())
+        assertTrue(p.copy(practice = p.practice.copy(assistPoints = exact)).canPass())
+        assertFalse(p.copy(practice = p.practice.copy(assistPoints = outsideTolerance)).canPass())
     }
 }

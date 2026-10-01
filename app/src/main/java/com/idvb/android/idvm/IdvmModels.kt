@@ -235,6 +235,25 @@ data class FloorAnchors(
     @SerialName("anchors") val anchors: List<Anchor> = emptyList(),
     @SerialName("wholeImageIgnoreRegions") val wholeImageIgnoreRegions: List<NormalizedRect> = emptyList(),
     @SerialName("backgroundLayers") val backgroundLayers: List<BackgroundLayer> = emptyList(),
+    @SerialName("annotations") val annotations: List<MapAnnotation> = emptyList(),
+)
+
+/** Desktop 标注使用楼层原图坐标，而非识别区域坐标。 */
+@Serializable
+data class MapAnnotation(
+    val id: String,
+    val type: String,
+    val colorIndex: Int = 0,
+    val color: String? = null,
+    val bounds: NormalizedRect? = null,
+    val start: NormalizedPoint? = null,
+    val end: NormalizedPoint? = null,
+    val text: String? = null,
+    val fontFamily: String? = null,
+    val fontSize: Double? = null,
+    val isBold: Boolean? = null,
+    val isItalic: Boolean? = null,
+    val isStrikethrough: Boolean? = null,
 )
 
 @Serializable

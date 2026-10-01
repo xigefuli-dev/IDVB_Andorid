@@ -126,6 +126,10 @@ class ScreenCaptureSession(private val context: Context) {
         } finally { full.recycle() }
     }
 
+    @Synchronized fun cancelPending() {
+        pending?.finish(Result.failure(java.util.concurrent.CancellationException("截图请求已取消")))
+    }
+
     private fun resize(w: Int, h: Int) {
         if (w == width && h == height) return
         val current = display ?: return

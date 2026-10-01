@@ -14,7 +14,12 @@ import android.widget.TextView
 /** 独立的小球控制窗；不依赖已废弃的整块地图悬浮层。 */
 class OverlayBallView(context: Context) : LinearLayout(context) {
     interface Listener {
+        fun onAssistTouch() {}
+        fun useAssistTouchToggle(): Boolean = false
         fun onResetMap() {}
+        fun onChooseMapClass() {}
+        fun onOpenGuide() {}
+        fun onCloseGuide() {}
         fun onSearch(); fun onToggleGuide(); fun onNextFloor(); fun onNextVariant(); fun onFreeAdjust(); fun onCalibrate(); fun onClose()
         fun onMove(dx: Float, dy: Float)
         fun onMenuExpanded(expanded: Boolean)
@@ -29,6 +34,29 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
     private val variantButton: TextView
     val morePanel: LinearLayout
     private var menuExpanded = false
+    private val operationPrefs = com.idvb.android.data.OverlayPrefs(context)
+    private var eyeHeld = false
+
+    private fun releaseEye() {
+        if (!eyeHeld) return
+        eyeHeld = false
+        listener?.onCloseGuide()
+    }
+    private val captureAlphas = mutableMapOf<TextView, Float>()
+
+    /** Hide capture-contaminating pixels while retaining hit targets for an immediate second tap. */
+    fun setCaptureHidden(hidden: Boolean, captureBounds: android.graphics.Rect? = null) {
+        if (hidden) closeMenu()
+        (buttons.values + moreButton).forEach { button ->
+            val location = IntArray(2).also(button::getLocationOnScreen)
+            val overlaps = captureBounds == null || android.graphics.Rect.intersects(captureBounds,
+                android.graphics.Rect(location[0], location[1], location[0] + button.width, location[1] + button.height))
+            if (hidden && overlaps) {
+                captureAlphas.putIfAbsent(button, button.alpha)
+                button.alpha = 0f
+            } else captureAlphas.remove(button)?.let { button.alpha = it }
+        }
+    }
 
     fun closeMenu() {
         if (!menuExpanded) return
@@ -38,7 +66,10 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
 
     override fun onVisibilityChanged(changedView: View, visibility: Int) {
         super.onVisibilityChanged(changedView, visibility)
-        if (visibility != View.VISIBLE) closeMenu()
+        if (visibility != View.VISIBLE) {
+            releaseEye()
+            closeMenu()
+        }
         customLayout?.refresh()
     }
 
@@ -75,7 +106,12 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
 
     init {
         orientation = VERTICAL; gravity = Gravity.END
-        row = LinearLayout(context).apply { orientation = HORIZONTAL; gravity = Gravity.CENTER }
+        isMotionEventSplittingEnabled = true
+        row = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER
+            isMotionEventSplittingEnabled = true
+        }
         row.addView(ball("search", "🔍", "扫描当前屏幕") { listener?.onSearch() })
         eyeButton = ball("eye", "👁", "显示攻略地图") { if (mapLocked || candidatesAvailable) listener?.onToggleGuide() }; row.addView(eyeButton)
         floorButton = ball("floor", "--", "切换楼层") { if (mapLocked) listener?.onNextFloor() }.apply {
@@ -89,9 +125,12 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
         addView(row)
         morePanel = LinearLayout(context).apply {
             orientation = VERTICAL; gravity = Gravity.END; setPadding(0, dp(6), 0, 0)
+            isMotionEventSplittingEnabled = true
+            addView(menuItem("▤", "选择地图包", closeOnClick = false) { listener?.onChooseMapClass() })
             addView(menuItem("✥", "小抄显示调整") { listener?.onFreeAdjust() })
             addView(menuItem("⚙", "悬浮窗布局调整") { customLayout?.begin("search") })
             addView(menuItem("▣", "校准显示区域") { listener?.onCalibrate() })
+            addView(menuItem("◎", "辅助触控") { listener?.onAssistTouch() })
             addView(menuItem("↺", "重设地图") { listener?.onResetMap() })
             addView(menuItem("⏻", "关闭悬浮窗") { listener?.onClose() })
         }
@@ -131,8 +170,8 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
         var downRawX = 0f
         var downRawY = 0f
         var dragging = false
-        var held = false
-        val hold = Runnable { held = true; customLayout?.begin(id) }
+        var holdGesture = false
+        var activePointerId = MotionEvent.INVALID_POINTER_ID
         var multiTouch = false
         val scaleDetector = android.view.ScaleGestureDetector(context,
             object : android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -146,21 +185,29 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
             if (customLayout?.editing == true && id != "more") {
                 if (event.actionMasked == MotionEvent.ACTION_DOWN) customLayout?.select(id)
                 scaleDetector.onTouchEvent(event)
-                if (event.pointerCount > 1) { multiTouch = true; removeCallbacks(hold) }
+                if (event.pointerCount > 1) multiTouch = true
             }
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     lastRawX = event.rawX; lastRawY = event.rawY
                     downRawX = event.rawX; downRawY = event.rawY
-                    dragging = false; held = false; multiTouch = false
-                    if (id != "more") postDelayed(hold, 2000L)
+                    dragging = false; multiTouch = false
+                    activePointerId = event.getPointerId(0)
+                    // Latch the mode for this gesture, even if preferences change before release.
+                    holdGesture = id == "eye" && operationPrefs.holdToActivateEnabled && customLayout?.editing != true && listener?.useAssistTouchToggle() != true
+                    if (holdGesture && (mapLocked || candidatesAvailable)) {
+                        eyeHeld = true
+                        listener?.onOpenGuide()
+                    }
                     true
                 }
+                MotionEvent.ACTION_POINTER_DOWN -> true
                 MotionEvent.ACTION_MOVE -> {
+                    // A held eye remains a display control, including when the finger drifts.
+                    if (holdGesture) return@setOnTouchListener true
                     if (!dragging && (kotlin.math.abs(event.rawX - downRawX) > touchSlop ||
                             kotlin.math.abs(event.rawY - downRawY) > touchSlop)) dragging = true
                     if (dragging && !multiTouch) {
-                        removeCallbacks(hold)
                         val layout = customLayout
                         if (id != "more" && layout?.separated == true) layout.move(id, event.rawX - lastRawX, event.rawY - lastRawY)
                         else if (layout?.editing != true) listener?.onMove(event.rawX - lastRawX, event.rawY - lastRawY)
@@ -169,17 +216,36 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    removeCallbacks(hold)
-                    if (!dragging && !held && !multiTouch && customLayout?.editing != true) { view.performClick(); click() }
+                    if (holdGesture) releaseEye()
+                    else if (!dragging && !multiTouch && customLayout?.editing != true) { view.performClick(); click() }
+                    holdGesture = false
                     true
                 }
-                MotionEvent.ACTION_CANCEL -> { removeCallbacks(hold); true }
+                MotionEvent.ACTION_POINTER_UP -> {
+                    if (holdGesture && event.getPointerId(event.actionIndex) == activePointerId) {
+                        releaseEye()
+                        holdGesture = false
+                    } else if (!holdGesture && event.getPointerId(event.actionIndex) == activePointerId) {
+                        val remainingIndex = if (event.actionIndex == 0) 1 else 0
+                        if (remainingIndex < event.pointerCount) {
+                            activePointerId = event.getPointerId(remainingIndex)
+                            lastRawX = event.rawX + (event.getX(remainingIndex) - event.getX(0))
+                            lastRawY = event.rawY + (event.getY(remainingIndex) - event.getY(0))
+                        }
+                    }
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    if (holdGesture) releaseEye()
+                    holdGesture = false
+                    true
+                }
                 else -> false
             }
         }
         addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
             override fun onViewAttachedToWindow(v: View) {}
-            override fun onViewDetachedFromWindow(v: View) { removeCallbacks(hold) }
+            override fun onViewDetachedFromWindow(v: View) { if (id == "eye") releaseEye() }
         })
         if (id != "more") buttons[id] = this
         layoutParams = LayoutParams(dp(48), dp(48)).apply { marginStart = dp(4) }; elevation = dp(6).toFloat()
@@ -193,7 +259,7 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
         variantButton.visibility = if (variantsAvailable) View.VISIBLE else View.GONE
     }
 
-    private fun menuItem(icon: String, label: String, click: () -> Unit) = TextView(context).apply {
+    private fun menuItem(icon: String, label: String, closeOnClick: Boolean = true, click: () -> Unit) = TextView(context).apply {
         text = "$icon   $label"; contentDescription = label
         gravity = Gravity.CENTER_VERTICAL; textSize = 14f; setTextColor(Color.WHITE)
         setPadding(dp(18), dp(11), dp(18), dp(11)); minWidth = dp(184)
@@ -201,7 +267,7 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
             cornerRadius = dp(12).toFloat(); setColor(Color.argb(242, 31, 35, 38)); setStroke(dp(1), Color.argb(160, 112, 226, 157))
         }
         isClickable = true; setOnClickListener {
-            closeMenu()
+            if (closeOnClick) closeMenu()
             click()
         }
     }

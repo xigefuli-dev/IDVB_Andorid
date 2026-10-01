@@ -63,7 +63,11 @@ class CandidatePreviewInstrumentedTest {
                 } finally { session.close() }
             }
         }
-        File(target.getExternalFilesDir(null), "native-capture-sizes.txt").writeText(evidence.toString())
+        val testContext = InstrumentationRegistry.getInstrumentation().context
+        File(testContext.filesDir, "test-evidence/native-capture-sizes.txt").apply {
+            check(parentFile!!.mkdirs() || parentFile!!.isDirectory)
+            writeText(evidence.toString())
+        }
     }
 
     @Test fun tinyTentativePoseDoesNotShrinkCardsOrRecognitionInputs() {

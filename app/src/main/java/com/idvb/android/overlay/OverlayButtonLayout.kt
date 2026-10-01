@@ -57,6 +57,7 @@ class OverlayButtonLayout(
             // A currently unavailable variant still receives an editable default position.
             if (button.visibility == View.GONE) { window.x = anchor.x; window.y = anchor.y + size }
             val holder = LinearLayout(context).apply {
+                isMotionEventSplittingEnabled = true
                 addView(button, LinearLayout.LayoutParams(size, size))
             }
             window.add(holder, locked = false)

@@ -65,7 +65,9 @@ class OverlayWindowManager(private val context: Context) {
 
     private fun buildParams(locked: Boolean, focusable: Boolean): WindowManager.LayoutParams {
         var flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+            WindowManager.LayoutParams.FLAG_SPLIT_TOUCH
         if (!focusable) flags = flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
         if (locked) {
             // 锁定态整窗点击穿透，对应 WS_EX_TRANSPARENT
@@ -123,6 +125,7 @@ class OverlayWindowManager(private val context: Context) {
                 p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
             }
         }
+        p.flags = p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_SPLIT_TOUCH
         if (!isTouchThrough || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) p.alpha = opacity
         if (isTouchThrough) refreshTouchOpacity()
         wm.updateViewLayout(v, p)

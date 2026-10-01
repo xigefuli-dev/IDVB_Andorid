@@ -296,7 +296,8 @@ class IdvmImporter(private val json: Json = IdvmJson.instance) {
             val localName = resolveClassName(c.name, taken)
             classIdMap[c.classId] = localId
             newClasses += ClassRecord(id = localId, name = localName,
-                removeBackground = c.properties.removeBackground, scanFloorKey = c.properties.scanFloorKey)
+                removeBackground = c.properties.removeBackground, scanFloorKey = c.properties.scanFloorKey,
+                containsVectorRoutes = if (manifest.formatVersion == "1.4") c.properties.containsVectorRoutes else null)
         }
 
         // 7) 逐地图解压到 staging，校验图片尺寸与摘要

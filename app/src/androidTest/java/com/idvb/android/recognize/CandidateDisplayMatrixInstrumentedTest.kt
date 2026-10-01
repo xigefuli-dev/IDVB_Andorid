@@ -47,7 +47,10 @@ class CandidateDisplayMatrixInstrumentedTest {
         val frame = Bitmap.createBitmap(bounds.width(), bounds.height(), Bitmap.Config.ARGB_8888)
         frame.eraseColor(Color.DKGRAY)
         val window = OverlayWindowManager(context).apply { width = bounds.width(); height = bounds.height() }
-        val directory = File(target.getExternalFilesDir(null), "candidate-matrix").apply { mkdirs() }
+        // Test evidence belongs to the test APK's private storage, never shared media storage.
+        val directory = File(instrumentation.context.filesDir, "test-evidence/candidate-matrix").apply {
+            check(mkdirs() || isDirectory) { "Cannot create private test evidence directory" }
+        }
         fun screenshot(suffix: String) {
             instrumentation.waitForIdleSync()
             // Idle callbacks can precede the next compositor frame after invalidate().

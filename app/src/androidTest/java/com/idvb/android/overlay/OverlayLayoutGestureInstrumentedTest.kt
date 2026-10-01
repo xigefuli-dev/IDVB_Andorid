@@ -45,7 +45,7 @@ class OverlayLayoutGestureInstrumentedTest {
             event(MotionEvent.ACTION_DOWN, 0f)
             event(MotionEvent.ACTION_CANCEL, 0f)
             assertEquals(1, clicks)
-            // Unavailable actions must remain touchable so they can enter layout editing.
+            // Unavailable actions remain touchable for dragging; layout editing starts from the menu.
             assertTrue((balls.getChildAt(0) as LinearLayout).getChildAt(1).isEnabled)
             assertTrue((balls.getChildAt(0) as LinearLayout).getChildAt(2).isEnabled)
         }

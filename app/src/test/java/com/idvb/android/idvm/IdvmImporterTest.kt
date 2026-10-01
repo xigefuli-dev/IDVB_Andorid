@@ -10,6 +10,35 @@ import java.io.File
 
 class IdvmImporterTest {
 
+    @Test fun version14PreservesVectorRoutesAndClassCapability() {
+        val annotation = MapAnnotation(java.util.UUID.randomUUID().toString(), "line", color = "#12AB34",
+            start = NormalizedPoint(.1, .2), end = NormalizedPoint(.8, .9))
+        val fixture = TestIdvmPackage.build(formatMinor = 4,
+            mutateManifest = { it.copy(supportedPlatforms = listOf("android", "windows"),
+                classes = it.classes.map { c -> c.copy(properties = c.properties.copy(containsVectorRoutes = true)) },
+                capabilities = it.capabilities.copy(floorMarkerKeys = true, mapTags = true, containsVectorRoutes = true)) },
+            mutateAnchors = { it.copy(schemaVersion = 2, floors = mapOf("1f" to FloorAnchors(annotations = listOf(annotation)))) })
+        val outcome = doImport(fixture)
+        requireSuccess(outcome.result)
+        val file = outcome.mapsRoot.walkTopDown().first { it.name == "anchors.json" }
+        val restored = IdvmJson.instance.decodeFromString<AnchorsDocument>(file.readText())
+        assertEquals(annotation, restored.floors.getValue("1f").annotations.single())
+        var imported = MapCatalogDocument()
+        IdvmImporter().importPackage(writePackage(fixture), tmp.newFolder(), MapCatalogDocument()) { imported = it }
+        assertEquals(true, imported.classes.single().containsVectorRoutes)
+        assertEquals(imported, IdvmJson.instance.decodeFromString<MapCatalogDocument>(
+            IdvmJson.instance.encodeToString(MapCatalogDocument.serializer(), imported)))
+    }
+
+    @Test fun rejectsInvalidRouteGeometry() {
+        val line = MapAnnotation(java.util.UUID.randomUUID().toString(), "line", color = "#007AFF",
+            start = NormalizedPoint(.2, .2), end = NormalizedPoint(.2, .2))
+        val fixture = TestIdvmPackage.build(mutateAnchors = {
+            it.copy(floors = mapOf("1f" to FloorAnchors(annotations = listOf(line))))
+        })
+        assertTrue(requireFailure(doImport(fixture).result).contains("重合"))
+    }
+
     @Test fun version14RequiresAndroidAndConsistentCapabilities() {
         fun fixture(platforms: List<String>, vector: Boolean = false) = TestIdvmPackage.build(
             formatMinor=4, mutateManifest={ it.copy(supportedPlatforms=platforms,

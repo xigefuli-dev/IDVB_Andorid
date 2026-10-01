@@ -93,7 +93,7 @@ private fun applyFreeCrop(bitmap: Bitmap, region: NormalizedRect,
     return masked
 }
 
-private fun NormalizedRect?.validOrFull(): NormalizedRect {
+internal fun NormalizedRect?.validOrFull(): NormalizedRect {
     val value = this ?: return NormalizedRect(0.0, 0.0, 1.0, 1.0)
     if (value.width <= 0.0 || value.height <= 0.0 || value.x >= 1.0 || value.y >= 1.0) {
         return NormalizedRect(0.0, 0.0, 1.0, 1.0)
@@ -106,7 +106,7 @@ private fun NormalizedRect?.validOrFull(): NormalizedRect {
     return NormalizedRect(left, top, right - left, bottom - top)
 }
 
-private fun NormalizedRect.toPixelRect(width: Int, height: Int): Rect {
+internal fun NormalizedRect.toPixelRect(width: Int, height: Int): Rect {
     val left = floor(x * width).toInt().coerceIn(0, width - 1)
     val top = floor(y * height).toInt().coerceIn(0, height - 1)
     val right = ceil((x + this.width) * width).toInt().coerceIn(left + 1, width)

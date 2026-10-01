@@ -22,7 +22,7 @@ import android.graphics.Point
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import android.widget.Toast
+
 import android.view.Display
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
@@ -38,6 +38,17 @@ import com.idvb.android.recognize.vpsg.VpsgLineScanner
 import com.idvb.android.recognize.CandidateDisposition
 import com.idvb.android.data.MapIdentitySource
 import com.idvb.android.data.ScreenCaptureMethod
+import com.idvb.android.data.EyeButtonAction
+import com.idvb.android.data.SearchButtonAction
+import com.idvb.android.alignment.AlignmentRequest
+import com.idvb.android.alignment.AlignmentCancellation
+import com.idvb.android.alignment.AlignmentResult
+import com.idvb.android.alignment.AlignmentLogSink
+import com.idvb.android.alignment.AlignmentLogEvent
+import com.idvb.android.alignment.AlignmentTrace
+import com.idvb.android.alignment.AlignmentDiagnosticContext
+import com.idvb.android.alignment.emit
+import com.idvb.android.alignment.measure
 import com.idvb.android.recognize.AccessibilityScreenCaptureService
 import com.idvb.android.recognize.RecognitionCandidate
 import com.idvb.android.recognize.CaptureDiagnosticsContext
@@ -63,9 +74,15 @@ class OverlayService : Service() {
         private var currentService: OverlayService? = null
         private var practiceForeground = false
 
+        /** Read on the main thread at check time; persisted startup history is not visibility. */
+        fun isControlOverlayVisible(): Boolean = currentService?.let { service ->
+            service.window.isAdded() && service.balls?.let { it.isAttachedToWindow && it.isShown } == true
+        } == true
+
         /** Main-thread lifecycle call; do not toggle the user's persisted visibility. */
         fun setPracticeForeground(active: Boolean) {
             practiceForeground = active
+            if (active) currentService?.cancelAlignment()
             currentService?.applyPracticeVisibility()
         }
 
@@ -85,7 +102,30 @@ class OverlayService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var scanProgressView: ScanProgressView? = null
     @Volatile private var scanGeneration = 0
+    @Volatile private var alignmentGeneration = 0
+    private var aligning = false
+    private var activeAlignmentCancellation: AlignmentCancellation? = null
+    private var alignmentCapturing = false
+    private var alignmentCaptureBounds: Rect? = null
+    private var activeAlignmentTrace: AlignmentTrace? = null
+    private var pendingAlignmentStart: Runnable? = null
+    private var abortAlignmentCapture: (() -> Unit)? = null
+    private var alignmentNotice = -1L
+    private var lastAlignmentRequestId: String? = null
+    private var lastAlignmentTerminal = "idle"
+    private var notifications: OverlayNotifications? = null
+    private var alignedGuideBounds: RectF? = null
+    private var alignedGuideViewport: RectF? = null
     private var balls: OverlayBallView? = null
+    private var readyReferenceKey = ""
+    private var readyReference: com.idvb.android.alignment.MapFrameSignature? = null
+    private var assistEditorWindow: OverlayWindowManager? = null
+    private var assistController: AssistTouchController? = null
+    private var assistClickPoints: List<Float> = emptyList()
+    private var assistClickScreen = 0 to 0
+    private data class AssistClickEvidence(val id: String, val start: Long, val end: Long, val x: Float, val y: Float)
+    private var assistOpenEvidence: AssistClickEvidence? = null
+    private var assistOpenId = ""
     private var buttonLayout: OverlayButtonLayout? = null
     private var ballMenu: OverlayBallMenuWindow? = null
     private var blueprintView: BlueprintCalibrationView? = null
@@ -100,9 +140,17 @@ class OverlayService : Service() {
         if (key == "screen_capture_method") mainHandler.post {
             if (!destroyed) synchronizeCaptureSession()
         }
+        if (key in setOf("show_routes", "route_line_thickness", "remove_guide_background")) mainHandler.post {
+            if (!destroyed && guideVisible) loadGuideFloor()
+        }
+        if (key in setOf("eye_button_action", "alignment_method_id", "selected_map_class_id") ||
+            key?.startsWith("capture_") == true) mainHandler.post {
+            if (!destroyed) cancelAlignment()
+        }
     }
 
     private fun cancelCaptureScan() {
+        cancelAlignment()
         scanGeneration++
         val wasScanning = scanning
         scanning = false
@@ -132,7 +180,9 @@ class OverlayService : Service() {
     }
     private var guideView: GuideMapView? = null
     private var guideBitmap: Bitmap? = null
+    private var guideBitmapKey: String? = null
     private var guideVisible = false
+    private var alignmentDisplayReady = true
     private var currentMap: MapRecord? = null
     private var floorIndex = 0
     @Volatile private var scanning = false
@@ -150,10 +200,15 @@ class OverlayService : Service() {
         }
     }
 
+    private val sessionLogs by lazy { com.idvb.android.diagnostics.SessionLogRecorder(java.io.File(filesDir, "idvb/diagnostics")) }
+
     override fun onCreate() {
         super.onCreate()
         currentService = this
-        if (com.idvb.android.UsageConsent.isAccepted(this)) AppServices.scanPreparation.request()
+        if (com.idvb.android.UsageConsent.isAccepted(this)) {
+            sessionLogs.begin()
+            AppServices.scanPreparation.request()
+        }
         getSharedPreferences("overlay", MODE_PRIVATE).registerOnSharedPreferenceChangeListener(capturePreferencesListener)
         val display = getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY)
         val displayContext = display?.let(::createDisplayContext) ?: this
@@ -165,6 +220,7 @@ class OverlayService : Service() {
         candidateWindow = OverlayWindowManager(overlayContext)
         guideWindow = OverlayWindowManager(overlayContext)
         scanProgressWindow = OverlayWindowManager(overlayContext)
+        notifications = OverlayNotifications(overlayContext, ::screenSize)
         getSystemService(DisplayManager::class.java).registerDisplayListener(displayListener, Handler(Looper.getMainLooper()))
     }
 
@@ -190,6 +246,7 @@ class OverlayService : Service() {
                 if (!visible) guideView?.visibility = android.view.View.INVISIBLE
                 else if (guideVisible) guideView?.visibility = android.view.View.VISIBLE
                 OverlayState.update { it.copy(visible = visible) }
+                if (!visible) cancelAlignment()
             }
             ACTION_SET_OPACITY -> {
                 ensureBalls()
@@ -215,11 +272,31 @@ class OverlayService : Service() {
 
     private fun applyPracticeVisibility() {
         val visible = !practiceForeground && OverlayState.state.value.visible
+        if (!visible && (assistController?.active == true || assistController?.busy == true || assistEditorWindow != null)) {
+            assistController?.cancel()
+            assistEditorWindow?.remove(); assistEditorWindow = null
+        }
         balls?.visibility = if (visible && !scanning) android.view.View.VISIBLE else android.view.View.INVISIBLE
-        guideView?.visibility = if (visible && guideVisible && !scanning && adjustView == null) android.view.View.VISIBLE else android.view.View.INVISIBLE
+        balls?.setCaptureHidden(alignmentCapturing, alignmentCaptureBounds)
+        notifications?.setHidden(!visible || alignmentCapturing || scanning)
+        guideView?.visibility = if (visible && guideVisible && alignmentDisplayReady && !scanning && !alignmentCapturing && adjustView == null) android.view.View.VISIBLE else android.view.View.INVISIBLE
         listOf(blueprintView, adjustView, candidateView, scanProgressView).forEach {
             it?.visibility = if (practiceForeground) android.view.View.INVISIBLE else android.view.View.VISIBLE
         }
+    }
+
+    private fun notifyOverlay(message: String, durationMs: Long = 4_000L) {
+        if (!destroyed) notifications?.show(message, durationMs)
+    }
+
+    private fun showAlignmentNotice(message: String, durationMs: Long = 4_000L): Long {
+        if (destroyed || !AppServices.prefs.showAlignmentOutput) return -1L
+        return notifications?.show(message, durationMs) ?: -1L
+    }
+
+    private fun updateAlignmentNotice(id: Long, message: String, durationMs: Long = 4_000L) {
+        if (destroyed || !AppServices.prefs.showAlignmentOutput) return
+        notifications?.update(id, message, durationMs)
     }
 
     private fun ensureBalls() {
@@ -247,13 +324,29 @@ class OverlayService : Service() {
             floorLabel = orderedFloors.getOrNull(floorIndex)?.displayName ?: "--"
             variantsAvailable = hasVariants
             listener = object : OverlayBallView.Listener {
-                override fun onSearch() = runForegroundScan()
-                override fun onToggleGuide() = toggleGuide()
+                override fun onSearch() {
+                    when (AppServices.prefs.searchButtonAction) {
+                        SearchButtonAction.SCAN_MAP -> runForegroundScan()
+                    }
+                }
+                override fun useAssistTouchToggle() = assistEnabled()
+                override fun onAssistTouch() = editAssistTouch()
+                override fun onToggleGuide() {
+                    if (assistController?.active == true) {
+                        if (assistEnabled()) assistController?.toggle() else assistController?.cancel()
+                    }
+                    else if (assistEnabled()) {
+                        if (!showPendingCandidates()) toggleAssistTouch()
+                    } else toggleGuide()
+                }
+                override fun onOpenGuide() = openGuide()
+                override fun onCloseGuide() = hideGuide()
                 override fun onNextFloor() = nextFloor()
                 override fun onNextVariant() = nextVariant()
                 override fun onFreeAdjust() = enterFreeAdjustMode()
                 override fun onCalibrate() = enterBlueprintMode()
                 override fun onResetMap() = resetMapIdentity()
+                override fun onChooseMapClass() = toggleMapClassSubmenu()
                 override fun onClose() = stopSelf()
                 override fun onMenuExpanded(expanded: Boolean) {
                     if (expanded) ballMenu?.show() else ballMenu?.hide()
@@ -287,30 +380,35 @@ class OverlayService : Service() {
     }
 
     private fun runForegroundScan() {
+        val diagnosticSessionId = sessionLogs.sessionId
         if (candidateView != null || blueprintView != null || adjustView != null) return
+        if (aligning) {
+            notifyOverlay("正在自动贴合，请稍候")
+            return
+        }
         if (AppServices.prefs.debugMode) {
             if (AppServices.prefs.manualMapSelectionEnabled) showManualMapSelection() else showDebugCandidates()
             return
         }
         synchronizeCaptureSession()
         if (scanning) {
-            Toast.makeText(this, "正在扫描地图，请稍候", Toast.LENGTH_SHORT).show()
+            notifyOverlay("正在扫描地图，请稍候")
             return
         }
         clearPendingCandidates()
         val size = screenSize()
         val region = captureRegionPixels(size.first, size.second)
         if (region == null) {
-            Toast.makeText(this, "请先在 ··· 中校准显示区域", Toast.LENGTH_SHORT).show()
+            notifyOverlay("请先在 ··· 中校准显示区域")
             return
         }
         val method = AppServices.prefs.screenCaptureMethod
         val session = captureSession
         if (method == ScreenCaptureMethod.MEDIA_PROJECTION && (session == null || !session.start(size.first, size.second))) {
-            Toast.makeText(this, "屏幕捕获授权已失效，请返回 IDVB 重新授权", Toast.LENGTH_LONG).show(); return
+            notifyOverlay("屏幕捕获授权已失效，请返回 IDVB 重新授权", 6_000L); return
         }
         if (method == ScreenCaptureMethod.ACCESSIBILITY && !AccessibilityScreenCaptureService.available) {
-            Toast.makeText(this, "IDVB 无障碍服务未启用，请返回应用授权", Toast.LENGTH_LONG).show(); return
+            notifyOverlay("IDVB 无障碍服务未启用，请返回应用授权", 6_000L); return
         }
         scanning = true
         scanGeneration++
@@ -329,7 +427,7 @@ class OverlayService : Service() {
                         captured.getOrNull()?.recycle()
                     } else {
                         captured.exceptionOrNull()?.let { Log.e("IDVBCapture", "request=$generation source=$method failed", it) }
-                        processCapturedFrame(captured, region, size, generation)
+                        processCapturedFrame(captured, region, size, generation, diagnosticSessionId)
                     }
                 }
                 Unit
@@ -347,7 +445,7 @@ class OverlayService : Service() {
         val activeClassId = resolveActiveClassId(catalog)
         val maps = catalog.maps.filter { it.classId == activeClassId }
         if (maps.isEmpty()) {
-            Toast.makeText(this, "当前关卡模式下没有可选择地图", Toast.LENGTH_SHORT).show()
+            notifyOverlay("当前关卡模式下没有可选择地图")
             return
         }
         val preview = reference ?: Bitmap.createBitmap(640, 360, Bitmap.Config.ARGB_8888).also { bitmap ->
@@ -373,7 +471,7 @@ class OverlayService : Service() {
     }
 
     private fun processCapturedFrame(captured: Result<Bitmap>, region: RectF, size: Pair<Int, Int>,
-        generation: Int) {
+        generation: Int, diagnosticSessionId: String?) {
         if (generation != scanGeneration) {
             captured.getOrNull()?.recycle()
             return
@@ -384,7 +482,7 @@ class OverlayService : Service() {
                 scanning = false
                 balls?.visibility = android.view.View.VISIBLE
                 if (guideVisible) guideView?.visibility = android.view.View.VISIBLE
-                Toast.makeText(this, "截图失败：${error.message}", Toast.LENGTH_LONG).show()
+                notifyOverlay("截图失败：${error.message}", 6_000L)
             }
             return
         }
@@ -443,6 +541,7 @@ class OverlayService : Service() {
                                     captureRight = region.right.toInt(),
                                     captureBottom = region.bottom.toInt(),
                                     classId = resolveActiveClassId(catalog),
+                                    sessionId = diagnosticSessionId,
                                     className = catalog.classes.firstOrNull {
                                         it.id == resolveActiveClassId(catalog)
                                     }?.name,
@@ -457,12 +556,12 @@ class OverlayService : Service() {
                         }
                         scanning = false
                         diagnostics?.exceptionOrNull()?.let { error ->
-                            Toast.makeText(this, "识别诊断保存失败：${error.message}", Toast.LENGTH_LONG).show()
+                            notifyOverlay("识别诊断保存失败：${error.message}", 6_000L)
                         }
                         recognition.onSuccess(::handleScanResult).onFailure { error ->
                             finishScanProgress(generation, ScanOutcome.FAILED)
                             bitmap.recycle()
-                            Toast.makeText(this, "扫描失败：${error.message}", Toast.LENGTH_LONG).show()
+                            notifyOverlay("扫描失败：${error.message}", 6_000L)
                         }
                     }
                 }
@@ -474,7 +573,7 @@ class OverlayService : Service() {
                         finishScanProgress(generation, ScanOutcome.FAILED)
                         balls?.visibility = android.view.View.VISIBLE
                         if (guideVisible) guideView?.visibility = android.view.View.VISIBLE
-                        Toast.makeText(this, "识别线程已停止", Toast.LENGTH_LONG).show()
+                        notifyOverlay("识别线程已停止", 6_000L)
                     }
                 }
     }
@@ -524,7 +623,7 @@ class OverlayService : Service() {
         val activeClassId = resolveActiveClassId(catalog)
         val maps = catalog.maps.filter { it.classId == activeClassId }
         if (maps.isEmpty()) {
-            Toast.makeText(this, "当前关卡模式下没有可扫描地图", Toast.LENGTH_SHORT).show()
+            notifyOverlay("当前关卡模式下没有可扫描地图")
             return
         }
         val randomized = maps.shuffled()
@@ -602,7 +701,7 @@ class OverlayService : Service() {
                 closeCandidates(recycleCapture = true)
                 candidateResult = candidates
                 balls?.candidatesAvailable = true
-                Toast.makeText(this, "扫描候选已就绪，点击 👁 查看", Toast.LENGTH_SHORT).show()
+                notifyOverlay("扫描候选已就绪，点击 👁 查看")
             } else {
                 showCandidates(candidates)
             }
@@ -613,11 +712,40 @@ class OverlayService : Service() {
         if (!result.capturedRegion.isRecycled) result.capturedRegion.recycle()
         finishScanProgress(scanGeneration, ScanOutcome.NO_RESULT)
         val retainedMap = if (currentMap != null) "；仍保留原地图" else ""
-        Toast.makeText(this, "未识别到地图：当前可见结构不足以确认，请调整后重扫$retainedMap", Toast.LENGTH_LONG).show()
+        notifyOverlay("未识别到地图：当前可见结构不足以确认，请调整后重扫$retainedMap", 6_000L)
     }
 
-    private fun resetMapIdentity() {
+    private fun toggleMapClassSubmenu() {
+        if (ballMenu?.isSubmenuVisible() == true) {
+            ballMenu?.hideSubmenu()
+            return
+        }
+        val catalog = AppServices.repository.loadCatalog()
+        val availableIds = catalog.maps.mapTo(mutableSetOf()) { it.classId }
+        val available = catalog.classes.filter { it.id in availableIds }
+        if (available.isEmpty()) {
+            notifyOverlay("没有可用的地图包，请先导入地图")
+            return
+        }
+        ballMenu?.toggleClasses(available, resolveActiveClassId(catalog)) { selected ->
+            if (AppServices.prefs.selectedMapClassId == selected.id) {
+                notifyOverlay("当前地图包：${selected.name}")
+                return@toggleClasses
+            }
+            cancelAlignment()
+            resetMapIdentity(notify = false)
+            AppServices.prefs.selectedMapClassId = selected.id
+            notifyOverlay("已选择地图包：${selected.name}，请重新扫描")
+        }
+    }
+
+    private fun resetMapIdentity(notify: Boolean = true) {
+        assistController?.cancel()
         cancelCaptureScan()
+        sessionLogs.begin()
+        alignedGuideBounds = null
+        alignedGuideViewport = null
+        guideView?.clearAlignment()
         closeCandidates(recycleCapture = true)
         blueprintWindow.remove()
         blueprintView = null
@@ -640,7 +768,7 @@ class OverlayService : Service() {
         }
         resizeControls(false)
         OverlayState.update { it.copy(mapTitle = null, floorLabel = null) }
-        Toast.makeText(this, "地图身份已重置，请重新扫描或选择地图", Toast.LENGTH_SHORT).show()
+        if (notify) notifyOverlay("地图身份已重置，请重新扫描或选择地图")
     }
 
     private fun showPendingCandidates(): Boolean {
@@ -671,6 +799,7 @@ class OverlayService : Service() {
     }
 
     private fun lockSelectedMap(candidate: com.idvb.android.recognize.RecognitionCandidate) {
+        cancelAlignment()
         AppServices.prefs.lastMapId = candidate.map.id
         AppServices.prefs.lastFloorKey = candidate.floorKey
         val identitySource = if (candidate.disposition == CandidateDisposition.RELIABLE) {
@@ -688,14 +817,14 @@ class OverlayService : Service() {
         val hasVariants = AppServices.repository.loadCatalog().nextVariantMapId(candidate.map.id) != null
         balls?.variantsAvailable = hasVariants
         resizeControls(hasVariants)
-        if (guideVisible) loadGuideFloor()
+        refreshGuideSelection()
         closeCandidates(recycleCapture = true)
         val message = if (identitySource == MapIdentitySource.STRUCTURE_VERIFIED) {
             "结构已确认并锁定：${candidate.map.title}"
         } else {
             "已人工选择：${candidate.map.title}（结构未确认）"
         }
-        Toast.makeText(this@OverlayService, message, Toast.LENGTH_SHORT).show()
+        notifyOverlay(message)
     }
 
     private fun closeCandidates(recycleCapture: Boolean) {
@@ -710,26 +839,443 @@ class OverlayService : Service() {
     }
 
     private fun toggleGuide() {
-        if (showPendingCandidates()) return
-        if (currentMap == null) return
-        if (guideVisible) {
-            guideView?.visibility = android.view.View.INVISIBLE
-            guideVisible = false
-            balls?.guideVisible = false
+        if (guideVisible) hideGuide() else openGuide()
+    }
+
+    private fun assistEnabled(): Boolean {
+        val size = screenSize()
+        return AppServices.prefs.holdToActivateEnabled &&
+            validAssistPoints(AssistTouchStore(this).load(size.first > size.second))
+    }
+
+    private fun editAssistTouch() {
+        if (scanning || blueprintView != null || adjustView != null) {
+            notifyOverlay("请先完成当前扫描或调整"); return
+        }
+        assistController?.cancel()
+        assistEditorWindow?.remove()
+        val size = screenSize()
+        val store = AssistTouchStore(this)
+        val editorWindow = OverlayWindowManager(overlayContext)
+        val editor = AssistTouchEditorView(overlayContext, store.load(size.first > size.second)) { points ->
+            store.save(size.first > size.second, points)
+            editorWindow.remove(); assistEditorWindow = null
+            notifyOverlay(if (points.isEmpty()) "辅助触控已重置" else "辅助触控已保存：按住激活开启时，点击 👁 开图，再次点击关图")
+        }
+        editor.setOnKeyListener { _, key, event ->
+            if (key == android.view.KeyEvent.KEYCODE_BACK && event.action == android.view.KeyEvent.ACTION_UP) {
+                editorWindow.remove(); assistEditorWindow = null; true
+            } else false
+        }
+        editorWindow.width = size.first; editorWindow.height = size.second
+        assistEditorWindow = editorWindow
+        editorWindow.add(editor, locked = false, focusable = true)
+        editor.requestFocus()
+    }
+
+    private fun toggleAssistTouch() {
+        if (scanning || blueprintView != null || adjustView != null || assistEditorWindow != null || currentMap == null) return
+        if (assistController?.busy == true) return
+        if (assistController == null) assistController = AssistTouchController(
+            click = { opening, done ->
+                val index = if (opening) 0 else 2
+                val started = System.nanoTime()
+                val id = java.util.UUID.randomUUID().toString()
+                if (opening) assistOpenId = id
+                val x = (assistClickPoints[index] * assistClickScreen.first).coerceAtMost((assistClickScreen.first - 1).toFloat())
+                val y = (assistClickPoints[index + 1] * assistClickScreen.second).coerceAtMost((assistClickScreen.second - 1).toFloat())
+                val overlapsControl = balls?.let { controls ->
+                    (controls.buttons.values + controls.moreButton).any { button ->
+                        if (!button.isShown) false else {
+                            val location = IntArray(2).also(button::getLocationOnScreen)
+                            x >= location[0] && x < location[0] + button.width &&
+                                y >= location[1] && y < location[1] + button.height
+                        }
+                    }
+                } == true
+                AppServices.alignmentDiagnostics.recordLifecycle(id, "assist.click-start", if (opening) "open" else "close",
+                    mapOf("x" to x.toDouble(), "y" to y.toDouble()), sessionLogs.sessionId)
+                val clicked: (Boolean) -> Unit = { success ->
+                    val ended = System.nanoTime()
+                    if (opening && id == assistOpenId) assistOpenEvidence = if (success) AssistClickEvidence(id, started, ended, x, y) else null
+                    AppServices.alignmentDiagnostics.recordLifecycle(id, "assist.click-end", "success=$success",
+                        mapOf("durationMs" to (ended - started) / 1e6), sessionLogs.sessionId)
+                    done(success)
+                }
+                if (overlapsControl) {
+                    clicked(false)
+                    notifyOverlay("辅助触控位置与悬浮按钮重叠，请移动悬浮按钮或重新设置")
+                } else AccessibilityScreenCaptureService.click(x, y, clicked)
+            },
+            show = { if (!destroyed) openGuide() },
+            hide = { hideGuide() },
+            failed = { notifyOverlay("辅助点击未完成，请检查无障碍服务或重新设置位置") },
+        )
+        assistClickScreen = screenSize()
+        assistClickPoints = AssistTouchStore(this).load(assistClickScreen.first > assistClickScreen.second)
+        if (validAssistPoints(assistClickPoints)) assistController?.toggle()
+    }
+
+    private fun hideGuide() {
+        if (!guideVisible && !aligning) return
+        val actionStarted = System.nanoTime()
+        val previous = lastAlignmentTerminal
+        guideVisible = false
+        balls?.guideVisible = false
+        cancelAlignment()
+        lastAlignmentRequestId?.let { AppServices.alignmentDiagnostics.recordLifecycle(it, "eye.hidden", previous,
+            mapOf("uiResponseMs" to (System.nanoTime() - actionStarted) / 1e6)) }
+        if (previous == "drawn" || previous in setOf("rejected", "unavailable", "idle")) {
+            updateAlignmentNotice(alignmentNotice, if (previous == "drawn") "贴合已成功，现已隐藏" else "已关闭贴合显示", 2_500L)
+        }
+    }
+
+    private fun openGuide() {
+        if (blueprintView != null || adjustView != null || assistEditorWindow != null || scanning) {
+            notifyOverlay("请先完成当前扫描或调整")
             return
         }
+        if (showPendingCandidates()) return
+        if (currentMap == null || guideVisible) return
+        val clicked = System.nanoTime()
+        val autoAlign = AppServices.prefs.eyeButtonAction == EyeButtonAction.SHOW_AND_ALIGN
+        if (autoAlign) {
+            // A new open always replaces old work, including a callback still waiting on the UI thread.
+            cancelAlignment()
+            alignedGuideBounds = null
+            alignedGuideViewport = null
+            guideView?.clearAlignment()
+        }
+        if (showGuide(renderGuide = !autoAlign) { code, reason -> if (autoAlign) recordAlignmentPreflightFailure(clicked, code, reason) } && autoAlign) {
+            alignGuide(clicked, System.nanoTime() - clicked)
+        }
+    }
+
+    /** Explicit display-only entry used by manual adjustment as well as the eye action. */
+    private fun showGuide(renderGuide: Boolean = true, onUnavailable: (String, String) -> Unit = { _, _ -> }): Boolean {
         val size = screenSize()
         val region = guideRegionPixels(size.first, size.second)
         if (region == null) {
-            Toast.makeText(this, "请先校准显示区域", Toast.LENGTH_SHORT).show()
-            return
+            notifyOverlay("请先校准显示区域")
+            onUnavailable("display-region-missing", "请先校准显示区域")
+            return false
         }
-        applyGuideBounds(region)
-        loadGuideFloor()
-        guideWindow.update()
-        guideView?.visibility = android.view.View.VISIBLE
+        if (!loadGuideFloor()) {
+            notifyOverlay("当前楼层图片无法读取")
+            onUnavailable("guide-image-unavailable", "当前楼层图片无法读取")
+            return false
+        }
+        if (renderGuide) {
+            applyGuidePlacement(region)
+        }
+        alignmentDisplayReady = renderGuide
         guideVisible = true
         balls?.guideVisible = true
+        applyPracticeVisibility()
+        return true
+    }
+
+    private fun recordAlignmentPreflightFailure(clicked: Long, code: String, reason: String) {
+        alignmentNotice = showAlignmentNotice("自动贴合未开始：$reason", 6_000L)
+        val map = currentMap ?: return
+        val screen = screenSize()
+        val region = captureRegionPixels(screen.first, screen.second)
+        val trace = AlignmentTrace(clicked, AppServices.prefs.alignmentReplayInputsEnabled)
+        lastAlignmentRequestId = trace.id
+        lastAlignmentTerminal = "unavailable"
+        AppServices.alignmentDiagnostics.recordLifecycle(trace.id, "request.preflight", code, sessionId = sessionLogs.sessionId)
+        trace.emit(AlignmentLogEvent("request.preflight", reason, labels = mapOf("code" to code)))
+        trace.emit(AlignmentLogEvent("request.total", "unavailable", durationNanos = System.nanoTime() - clicked))
+        val viewport = region?.let { ScreenRect(it.left.toDouble(), it.top.toDouble(), it.width().toDouble(), it.height().toDouble()) }
+            ?: ScreenRect(0.0, 0.0, 0.0, 0.0)
+        val context = AlignmentDiagnosticContext(AppServices.prefs.alignmentMethodId, map,
+            map.floors.sortedBy { it.sortOrder }.getOrNull(floorIndex)?.key.orEmpty(), viewport,
+            screen.first, screen.second, AppServices.prefs.screenCaptureMethod.name, sessionLogs.sessionId)
+        AppServices.alignmentDiagnostics.recordAsync(trace, context, null, AlignmentResult.Unavailable(reason, code), "unavailable") {
+            it.onFailure { error -> Log.e("IDVB-Align", "request=${trace.id} preflight diagnostics save failed", error) }
+        }
+    }
+
+    private fun cancelAlignment() {
+        val pending = activeAlignmentCancellation?.isCancelled == false && activeAlignmentTrace != null
+        activeAlignmentCancellation?.cancel()
+        activeAlignmentTrace?.emit(AlignmentLogEvent("request.cancelled", "state-changed"))
+        activeAlignmentTrace?.let { AppServices.alignmentDiagnostics.recordLifecycle(it.id, "cancel.requested", "state-changed") }
+        if (aligning) Log.i("IDVB-Align", "request=$alignmentGeneration stage=cancelled detail=state-changed")
+        alignmentGeneration++
+        aligning = false
+        alignmentCapturing = false
+        if (pending) updateAlignmentNotice(alignmentNotice, "已关闭显示，正在取消本次贴合…", 4_000L)
+        abortAlignmentCapture?.invoke()
+        abortAlignmentCapture = null
+        applyPracticeVisibility()
+    }
+
+    /** All async callbacks must still belong to this visible map, floor, screen and user action. */
+    private fun alignGuide(clicked: Long, displayPreparationNanos: Long) {
+        if (!com.idvb.android.UsageConsent.isAccepted(this) || practiceForeground || scanning || aligning) return
+        val map = currentMap ?: return
+        val floor = map.floors.sortedBy { it.sortOrder }.getOrNull(floorIndex) ?: run {
+            recordAlignmentPreflightFailure(clicked, "floor-unavailable", "当前楼层不存在"); return
+        }
+        val screen = screenSize()
+        val region = captureRegionPixels(screen.first, screen.second) ?: run {
+            recordAlignmentPreflightFailure(clicked, "capture-region-missing", "截图区域尚未校准"); return
+        }
+        val bounds = Rect(region.left.toInt().coerceIn(0, screen.first), region.top.toInt().coerceIn(0, screen.second),
+            region.right.toInt().coerceIn(0, screen.first), region.bottom.toInt().coerceIn(0, screen.second))
+        if (bounds.width() <= 0 || bounds.height() <= 0) {
+            recordAlignmentPreflightFailure(clicked, "capture-region-empty", "截图区域不在屏幕内"); return
+        }
+        val method = AppServices.prefs.screenCaptureMethod
+        val methodId = AppServices.prefs.alignmentMethodId
+        val viewport = ScreenRect(bounds.left.toDouble(), bounds.top.toDouble(), bounds.width().toDouble(), bounds.height().toDouble())
+        val trace = AlignmentTrace(clicked, AppServices.prefs.alignmentReplayInputsEnabled, AlignmentLogSink { event ->
+            Log.i("IDVB-Align", "request=${event.labels["requestId"]} method=$methodId map=${map.id} floor=${floor.key}" +
+                " stage=${event.stage} durationMs=${event.durationNanos?.div(1e6)} detail=${event.detail} metrics=${event.measurements}")
+        })
+        val diagnosticContext = AlignmentDiagnosticContext(methodId, map, floor.key, viewport, screen.first, screen.second, method.name, sessionLogs.sessionId)
+        val cancellation = AlignmentCancellation()
+        val assistEvidence = assistOpenEvidence.takeIf { assistController?.active == true }
+        assistEvidence?.let {
+            trace.emit(AlignmentLogEvent("assist.open-click", "completed-before-capture", timestampNanos = it.end,
+                durationNanos = it.end - it.start, labels = mapOf("assistRequestId" to it.id),
+                measurements = mapOf("x" to it.x.toDouble(), "y" to it.y.toDouble())))
+        }
+        val readinessKey = "${map.id}:${map.hashCode()}:${floor.key}:$bounds:$screen:$methodId"
+        val reference = readyReference.takeIf { readyReferenceKey == readinessKey }
+        var readySignature: com.idvb.android.alignment.MapFrameSignature? = null
+        lastAlignmentRequestId = trace.id
+        lastAlignmentTerminal = "starting"
+        alignmentNotice = showAlignmentNotice("正在准备自动贴合…", 0L)
+        val notice = alignmentNotice
+        AppServices.alignmentDiagnostics.recordLifecycle(trace.id, "eye.shown", "alignment-requested", sessionId = diagnosticContext.sessionId)
+        trace.emit(AlignmentLogEvent("display.prepare", durationNanos = displayPreparationNanos,
+            timestampNanos = clicked + displayPreparationNanos))
+        trace.emit(AlignmentLogEvent("request.context", trace.id, thresholds = mapOf("overlaySettleFrames" to 2.0),
+            labels = mapOf("eyeAction" to AppServices.prefs.eyeButtonAction.name,
+                "identitySource" to AppServices.prefs.lastMapIdentitySource.name,
+                "showAlignmentOutput" to AppServices.prefs.showAlignmentOutput.toString()),
+            measurements = mapOf("screenWidth" to screen.first.toDouble(), "screenHeight" to screen.second.toDouble(),
+                "captureX" to viewport.x, "captureY" to viewport.y, "captureWidth" to viewport.width, "captureHeight" to viewport.height)))
+        fun complete(outcome: AlignmentResult?, terminal: String, frame: Bitmap? = null) {
+            if (trace.completed.get()) return
+            if (lastAlignmentRequestId == trace.id) lastAlignmentTerminal = terminal
+            AppServices.alignmentDiagnostics.recordLifecycle(trace.id, "request.completed", terminal,
+                mapOf("totalMs" to (System.nanoTime() - clicked) / 1e6))
+            // Each request owns a card. Finalize an older card in place without moving it
+            // above a newer request or leaving a false "cancelling" status behind.
+            if (!destroyed) {
+                val elapsed = ((System.nanoTime() - clicked) / 1e6).toInt()
+                when {
+                    terminal == "drawn" -> updateAlignmentNotice(notice, "自动贴合成功 · ${elapsed}ms", 3_500L)
+                    terminal == "cancelled-after-algorithm" -> updateAlignmentNotice(notice, "计算已结束，关闭后未显示结果", 3_500L)
+                    terminal == "discarded-after-submit" -> updateAlignmentNotice(notice, "已关闭显示，本次绘制未确认", 3_500L)
+                    terminal.startsWith("cancelled") -> updateAlignmentNotice(notice, "贴合已取消 · 已退出计算", 2_500L)
+                    terminal == "submitted-without-observed-draw" -> updateAlignmentNotice(notice, "贴合已计算，但尚未确认绘制", 5_000L)
+                }
+            }
+            if (activeAlignmentTrace === trace) activeAlignmentTrace = null
+            if (activeAlignmentCancellation === cancellation) activeAlignmentCancellation = null
+            trace.emit(AlignmentLogEvent("request.total", terminal, durationNanos = System.nanoTime() - clicked))
+            assistEvidence?.let { trace.emit(AlignmentLogEvent("assist.click-to-terminal", terminal,
+                durationNanos = System.nanoTime() - it.start, labels = mapOf("assistRequestId" to it.id))) }
+            AppServices.alignmentDiagnostics.recordAsync(trace, diagnosticContext, frame, outcome, terminal) { saved ->
+                saved.onFailure { error ->
+                    Log.e("IDVB-Align", "request=${trace.id} diagnostics save failed", error)
+                    mainHandler.post { if (!destroyed && lastAlignmentRequestId == trace.id)
+                        updateAlignmentNotice(notice, "对齐诊断保存失败：${error.message}", 6_000L) }
+                }
+            }
+        }
+        fun unavailable(reason: String) { updateAlignmentNotice(notice, "自动贴合未完成：$reason", 6_000L) }
+        trace.measure("capture.session-setup") { synchronizeCaptureSession() }
+        activeAlignmentTrace = trace
+        activeAlignmentCancellation = cancellation
+        val session = captureSession
+        if (method == ScreenCaptureMethod.MEDIA_PROJECTION && !trace.measure("capture.session-start") {
+                session != null && session.start(screen.first, screen.second)
+            }) {
+            val reason = "屏幕捕获授权已失效，请返回 IDVB 重新授权"
+            unavailable(reason); complete(AlignmentResult.Unavailable(reason, "capture-permission"), "unavailable"); return
+        }
+        if (method == ScreenCaptureMethod.ACCESSIBILITY && !AccessibilityScreenCaptureService.available) {
+            val reason = "IDVB 无障碍服务未启用，请返回应用授权"
+            unavailable(reason); complete(AlignmentResult.Unavailable(reason, "capture-permission"), "unavailable"); return
+        }
+        val generation = ++alignmentGeneration
+        aligning = true
+        alignmentCaptureBounds = bounds
+        alignmentCapturing = true
+        lastAlignmentTerminal = "capturing"
+        fun current() = !destroyed && generation == alignmentGeneration && guideVisible &&
+            OverlayState.state.value.visible && !practiceForeground && currentMap == map &&
+            map.floors.sortedBy { it.sortOrder }.getOrNull(floorIndex) == floor && screenSize() == screen &&
+            AppServices.prefs.eyeButtonAction == EyeButtonAction.SHOW_AND_ALIGN &&
+            AppServices.prefs.alignmentMethodId == methodId && AppServices.prefs.screenCaptureMethod == method &&
+            com.idvb.android.UsageConsent.isAccepted(this)
+        hideScanProgress()
+        trace.measure("capture.prepare") {
+            if (method == ScreenCaptureMethod.MEDIA_PROJECTION) session?.prepareCapture()
+            applyPracticeVisibility()
+        }
+        val hidden = System.nanoTime()
+        val captureStart = Runnable {
+            pendingAlignmentStart = null
+            abortAlignmentCapture = null
+            trace.emit(AlignmentLogEvent("capture.overlay-settle", durationNanos = System.nanoTime() - hidden))
+            if (!current()) {
+                if (generation == alignmentGeneration) cancelAlignment()
+                complete(null, "cancelled-before-capture"); return@Runnable
+            }
+            val captureStarted = System.nanoTime()
+            val callback = { captured: Result<Bitmap> ->
+                trace.emit(AlignmentLogEvent("capture.acquire", captured.exceptionOrNull()?.message ?: "captured",
+                    durationNanos = System.nanoTime() - captureStarted))
+                val capturedAt = System.nanoTime()
+                mainHandler.post {
+                    trace.emit(AlignmentLogEvent("capture.callback-queue", durationNanos = System.nanoTime() - capturedAt))
+                    if (!current()) {
+                        if (generation == alignmentGeneration) cancelAlignment()
+                        complete(null, "cancelled-after-capture", captured.getOrNull())
+                        return@post
+                    }
+                    abortAlignmentCapture = null
+                    alignmentCapturing = false
+                    applyPracticeVisibility()
+                    val bitmap = captured.getOrElse {
+                        aligning = false
+                        val timedOut = cancellation.reason == "map-open-timeout"
+                        val reason = it.message ?: "截图失败"
+                        unavailable(reason)
+                        complete(AlignmentResult.Unavailable(reason, if (timedOut) "map-open-timeout" else "capture-failed"),
+                            if (timedOut) "map-open-timeout" else "capture-failed")
+                        return@post
+                    }
+                    lastAlignmentTerminal = "queued"
+                    updateAlignmentNotice(notice, "正在自动贴合 · 等待计算", 0L)
+                    val queued = System.nanoTime()
+                    val accepted = recognitionExecutor.execute {
+                        trace.emit(AlignmentLogEvent("worker.queue", durationNanos = System.nanoTime() - queued))
+                        if (generation != alignmentGeneration || destroyed) {
+                            mainHandler.post { complete(null, "cancelled-in-queue", bitmap) }
+                            return@execute
+                        }
+                        AppServices.alignmentDiagnostics.recordLifecycle(trace.id, "worker.started", "running")
+                        mainHandler.post {
+                            if (current()) { lastAlignmentTerminal = "computing"; updateAlignmentNotice(notice, "正在自动贴合 · 结构校验", 0L) }
+                        }
+                        val result = runCatching {
+                            AppServices.alignmentMethods.align(methodId, AlignmentRequest(bitmap, viewport, map, floor, cancellation), trace)
+                        }
+                        val solvedAt = System.nanoTime()
+                        val cancelledAtWorkerExit = cancellation.isCancelled
+                        AppServices.alignmentDiagnostics.recordLifecycle(trace.id, "worker.exited",
+                            if (cancelledAtWorkerExit) "cancelled" else "finished",
+                            if (cancelledAtWorkerExit) mapOf("cancelResponseMs" to (solvedAt - cancellation.requestedAtNanos) / 1e6) else emptyMap())
+                        mainHandler.post finish@{
+                            trace.emit(AlignmentLogEvent("render.callback-queue", durationNanos = System.nanoTime() - solvedAt))
+                            if (cancellation.isCancelled) {
+                                complete(result.getOrNull(), if (cancelledAtWorkerExit) "cancelled-during-algorithm" else "cancelled-after-algorithm", bitmap)
+                                return@finish
+                            }
+                            val outcome = result.getOrElse {
+                                Log.w("IDVB-Align", "Alignment failed: $methodId", it)
+                                AlignmentResult.Unavailable(it.message ?: "贴合失败", "algorithm-error")
+                            }
+                            if (!current()) {
+                                if (generation == alignmentGeneration) cancelAlignment()
+                                complete(outcome, "discarded-stale-result", bitmap)
+                                return@finish
+                            }
+                            aligning = false
+                            when (outcome) {
+                                is AlignmentResult.Aligned -> {
+                                    readyReference = readySignature; readyReferenceKey = readinessKey
+                                    alignmentDisplayReady = true
+                                    val target = outcome.transform.bounds
+                                    val submitted = System.nanoTime()
+                                    guideView?.afterNextAlignedDraw { nanos ->
+                                        if (!trace.completed.get()) {
+                                            trace.emit(AlignmentLogEvent("render.canvas", durationNanos = nanos))
+                                            trace.emit(AlignmentLogEvent("render.first-draw", durationNanos = System.nanoTime() - submitted))
+                                            mainHandler.post { complete(outcome, if (current()) "drawn" else "discarded-after-submit", bitmap) }
+                                        }
+                                    }
+                                    val renderSubmission = runCatching { trace.measure("render.submit") {
+                                        alignedGuideBounds = RectF(target.x.toFloat(), target.y.toFloat(),
+                                            (target.x + target.width).toFloat(), (target.y + target.height).toFloat())
+                                        alignedGuideViewport = RectF(bounds)
+                                        applyGuidePlacement(requireNotNull(alignedGuideBounds))
+                                    } }
+                                    if (renderSubmission.isFailure) {
+                                        guideView?.afterNextAlignedDraw(null)
+                                        unavailable("显示贴合结果失败：${renderSubmission.exceptionOrNull()?.message}")
+                                        complete(outcome, "render-failed", bitmap)
+                                        return@finish
+                                    }
+                                    mainHandler.postDelayed({
+                                        if (!trace.completed.get()) {
+                                            trace.emit(AlignmentLogEvent("render.draw-timeout", "no-observed-draw",
+                                                durationNanos = System.nanoTime() - submitted))
+                                            complete(outcome, "submitted-without-observed-draw", bitmap)
+                                        }
+                                    }, 1_000L)
+                                }
+                                is AlignmentResult.Unavailable -> { unavailable(outcome.reason); complete(outcome, "unavailable", bitmap) }
+                                is AlignmentResult.Rejected -> { unavailable(outcome.reason); complete(outcome, "rejected", bitmap) }
+                            }
+                            applyPracticeVisibility()
+                        }
+                    }
+                    if (!accepted) {
+                        aligning = false; unavailable("识别线程已停止")
+                        complete(AlignmentResult.Unavailable("识别线程已停止", "executor-closed"), "unavailable", bitmap)
+                    }
+                }
+                Unit
+            }
+            if (method == ScreenCaptureMethod.ACCESSIBILITY) {
+                updateAlignmentNotice(notice, "等待游戏地图画面 · 最多 3 秒", 0L)
+                abortAlignmentCapture = com.idvb.android.alignment.MapOpenFrameCapture(
+                    mainHandler, accessibilityCaptureExecutor, cancellation, trace, reference,
+                    callback = { result, signature -> readySignature = signature; callback(result) },
+                ).start(bounds)
+            } else {
+                session!!.capture(bounds, callback)
+                abortAlignmentCapture = { session.cancelPending() }
+            }
+        }
+        pendingAlignmentStart = captureStart
+        abortAlignmentCapture = {
+            mainHandler.removeCallbacks(captureStart)
+            pendingAlignmentStart = null
+            complete(null, "cancelled-before-capture")
+        }
+        // Wait for the hidden overlays to cross a display traversal instead of adding a
+        // fixed 140 ms to every request. Cancellation still invalidates this exact runnable.
+        android.view.Choreographer.getInstance().postFrameCallback {
+            android.view.Choreographer.getInstance().postFrameCallback {
+                if (pendingAlignmentStart === captureStart) mainHandler.post(captureStart)
+            }
+        }
+    }
+
+    private fun refreshGuideSelection() {
+        cancelAlignment()
+        alignedGuideBounds = null
+        alignedGuideViewport = null
+        guideView?.clearAlignment()
+        if (guideVisible) {
+            if (!loadGuideFloor()) {
+                guideVisible = false
+                balls?.guideVisible = false
+                applyPracticeVisibility()
+                return
+            }
+            val screen = screenSize()
+            guideRegionPixels(screen.first, screen.second)?.let(::applyGuidePlacement)
+        }
     }
 
     private fun nextFloor() {
@@ -740,7 +1286,7 @@ class OverlayService : Service() {
         val floor = floors[floorIndex]
         AppServices.prefs.lastFloorKey = floor.key
         balls?.floorLabel = floor.displayName
-        if (guideVisible) loadGuideFloor()
+        refreshGuideSelection()
     }
 
     private fun previousFloor() {
@@ -751,7 +1297,7 @@ class OverlayService : Service() {
         val floor = floors[floorIndex]
         AppServices.prefs.lastFloorKey = floor.key
         balls?.floorLabel = floor.displayName
-        if (guideVisible) loadGuideFloor()
+        refreshGuideSelection()
     }
 
     private fun nextVariant() {
@@ -770,7 +1316,7 @@ class OverlayService : Service() {
         balls?.identityVerified = false
         balls?.floorLabel = floors[index].displayName
         balls?.variantsAvailable = catalog.nextVariantMapId(next.id) != null
-        if (guideVisible) loadGuideFloor()
+        refreshGuideSelection()
     }
 
     private fun resizeControls(hasVariants: Boolean) {
@@ -782,18 +1328,28 @@ class OverlayService : Service() {
         ballMenu?.updatePosition()
     }
 
-    private fun loadGuideFloor() {
-        val map = currentMap ?: return
-        val floor = map.floors.sortedBy { it.sortOrder }.getOrNull(floorIndex) ?: return
+    private fun loadGuideFloor(): Boolean {
+        val map = currentMap ?: return false
+        val floor = map.floors.sortedBy { it.sortOrder }.getOrNull(floorIndex) ?: return false
         val file = AppServices.repository.floorImageFile(map.id, floor.imagePath)
         val maxDimension = maxOf(screenSize().first, screenSize().second) * 2
         val selected = AppServices.repository.loadPreviewRegion(map.id, floor)
+        val freeCrop = AppServices.repository.loadFreeCropPoints(map.id, floor)
+        val classMarkedForRemoval = AppServices.repository.loadCatalog().classes
+            .firstOrNull { it.id == map.classId }?.removeBackground == true
+        val metadata = java.io.File(AppServices.repository.mapsRoot, "${map.id}/data").listFiles()
+            .orEmpty().filter { it.extension == "json" }.sortedBy { it.name }
+            .joinToString { "${it.name}:${it.length()}:${it.lastModified()}" }
+        val key = "$map|$floor|${file.canonicalPath}|${file.length()}|${file.lastModified()}|$selected|$freeCrop|$maxDimension|$metadata|" +
+            "${AppServices.prefs.removeGuideBackground}|$classMarkedForRemoval|${AppServices.prefs.showRoutes}|${AppServices.prefs.routeLineThickness}"
+        guideBitmap?.takeIf { !it.isRecycled && guideBitmapKey == key }?.let {
+            guideWindow.opacity = AppServices.prefs.opacity
+            guideView?.showBitmap(it)
+            return true
+        }
         var next = decodeMapRegion(file, selected, maxDimension,
-            AppServices.repository.loadFreeCropPoints(map.id, floor)) ?: return
+            freeCrop) ?: return false
         if (AppServices.prefs.removeGuideBackground) {
-            val classMarkedForRemoval = AppServices.repository.loadCatalog().classes
-                .firstOrNull { it.id == map.classId }
-                ?.removeBackground == true
             val processed = MapBackgroundRemover.remove(
                 bitmap = next,
                 classMarkedForRemoval = classMarkedForRemoval,
@@ -805,11 +1361,36 @@ class OverlayService : Service() {
             if (processed !== next && !next.isRecycled) next.recycle()
             next = processed
         }
+        if (AppServices.prefs.showRoutes) {
+            val rendered = com.idvb.android.graphics.MapRouteRenderer.render(
+                next, AppServices.repository.loadRouteAnnotations(map, floor.key), selected,
+                floor.imageWidth, floor.imageHeight,
+                AppServices.repository.loadFreeCropPoints(map.id, floor), AppServices.prefs.routeLineThickness)
+            if (rendered !== next) next.recycle()
+            next = rendered
+        }
         val previous = guideBitmap
         guideBitmap = next
+        guideBitmapKey = key
         guideWindow.opacity = AppServices.prefs.opacity
         guideView?.showBitmap(next)
         previous?.let { if (!it.isRecycled) it.recycle() }
+        return true
+    }
+
+    private fun applyGuidePlacement(region: RectF) {
+        val aligned = alignedGuideBounds
+        val viewport = alignedGuideViewport
+        if (aligned != null && viewport != null) {
+            val screen = screenSize()
+            guideWindow.x = 0; guideWindow.y = 0
+            guideWindow.width = screen.first; guideWindow.height = screen.second
+            guideView?.showAlignment(aligned, viewport)
+        } else {
+            guideView?.clearAlignment()
+            applyGuideBounds(region)
+        }
+        guideWindow.update()
     }
 
     private fun applyGuideBounds(region: RectF) {
@@ -832,17 +1413,18 @@ class OverlayService : Service() {
 
     private fun enterFreeAdjustMode() {
         if (adjustView != null || blueprintView != null || candidateView != null) return
+        cancelAlignment()
         if (currentMap == null) {
-            Toast.makeText(this, "请先锁定地图", Toast.LENGTH_SHORT).show()
+            notifyOverlay("请先锁定地图")
             return
         }
         val screen = screenSize()
         val resetRegion = captureRegionPixels(screen.first, screen.second)
         if (resetRegion == null) {
-            Toast.makeText(this, "请先校准显示区域", Toast.LENGTH_SHORT).show()
+            notifyOverlay("请先校准显示区域")
             return
         }
-        if (!guideVisible) toggleGuide()
+        if (!guideVisible && !showGuide()) return
         val bitmap = guideBitmap ?: return
         val currentRegion = guideRegionPixels(screen.first, screen.second) ?: resetRegion
         // 编辑蓝图自己绘制攻略图，避免底下的点击穿透窗口重复叠图。
@@ -858,6 +1440,8 @@ class OverlayService : Service() {
         ).apply {
             listener = object : BlueprintImageAdjustView.Listener {
                 override fun onConfirmed(region: RectF, opacity: Float) {
+                    alignedGuideBounds = null
+                    alignedGuideViewport = null
                     val size = screenSize()
                     AppServices.prefs.setGuideRegion(
                         landscape = size.first > size.second,
@@ -868,7 +1452,7 @@ class OverlayService : Service() {
                     )
                     AppServices.prefs.opacity = opacity
                     exitFreeAdjustMode(restoreGuide = true)
-                    Toast.makeText(this@OverlayService, "攻略图显示已保存", Toast.LENGTH_SHORT).show()
+                    notifyOverlay("攻略图显示已保存")
                 }
             }
         }
@@ -882,7 +1466,7 @@ class OverlayService : Service() {
         if (!restoreGuide || !guideVisible || guideView == null) return
         val screen = screenSize()
         val region = guideRegionPixels(screen.first, screen.second) ?: return
-        applyGuideBounds(region)
+        applyGuidePlacement(region)
         guideWindow.opacity = AppServices.prefs.opacity
         guideView?.showBitmap(guideBitmap)
         guideWindow.update()
@@ -891,12 +1475,15 @@ class OverlayService : Service() {
 
     private fun enterBlueprintMode() {
         if (blueprintView != null || adjustView != null || candidateView != null) return
+        cancelAlignment()
         val screen = screenSize()
         blueprintWindow.x = 0; blueprintWindow.y = 0
         blueprintWindow.width = screen.first; blueprintWindow.height = screen.second
         blueprintView = BlueprintCalibrationView(overlayContext).apply {
             listener = object : BlueprintCalibrationView.Listener {
                 override fun onConfirmed(region: RectF) {
+                    alignedGuideBounds = null
+                    alignedGuideViewport = null
                     val size = screenSize()
                     AppServices.prefs.setCaptureRegion(
                         landscape = size.first > size.second,
@@ -907,11 +1494,11 @@ class OverlayService : Service() {
                     )
                     if (guideVisible) {
                         val guideRegion = guideRegionPixels(size.first, size.second) ?: region
-                        applyGuideBounds(guideRegion)
+                        applyGuidePlacement(guideRegion)
                         guideWindow.update()
                     }
                     exitBlueprintMode()
-                    Toast.makeText(this@OverlayService, "显示区域已校准", Toast.LENGTH_SHORT).show()
+                    notifyOverlay("显示区域已校准")
                 }
                 override fun onCancelled() = exitBlueprintMode()
             }
@@ -935,6 +1522,7 @@ class OverlayService : Service() {
     }
 
     private fun guideRegionPixels(screenWidth: Int, screenHeight: Int): RectF? {
+        alignedGuideBounds?.let { return RectF(it) }
         val values = AppServices.prefs.guideRegion(screenWidth > screenHeight)
             ?: AppServices.prefs.captureRegion(screenWidth > screenHeight)
             ?: return null
@@ -953,14 +1541,24 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
+        assistController?.cancel(); assistController = null
+        assistEditorWindow?.remove(); assistEditorWindow = null
+        sessionLogs.stop()
         if (currentService === this) currentService = null
         destroyed = true
+        notifications?.close(); notifications = null
+        activeAlignmentCancellation?.cancel("service-destroyed")
+        activeAlignmentTrace?.emit(AlignmentLogEvent("request.cancelled", "service-destroyed"))
+        alignmentGeneration++
+        aligning = false
+        alignmentCapturing = false
+        abortAlignmentCapture?.invoke(); abortAlignmentCapture = null
         getSharedPreferences("overlay", MODE_PRIVATE).unregisterOnSharedPreferenceChangeListener(capturePreferencesListener)
         scanGeneration++
         scanning = false
         hideScanProgress()
         getSystemService(DisplayManager::class.java).unregisterDisplayListener(displayListener)
-        accessibilityCaptureExecutor.shutdownNow()
+        accessibilityCaptureExecutor.shutdown()
         recognitionExecutor.close()
         closeCandidates(recycleCapture = true)
         captureSession?.close(); captureSession = null
@@ -982,12 +1580,19 @@ class OverlayService : Service() {
     private fun refreshWindowsForDisplayChange() {
         if (balls == null) return
         val screen = screenSize()
+        notifications?.position()
         if (blueprintView != null) {
             blueprintWindow.width = screen.first; blueprintWindow.height = screen.second
             blueprintWindow.x = 0; blueprintWindow.y = 0
             blueprintWindow.update()
         }
-        if (adjustView != null) {
+        // Display notifications also include refresh-rate/mode changes. Reattaching
+        // this focusable window on those notifications can trigger another mode
+        // change, causing a remove/add loop, touch gaps and lost in-progress edits.
+        // Only rebuild when the actual coordinate space changes (e.g. rotation).
+        if (adjustView != null &&
+            (blueprintWindow.width != screen.first || blueprintWindow.height != screen.second)
+        ) {
             blueprintWindow.remove()
             adjustView = null
             enterFreeAdjustMode()
@@ -1004,7 +1609,12 @@ class OverlayService : Service() {
             scanProgressWindow.update()
         }
         if (lastCaptureScreen != screen) {
+            assistController?.cancel()
+            assistEditorWindow?.remove(); assistEditorWindow = null
             cancelCaptureScan()
+            alignedGuideBounds = null
+            alignedGuideViewport = null
+            guideView?.clearAlignment()
             lastCaptureScreen = screen
         }
         if (AppServices.prefs.screenCaptureMethod == ScreenCaptureMethod.MEDIA_PROJECTION) {
@@ -1017,7 +1627,7 @@ class OverlayService : Service() {
                 guideWindow.x = 0; guideWindow.y = 0; guideWindow.width = 1; guideWindow.height = 1
                 guideWindow.update(); guideVisible = false; balls?.guideVisible = false
             } else {
-                applyGuideBounds(guideRegion); guideWindow.update()
+                applyGuidePlacement(guideRegion)
             }
         }
         window.x = window.x.coerceIn(0, (screen.first - window.width).coerceAtLeast(0))
