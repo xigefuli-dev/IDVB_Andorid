@@ -39,4 +39,32 @@ class OverlayNotificationsInstrumentedTest {
             assertTrue(edit.commit())
         }
     }
+
+    @Test fun warningNotificationHasWarningTone() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val base = instrumentation.targetContext
+        val consent = base.getSharedPreferences("mandatory_usage_consent", Context.MODE_PRIVATE)
+        val previous = consent.all["accepted_revision"] as? Int
+        var notifications: OverlayNotifications? = null
+        try {
+            assertTrue(consent.edit().putInt("accepted_revision", UsageConsent.REVISION).commit())
+            instrumentation.runOnMainSync {
+                val display = base.createDisplayContext(base.getSystemService(DisplayManager::class.java).getDisplay(0))
+                val context = if (Build.VERSION.SDK_INT >= 30)
+                    display.createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null) else display
+                val notices = OverlayNotifications(context) { 1280 to 720 }.also { notifications = it }
+                val defaultId = notices.show("常规通知", 5_000L, NotificationTone.DEFAULT)
+                notices.show("变体警告通知", 5_000L, NotificationTone.WARNING)
+                assertEquals(listOf("变体警告通知", "常规通知"), notices.messages())
+                assertEquals(listOf(NotificationTone.WARNING, NotificationTone.DEFAULT), notices.tones())
+                notices.update(defaultId, "常规转警告通知", 5_000L, NotificationTone.WARNING)
+                assertEquals(listOf(NotificationTone.WARNING, NotificationTone.WARNING), notices.tones())
+            }
+        } finally {
+            instrumentation.runOnMainSync { notifications?.close() }
+            val edit = consent.edit()
+            if (previous == null) edit.remove("accepted_revision") else edit.putInt("accepted_revision", previous)
+            assertTrue(edit.commit())
+        }
+    }
 }

@@ -80,6 +80,8 @@ captures/
 
 # Launcher artwork used by the Android app
 !app/src/main/res/drawable-nodpi/ic_launcher_art.png
+!app/src/main/res/drawable/idvb_logo.png
+!app/src/main/res/drawable-nodpi/idvb_logo.png
 !app/src/main/res/mipmap-*/ic_launcher.webp
 !app/src/main/res/mipmap-*/ic_launcher_round.webp
 !app/src/main/res/drawable/sponsor_poster.png
@@ -122,11 +124,11 @@ Thumbs.db
 desktop.ini
 
 # Screenshots explicitly supplied for the bundled interactive beginner tutorial.
-!app/src/main/assets/tutorial/lobby.png
-!app/src/main/assets/tutorial/calibration.png
-!app/src/main/assets/tutorial/side.png
-!app/src/main/assets/tutorial/game.png
-!app/src/main/assets/tutorial/map.png
+!app/src/main/assets/tutorial/lobby.webp
+!app/src/main/assets/tutorial/calibration.webp
+!app/src/main/assets/tutorial/side.webp
+!app/src/main/assets/tutorial/game.webp
+!app/src/main/assets/tutorial/map.webp
 
 # Local verification captures, device data, and linked Gradle caches
 /.verify/

@@ -91,9 +91,12 @@ data class MapCatalogDocument(
     fun isClassNameTaken(name: String): Boolean =
         classes.any { it.name.equals(name, ignoreCase = true) }
 
+    /** 查找地图所属的变体组合。 */
+    fun findVariantGroup(mapId: String): MapVariantGroupRecord? =
+        variantGroups.firstOrNull { mapId in it.mapIds && it.mapIds.size > 1 }
+
     /** 当前地图所在变体组的下一张地图，沿 IDVM 的 mapIds 顺序循环。 */
-    fun nextVariantMapId(currentMapId: String): String? = variantGroups
-        .firstOrNull { currentMapId in it.mapIds && it.mapIds.size > 1 }
-        ?.mapIds
-        ?.let { ids -> ids[(ids.indexOf(currentMapId) + 1) % ids.size] }
+    fun nextVariantMapId(currentMapId: String): String? =
+        findVariantGroup(currentMapId)?.mapIds
+            ?.let { ids -> ids[(ids.indexOf(currentMapId) + 1) % ids.size] }
 }

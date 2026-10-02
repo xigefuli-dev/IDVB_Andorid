@@ -11,7 +11,9 @@ class TutorialStore private constructor(context: Context) {
     private val json = Json { ignoreUnknownKeys = true }
     private val mutable = MutableStateFlow(runCatching {
         json.decodeFromString<TutorialProgress>(prefs.getString("progress", null) ?: "{}")
-    }.getOrDefault(TutorialProgress()))
+    }.getOrDefault(TutorialProgress()).let {
+        if (it.step == TutorialStep.ASSIST_TOUCH) it.copy(step = TutorialStep.ENTER) else it
+    })
     val state = mutable.asStateFlow()
 
     @Synchronized fun update(transform: (TutorialProgress) -> TutorialProgress) {

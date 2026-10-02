@@ -153,11 +153,18 @@ android {
         versionName = idvbProductVersion
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        val abis = providers.gradleProperty("idvbAbiFilters")
+            .map { it.split(",").map(String::trim).filter(String::isNotEmpty) }
+            .orElse(listOf("arm64-v8a"))
+        ndk {
+            abiFilters.addAll(abis.get())
+        }
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

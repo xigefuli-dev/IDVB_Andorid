@@ -67,10 +67,10 @@ class OverlayPrefs(context: Context) {
         get() = prefs.getBoolean("locked", DefaultSettings.LOCKED)
         set(value) = prefs.edit().putBoolean("locked", value).apply()
 
-    /** 按下眼睛时打开，松手时关闭；旧安装也默认启用。 */
+    /** 按住激活功能已取消注册，默认关闭且无法被开启。 */
     var holdToActivateEnabled: Boolean
-        get() = prefs.getBoolean("hold_to_activate_enabled", DefaultSettings.HOLD_TO_ACTIVATE)
-        set(value) = prefs.edit().putBoolean("hold_to_activate_enabled", value).apply()
+        get() = false
+        set(@Suppress("UNUSED_PARAMETER") value) = prefs.edit().putBoolean("hold_to_activate_enabled", false).apply()
 
     var searchButtonAction: SearchButtonAction
         get() = SearchButtonAction.fromStored(prefs.getString("search_button_action", null))
@@ -79,6 +79,11 @@ class OverlayPrefs(context: Context) {
     var eyeButtonAction: EyeButtonAction
         get() = EyeButtonAction.fromStored(prefs.getString("eye_button_action", null))
         set(value) = prefs.edit().putString("eye_button_action", value.name).apply()
+
+    /** 与 👁 的动作独立；缺少有效开图参照时保持停止，既有偏好不会被迁移覆盖。 */
+    var autoDetectMapOpenEnabled: Boolean
+        get() = prefs.getBoolean("auto_detect_map_open_enabled", DefaultSettings.AUTO_DETECT_MAP_OPEN)
+        set(value) = prefs.edit().putBoolean("auto_detect_map_open_enabled", value).apply()
 
     /** Stable registry ID, independent of the button action and open to new alignment methods. */
     var alignmentMethodId: String

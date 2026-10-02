@@ -1,5 +1,6 @@
 package com.idvb.android.tutorial
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -7,11 +8,13 @@ import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
@@ -74,16 +77,20 @@ fun TutorialPanel(
             enterCountdown--
         }
     }
-    Surface(modifier, color = MaterialTheme.colorScheme.surfaceContainer, tonalElevation = 3.dp) {
+    Surface(modifier, color = MaterialTheme.colorScheme.surfaceContainer, tonalElevation = 0.dp) {
         Column(Modifier.padding(16.dp)) {
+            val activeSteps = TutorialStep.activeSteps
+            val totalSteps = (activeSteps.size - 1).coerceAtLeast(1)
+            val activeIndex = activeSteps.indexOf(step).let { if (it < 0) 0 else it }
+            val currentDisplayStep = (activeIndex + 1).coerceAtMost(totalSteps)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(if (inPractice) "模拟实战 · ${(step.ordinal + 1).coerceAtMost(12)}/12" else "新手教程 · ${(step.ordinal + 1).coerceAtMost(12)}/12",
+                Text(if (inPractice) "模拟实战 · $currentDisplayStep/$totalSteps" else "新手教程 · $currentDisplayStep/$totalSteps",
                     style = MaterialTheme.typography.labelLarge)
                 TextButton(onClick = onPause, contentPadding = PaddingValues(0.dp), modifier = Modifier.height(24.dp)) {
                     Text(if (inPractice) "返回首页" else "稍后继续")
                 }
             }
-            LinearProgressIndicator(progress = { step.ordinal / 12f }, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp))
+            LinearProgressIndicator(progress = { activeIndex.toFloat() / totalSteps }, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp))
             Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
                 Text(step.title, style = MaterialTheme.typography.titleLarge)
                 Spacer(Modifier.height(8.dp))
@@ -101,8 +108,11 @@ fun TutorialPanel(
                 }
                 if (step == TutorialStep.DONE) {
                     Text("已检查 ${progress.passed.size} 段 · 已跳过 ${progress.skipped.size} 段", modifier = Modifier.padding(top = 10.dp))
-                    if (progress.skipped.isNotEmpty()) Text("跳过的内容没有算作学会，可以重新练习补上。", style = MaterialTheme.typography.bodySmall)
-                    TextButton(onClick = { confirmRestart = true }) { Text("从头再练一次") }
+                    if (progress.skipped.isNotEmpty()) Text(
+                        "跳过的内容没有算作学会，可以重新练习补上。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 if (feedback.isNotEmpty()) Text(feedback, color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.bringIntoViewRequester(feedbackRequester).padding(top = 8.dp))
@@ -134,7 +144,29 @@ fun TutorialPanel(
                         Text(if (cooldownRemaining > 0) "检查（${cooldownRemaining}秒）" else "检查")
                     }
                 }
-            } else Button(onClick = onPause, modifier = Modifier.fillMaxWidth()) { Text("完成") }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    FilledTonalButton(
+                        onClick = { confirmRestart = true },
+                        modifier = Modifier.weight(1f),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                    ) {
+                        Text("从头再练一次", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Button(
+                        onClick = onPause,
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                    ) {
+                        Text("完成", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
         }
     }
     if (showCalibratePassedDialog) AlertDialog(
@@ -159,18 +191,19 @@ fun TutorialPanel(
         onDismissRequest = {},
         title = { Text("扫描须知") },
         text = {
-            val styled = remember {
+            val noticeErrorColor = MaterialTheme.colorScheme.error
+            val styled = remember(noticeErrorColor) {
                 buildAnnotatedString {
                     append("扫描必须在")
                     withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
                         append("一楼")
                     }
-                    append("进行，困难的时候画面里一定要能看到侧门图标，噩梦一定要能看到大门图标。\n\n")
+                    append("进行，游玩困难模式时，画面里一定要能看到侧门图标，噩梦一定要能看到大门图标。\n\n")
                     withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
                         append("不要在传送后扫描")
                     }
                     append("，")
-                    withStyle(SpanStyle(color = Color(0xFFE53935), fontWeight = FontWeight.Bold)) {
+                    withStyle(SpanStyle(color = noticeErrorColor, fontWeight = FontWeight.Bold)) {
                         append("需要足够多的画面特征来确保识别正常")
                     }
                     append("。")

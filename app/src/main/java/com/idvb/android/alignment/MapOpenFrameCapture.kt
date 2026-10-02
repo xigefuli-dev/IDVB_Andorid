@@ -25,6 +25,7 @@ class MapOpenFrameCapture(
     private var started = 0L
     private var processing = false
     private var timeout = false
+    private val prepared = ArrayDeque<PreparedMapFrame>()
     private lateinit var bounds: Rect
     private val next = Runnable { capture() }
     private val deadline = Runnable {
@@ -36,8 +37,10 @@ class MapOpenFrameCapture(
         }
     }
 
-    fun start(region: Rect): () -> Unit {
+    /** Takes ownership of all prepared frames, including stale ones and cancellation paths. */
+    fun start(region: Rect, initialFrames: List<PreparedMapFrame> = emptyList()): () -> Unit {
         bounds = Rect(region); started = SystemClock.elapsedRealtime()
+        prepared.addAll(initialFrames)
         trace.emit(AlignmentLogEvent("readiness.configuration", "desktop-standard-map-gate-v1",
             thresholds = mapOf("timeoutMs" to MapOpenReadiness.TIMEOUT_MS.toDouble(), "intervalMs" to MapOpenReadiness.INTERVAL_MS.toDouble(),
                 "color" to MapOpenReadiness.COLOR_THRESHOLD, "brightnessDelta" to MapOpenReadiness.BRIGHTNESS_LIMIT),
@@ -126,11 +129,12 @@ class MapOpenFrameCapture(
                         } else {
                             val (signature, decision) = assessed.getOrThrow()
                             previous = signature
-                            if (decision.ready) finish(Result.success(bitmap), signature)
+                            if (decision.ready && prepared.isEmpty()) finish(Result.success(bitmap), signature)
                             else {
                                 bitmap.recycle()
                                 val remaining = MapOpenReadiness.TIMEOUT_MS - (SystemClock.elapsedRealtime() - started)
-                                if (remaining <= 0) deadline.run() else handler.postDelayed(next, minOf(MapOpenReadiness.INTERVAL_MS, remaining))
+                                if (remaining <= 0) deadline.run() else handler.postDelayed(next,
+                                    if (prepared.isNotEmpty()) 0L else minOf(MapOpenReadiness.INTERVAL_MS, remaining))
                             }
                         }
                     }
@@ -139,13 +143,27 @@ class MapOpenFrameCapture(
                 }
             }
         }
-        abortCapture = captureFrame?.invoke(bounds, captured)
+        var reused: PreparedMapFrame? = null
+        while (prepared.isNotEmpty() && reused == null) {
+            val candidate = prepared.removeFirst()
+            val now = SystemClock.uptimeMillis()
+            val valid = candidate.isFreshFor(bounds, now)
+            trace.emit(AlignmentLogEvent("readiness.prepared-frame", if (valid) "reused-clean-detector-capture" else "discarded-stale-or-region-changed",
+                measurements = mapOf("attempt" to number.toDouble(), "captureStartedAtMs" to candidate.captureStartedAtMs.toDouble(),
+                    "captureReceivedAtMs" to candidate.captureReceivedAtMs.toDouble(), "ageMs" to (now - candidate.captureStartedAtMs).toDouble()),
+                thresholds = mapOf("maximumFrameAgeMs" to AutoMapOpenConfig().maximumFrameAgeMs.toDouble()),
+                labels = mapOf("ownership" to "unoccluded-map-viewport", "ageOrigin" to "capture-request-start-including-queue")))
+            if (valid) reused = candidate else candidate.recycle()
+        }
+        if (reused != null) captured(Result.success(reused.bitmap))
+        else abortCapture = captureFrame?.invoke(bounds, captured)
             ?: AccessibilityScreenCaptureService.capture(bounds, executor, captured, trace)
     }
 
     private fun finish(result: Result<Bitmap>, signature: MapFrameSignature? = null) {
         if (stopped) { result.getOrNull()?.recycle(); return }
         stopped = true; handler.removeCallbacks(next); handler.removeCallbacks(deadline)
+        while (prepared.isNotEmpty()) prepared.removeFirst().recycle()
         trace.emit(AlignmentLogEvent("readiness.total", if (result.isSuccess) "ready" else if (timeout) "timeout" else if (token.isCancelled) "cancelled" else "error",
             measurements = mapOf("attempts" to attempt.toDouble(), "cancelResponseMs" to if (token.isCancelled) (System.nanoTime() - token.requestedAtNanos) / 1e6 else 0.0),
             durationNanos = (SystemClock.elapsedRealtime() - started) * 1_000_000))

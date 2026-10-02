@@ -3,6 +3,9 @@ package com.idvb.android.recognize.structure
 import org.opencv.core.Mat
 import org.opencv.core.Rect
 
+internal const val LEGACY_REFERENCE_COVERAGE_DOMAIN = "whole-query-rectangle-legacy"
+internal const val QUERY_KNOWN_REFERENCE_COVERAGE_DOMAIN = "query-revealed-intersect-valid-per-pose-v1"
+
 data class StructureRegistrationTuning(
     val maximumChamferPixels: Double = 3.0,
     val minimumEdgeCoverage: Double = .40,
@@ -50,6 +53,11 @@ data class StructureCandidate(
     val compositeCost: Double,
     val isWithinValidBounds: Boolean,
     val usedGlobalSearch: Boolean,
+    val referenceCoverageDomain: String = LEGACY_REFERENCE_COVERAGE_DOMAIN,
+    val referenceKnownPixels: Int = 0,
+    val referenceUnknownPixels: Int = 0,
+    val referenceKnownOverlapPixels: Int = 0,
+    val queryKnownPixels: Int = 0,
 )
 
 data class StructureRegistrationResult(
@@ -71,9 +79,12 @@ data class StructureRegistrationResult(
 internal class StructureFeatures(
     val structureMask: Mat,
     val edges: Mat,
+    /** Owned query visibility mask; null preserves the legacy whole-rectangle coverage. */
+    val knownDomain: Mat? = null,
 ) : AutoCloseable {
     override fun close() {
         structureMask.release()
         edges.release()
+        knownDomain?.release()
     }
 }

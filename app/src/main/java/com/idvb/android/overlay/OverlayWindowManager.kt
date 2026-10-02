@@ -25,6 +25,20 @@ class OverlayWindowManager(private val context: Context) {
         // visibility changes/animations never temporarily exceed the shared UID budget.
         private val attached = mutableSetOf<OverlayWindowManager>()
 
+        /** Conservative bounds of visible independent overlay roots, in screen coordinates. */
+        fun visibleScreenBounds(excluding: Set<OverlayWindowManager> = emptySet()): List<android.graphics.RectF> =
+            attached.filter { it !in excluding && it.view?.let { view -> view.isShown && view.alpha > 0f } == true }
+                .map { manager ->
+                    val root = requireNotNull(manager.view)
+                    val location = IntArray(2).also(root::getLocationOnScreen)
+                    val w = root.width.takeIf { it > 0 } ?: manager.width.takeIf { it > 0 }
+                        ?: manager.context.resources.displayMetrics.widthPixels
+                    val h = root.height.takeIf { it > 0 } ?: manager.height.takeIf { it > 0 }
+                        ?: manager.context.resources.displayMetrics.heightPixels
+                    android.graphics.RectF(location[0].toFloat(), location[1].toFloat(),
+                        (location[0] + w).toFloat(), (location[1] + h).toFloat())
+                }
+
         private fun refreshTouchOpacity() {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
             val passive = attached.filter { it.isTouchThrough }
@@ -86,7 +100,17 @@ class OverlayWindowManager(private val context: Context) {
         }
     }
 
+    private class SurfaceAccessibilityDelegate(private val previous: View.AccessibilityDelegate?) : View.AccessibilityDelegate() {
+        override fun onInitializeAccessibilityEvent(host: View, event: android.view.accessibility.AccessibilityEvent) {
+            if (previous != null) previous.onInitializeAccessibilityEvent(host, event)
+            else super.onInitializeAccessibilityEvent(host, event)
+            event.className = "com.idvb.android.overlay.Surface"
+        }
+    }
+
     fun add(v: View, locked: Boolean, focusable: Boolean = false) {
+        if (v.accessibilityDelegate !is SurfaceAccessibilityDelegate)
+            v.accessibilityDelegate = SurfaceAccessibilityDelegate(v.accessibilityDelegate)
         remove()
         isTouchThrough = locked
         attached.add(this)

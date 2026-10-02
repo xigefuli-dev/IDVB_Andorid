@@ -1,6 +1,8 @@
 package com.idvb.android.recognize.side
 
 import com.idvb.android.recognize.cv.CvImages
+import com.idvb.android.recognize.vpsg.VpsgAlignmentTuning
+import com.idvb.android.recognize.vpsg.VpsgLiveExtractor
 import org.opencv.core.*
 import org.opencv.imgproc.Imgproc
 import java.io.File
@@ -14,18 +16,36 @@ internal object SparseGateSearch {
     data class Pose(val scale: Double, val x: Double, val y: Double, val score: Double = 0.0, val gate: Int = 0)
     data class Evidence(val support: Double, val mean: Double, val longest: Double,
         val spatialConflict: Boolean, val total: Int, val cells: Int,
-        val conflictDetail: String = "") {
-        val supported get() = total >= 80 && support >= .88 && !spatialConflict && longest < 30
-        val cost get() = mean + (1 - support) * 5
+        val conflictDetail: String = "", val reverseSupport: Double = 0.0,
+        val reversePoints: Int = 0, val reverseEligiblePoints: Int = 0,
+        val reverseRequired: Boolean = false) {
+        val rejectionCode get() = when {
+            total < 80 -> "insufficient-live-points"
+            support < .88 -> "visible-support"
+            spatialConflict -> "spatial-support-conflict"
+            longest >= 30 -> "longest-conflict"
+            reverseRequired && reversePoints < VpsgAlignmentTuning.MIN_TESTED_POINTS -> "insufficient-visible-reference-points"
+            reverseRequired && reverseSupport < VpsgAlignmentTuning.MIN_REVERSE_SUPPORT -> "visible-reference-conflict"
+            else -> ""
+        }
+        val supported get() = rejectionCode.isEmpty()
+        val bidirectionalSupport get() = if (reverseRequired) min(support,reverseSupport) else support
+        val cost get() = mean + (1 - bidirectionalSupport) * 5
     }
     class Index(val width: Int, val height: Int, private val distances: ByteArray,
-        private val excluded: ByteArray? = null) {
+        private val excluded: ByteArray? = null, val edgePositions: IntArray = intArrayOf()) {
         companion object {
             private val decoded = DoubleArray(256) { value ->
                 if (value <= 128) value/16.0 else (value-112)/2.0
             }
         }
-        val bytes get() = distances.size + (excluded?.size ?: 0)
+        val bytes get() = distances.size + (excluded?.size ?: 0) + edgePositions.size*4
+        fun copyEdgesTo(target: Mat) {
+            target.create(height,width,CvType.CV_8UC1)
+            val bytes=ByteArray(width*height)
+            for (position in edgePositions) bytes[position]=255.toByte()
+            target.put(0,0,bytes)
+        }
         fun observable(x: Double, y: Double): Boolean {
             if (x < 0 || y < 0 || x >= width || y >= height) return true
             return excluded?.get(y.toInt()*width+x.toInt())?.toInt() == 0 || excluded == null
@@ -137,8 +157,55 @@ internal object SparseGateSearch {
             Core.compare(distances, Scalar(8.0), mask, Core.CMP_GT)
             coarse.copyTo(encoded, mask)
             return Index(line.cols(), line.rows(), ByteArray(line.cols()*line.rows()).also { encoded.get(0,0,it) },
-                excluded?.let { source -> ByteArray(line.cols()*line.rows()).also { source.get(0,0,it) } })
+                excluded?.let { source -> ByteArray(line.cols()*line.rows()).also { source.get(0,0,it) } },
+                ByteArray(line.cols()*line.rows()).also { line.get(0,0,it) }.let { bytes ->
+                    val positions=IntArray(bytes.count { (it.toInt() and 255) > 128 }); var at=0
+                    for (i in bytes.indices) if ((bytes[i].toInt() and 255) > 128) positions[at++]=i
+                    positions
+                })
         } finally { inverse.release(); distances.release(); encoded.release(); coarse.release(); mask.release() }
+    }
+    /** Reverse evidence is restricted to independently revealed, valid live pixels.
+     * Fog, occlusion and masked icons never become missing-reference-wall evidence. */
+    class ReverseObservation(live: VpsgLiveExtractor.Observation) {
+        val width = live.edges.cols(); val height = live.edges.rows()
+        val domain = ByteArray(width*height).also { requireNotNull(live.revealed).get(0,0,it) }
+        private val distances: FloatArray
+        init {
+            val inverse = Mat(); val distance = Mat()
+            try {
+                Core.bitwise_not(live.edges,inverse)
+                Imgproc.distanceTransform(inverse,distance,Imgproc.DIST_L2,Imgproc.DIST_MASK_PRECISE)
+                distances = FloatArray(width*height).also { distance.get(0,0,it) }
+            } finally { inverse.release(); distance.release() }
+        }
+        fun distance(x: Double,y: Double): Double {
+            if (x < 0 || y < 0 || x >= width-1 || y >= height-1) return 50.0
+            val ix=x.toInt(); val iy=y.toInt(); val fx=x-ix; val fy=y-iy; val at=iy*width+ix
+            return (distances[at]*(1-fx)+distances[at+1]*fx)*(1-fy) +
+                (distances[at+width]*(1-fx)+distances[at+width+1]*fx)*fy
+        }
+    }
+    private fun reverseEvidence(index: Index,pose: Pose,live: ReverseObservation,evidence: Evidence): Evidence {
+        val eligible=IntArray(index.edgePositions.size); var count=0
+        for (position in index.edgePositions) {
+            val rx=position%index.width; val ry=position/index.width
+            if (!index.observable(rx.toDouble(),ry.toDouble())) continue
+            val x=rx*pose.scale+pose.x; val y=ry*pose.scale+pose.y
+            val ix=x.roundToInt(); val iy=y.roundToInt()
+            if (ix !in 0 until live.width || iy !in 0 until live.height ||
+                (live.domain[iy*live.width+ix].toInt() and 255) <= 128) continue
+            eligible[count++]=position
+        }
+        val tested=min(2048,count); var hits=0
+        for (i in 0 until tested) {
+            val position=eligible[i*count/tested]
+            val x=(position%index.width)*pose.scale+pose.x
+            val y=(position/index.width)*pose.scale+pose.y
+            if (live.distance(x,y) <= VpsgAlignmentTuning.DISTANCE_TOLERANCE) hits++
+        }
+        return evidence.copy(reverseSupport=if (tested==0) 0.0 else hits.toDouble()/tested,
+            reversePoints=tested,reverseEligiblePoints=count,reverseRequired=true)
     }
     fun pixels(edges: Mat): List<Pixel> {
         val width = edges.cols()
@@ -171,7 +238,7 @@ internal object SparseGateSearch {
         } finally { raw.forEach { it.release() }; hierarchy.release(); copy.release() }
     }
     fun verify(index: Index, pose: Pose, points: List<Pixel>, contours: List<List<Pixel>>, width: Int, height: Int,
-        acceptanceOnly: Boolean = false): Evidence {
+        acceptanceOnly: Boolean = false, reverse: ReverseObservation? = null): Evidence {
         if (!pose.scale.isFinite() || pose.scale <= 0 || !pose.x.isFinite() || !pose.y.isFinite() || width <= 0 || height <= 0)
             return Evidence(0.0,50.0,0.0,true,0,0,"invalid-transform")
         var hits = 0; var sum = 0.0; var evaluated = 0
@@ -214,11 +281,12 @@ internal object SparseGateSearch {
             }
             if (longest >= 30) break
         }
-        return Evidence(if (evaluated == 0) 0.0 else hits.toDouble()/evaluated,
+        val evidence = Evidence(if (evaluated == 0) 0.0 else hits.toDouble()/evaluated,
             if (evaluated == 0) 50.0 else sum/evaluated, longest,
             spatial || contours.isEmpty() || evaluated < points.size * .5, evaluated, totals.indices.count { totals[it] >= 30 && supported[it] >= totals[it]*.70 },
             conflictDetail + " cells=" + totals.indices.filter { totals[it] >= 30 && supported[it] < totals[it]*.70 }
                 .joinToString { "$it:${supported[it]}/${totals[it]}" })
+        return if (reverse == null) evidence else reverseEvidence(index,pose,reverse,evidence)
     }
     fun search(index: Index, points: List<Pixel>, ax: Double, ay: Double, gx: Double, gy: Double,
         minimum: Double, maximum: Double, gate: Int): List<Pose> {
@@ -260,7 +328,8 @@ internal object SparseGateSearch {
     }
     fun refine(index: Index, seed: Pose, sample: List<Pixel>, dense: List<Pixel>, contours: List<List<Pixel>>,
         width: Int, height: Int, ax: Double, ay: Double, gx: Double, gy: Double,
-        minimum: Double, maximum: Double, maximumGateResidual: Double = 42.0): Pair<Pose,Evidence>? {
+        minimum: Double, maximum: Double, maximumGateResidual: Double = 42.0,
+        reverse: ReverseObservation? = null): Pair<Pose,Evidence>? {
         data class Proposal(val pose: Pose, val hits: Int, val distance: Double)
         val proposals = ArrayList<Proposal>()
         val ordering = compareByDescending<Proposal> { it.hits }.thenBy { it.distance }
@@ -295,7 +364,7 @@ internal object SparseGateSearch {
             proposals += scaleProposals
         }
         for (p in proposals.sortedWith(compareByDescending<Proposal> { it.hits }.thenBy { it.distance })) {
-            val evidence = verify(index,p.pose,dense,contours,width,height,acceptanceOnly=true)
+            val evidence = verify(index,p.pose,dense,contours,width,height,acceptanceOnly=true,reverse=reverse)
             if (evidence.supported) return p.pose to evidence
         }
         return null

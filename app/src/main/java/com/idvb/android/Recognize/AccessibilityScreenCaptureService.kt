@@ -18,18 +18,33 @@ import com.idvb.android.alignment.emit
 class AccessibilityScreenCaptureService : AccessibilityService() {
     override fun onServiceConnected() {
         instance = this
+        foregroundPackage = null
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
-    override fun onInterrupt() = Unit
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+        // Overlay views are our UI above the game, not a change of the underlying app.
+        if (event.className?.toString()?.startsWith("com.idvb.android.overlay.") == true) return
+        val updated = event.packageName?.toString()
+        if (updated != foregroundPackage) android.util.Log.i("IDVB-Foreground",
+            "previous=$foregroundPackage package=$updated class=${event.className} window=${event.windowId}")
+        foregroundPackage = updated
+    }
+    override fun onInterrupt() { foregroundPackage = null }
 
     override fun onDestroy() {
-        if (instance === this) instance = null
+        if (instance === this) { instance = null; foregroundPackage = null }
         super.onDestroy()
     }
 
     companion object {
         @Volatile private var instance: AccessibilityScreenCaptureService? = null
+        @Volatile var foregroundPackage: String? = null
+            private set
+        // Shared by detection, readiness and scan. Android platform baseline is 333ms;
+        // retain a small scheduling margin rather than causing request-local retry storms.
+        private var lastScreenshotAttemptMs = 0L
+        private const val MIN_SCREENSHOT_INTERVAL_MS = 350L
         val available: Boolean get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && instance != null
 
         fun click(x: Float, y: Float, callback: (Boolean) -> Unit) {
@@ -79,9 +94,12 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
                     callback(Result.failure(IllegalStateException("无障碍截图响应超时，请检查无障碍服务")))
                 }
             }
+            var scheduledAttempt: Runnable? = null
             fun finish(result: Result<Bitmap>) {
                 if (completed.compareAndSet(false, true)) {
                     retries.stop()
+                    scheduledAttempt?.let(handler::removeCallbacks)
+                    scheduledAttempt = null
                     handler.removeCallbacks(timeout)
                     callback(result)
                 } else result.getOrNull()?.recycle()
@@ -89,14 +107,16 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
             handler.postDelayed(timeout, 3_000L)
             var attemptNumber = 0
             var attemptStarted = 0L
+            var attemptStartUptimeMs = 0L
             lateinit var attempt: () -> Unit
             val screenshotCallback = object : TakeScreenshotCallback {
                 override fun onSuccess(result: ScreenshotResult) {
                     if (completed.get()) { result.hardwareBuffer.close(); return }
                     log.emit(AlignmentLogEvent("capture.accessibility.attempt", "captured",
-                        measurements = mapOf("attempt" to attemptNumber.toDouble()),
+                        measurements = mapOf("attempt" to attemptNumber.toDouble(), "attemptStartUptimeMs" to attemptStartUptimeMs.toDouble()),
                         durationNanos = System.nanoTime() - attemptStarted))
-                    runCatching {
+                    val conversionStarted = System.nanoTime()
+                    val converted = runCatching {
                         val buffer = result.hardwareBuffer
                         try {
                             val hardwareBitmap = Bitmap.wrapHardwareBuffer(buffer, result.colorSpace)
@@ -120,13 +140,17 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
                         } finally {
                             buffer.close()
                         }
-                    }.also(::finish)
+                    }
+                    log.emit(AlignmentLogEvent("capture.accessibility.convert-and-crop", if (converted.isSuccess) "completed" else "failed",
+                        durationNanos = System.nanoTime() - conversionStarted,
+                        measurements = mapOf("width" to region.width().toDouble(), "height" to region.height().toDouble())))
+                    finish(converted)
                 }
 
                 override fun onFailure(errorCode: Int) {
                     if (completed.get()) return
                     log.emit(AlignmentLogEvent("capture.accessibility.attempt", "error-$errorCode",
-                        measurements = mapOf("attempt" to attemptNumber.toDouble(), "errorCode" to errorCode.toDouble()),
+                        measurements = mapOf("attempt" to attemptNumber.toDouble(), "errorCode" to errorCode.toDouble(), "attemptStartUptimeMs" to attemptStartUptimeMs.toDouble()),
                         durationNanos = System.nanoTime() - attemptStarted))
                     if (errorCode == ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT) {
                         val waiting = System.nanoTime()
@@ -147,14 +171,32 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
             }
             attempt = {
                 if (!completed.get()) {
+                    val now = android.os.SystemClock.uptimeMillis()
+                    val delay = MIN_SCREENSHOT_INTERVAL_MS - (now - lastScreenshotAttemptMs)
+                    if (delay > 0) {
+                        val waitingAt = System.nanoTime()
+                        scheduledAttempt = Runnable {
+                            scheduledAttempt = null
+                            log.emit(AlignmentLogEvent("capture.accessibility.reservation-wait", "shared-screenshot-interval",
+                                durationNanos = System.nanoTime() - waitingAt, measurements = mapOf("scheduledDelayMs" to delay.toDouble()),
+                                thresholds = mapOf("minimumScreenshotIntervalMs" to MIN_SCREENSHOT_INTERVAL_MS.toDouble())))
+                            attempt()
+                        }
+                        handler.postDelayed(scheduledAttempt!!, delay)
+                    } else {
+                    lastScreenshotAttemptMs = now
+                    attemptStartUptimeMs = now
                     attemptStarted = System.nanoTime(); attemptNumber++
                     runCatching {
                         if (!com.idvb.android.UsageConsent.isAccepted(service)) error("请先打开 IDVB 并确认使用责任声明")
                         service.takeScreenshot(Display.DEFAULT_DISPLAY, executor, screenshotCallback)
                     }.onFailure { finish(Result.failure(it)) }
+                    }
                 }
             }
-            attempt()
+            // Serialize interval reservations on the main looper, including worker callers.
+            scheduledAttempt = Runnable { scheduledAttempt = null; attempt() }
+            handler.post(scheduledAttempt!!)
             // Android cannot revoke an in-flight screenshot binder call. Stop timeout/crop work,
             // acknowledge immediately, and close any late HardwareBuffer without decoding it.
             return {

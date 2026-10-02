@@ -20,6 +20,15 @@
     <!-- 电池优化白名单（国产系统保活） -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- 允许查询并拉起外部浏览器打开网页链接（如赞助页面等） -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
+        </intent>
+    </queries>
+
     <application
         android:name=".IDVBApp"
         android:allowBackup="true"
@@ -29,6 +38,7 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
+        android:largeHeap="true"
         android:theme="@style/Theme.IDVBForAndroid">
 
         <activity

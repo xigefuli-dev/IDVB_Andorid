@@ -16,6 +16,7 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
     interface Listener {
         fun onAssistTouch() {}
         fun useAssistTouchToggle(): Boolean = false
+        fun onConfigureAutoReference() {}
         fun onResetMap() {}
         fun onChooseMapClass() {}
         fun onOpenGuide() {}
@@ -43,15 +44,27 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
         listener?.onCloseGuide()
     }
     private val captureAlphas = mutableMapOf<TextView, Float>()
+    private var captureHidden = false
+
+    internal fun captureControls(): List<Pair<String, View>> =
+        buttons.map { (id, button) -> id to button } + ("more" to moreButton)
+
+    private fun presentAlpha(button: TextView, value: Float) {
+        if (captureHidden) {
+            captureAlphas[button] = value
+            button.alpha = 0f
+        } else button.alpha = value
+    }
 
     /** Hide capture-contaminating pixels while retaining hit targets for an immediate second tap. */
     fun setCaptureHidden(hidden: Boolean, captureBounds: android.graphics.Rect? = null) {
         if (hidden) closeMenu()
+        captureHidden = hidden
+        // Independent button windows may still be laying out or moving. Their old screen
+        // coordinates cannot determine which surface will overlap the next captured frame.
+        // All controls retain their hit targets while their pixels remain hidden.
         (buttons.values + moreButton).forEach { button ->
-            val location = IntArray(2).also(button::getLocationOnScreen)
-            val overlaps = captureBounds == null || android.graphics.Rect.intersects(captureBounds,
-                android.graphics.Rect(location[0], location[1], location[0] + button.width, location[1] + button.height))
-            if (hidden && overlaps) {
+            if (hidden) {
                 captureAlphas.putIfAbsent(button, button.alpha)
                 button.alpha = 0f
             } else captureAlphas.remove(button)?.let { button.alpha = it }
@@ -78,7 +91,7 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
             field = value
             updateEyePresentation()
             floorButton.isEnabled = true
-            floorButton.alpha = if (value) 1f else .32f
+            presentAlpha(floorButton, if (value) 1f else .32f)
         }
     var candidatesAvailable: Boolean = false
         set(value) {
@@ -121,7 +134,7 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
             menuExpanded = !menuExpanded
             listener?.onMenuExpanded(menuExpanded)
         }; row.addView(moreButton)
-        variantButton = ball("variant", "⇄", "切换地图变体") { listener?.onNextVariant() }.apply { visibility = View.GONE }; row.addView(variantButton)
+        variantButton = ball("variant", "⇆", "切换地图变体") { listener?.onNextVariant() }.apply { visibility = View.GONE }; row.addView(variantButton)
         addView(row)
         morePanel = LinearLayout(context).apply {
             orientation = VERTICAL; gravity = Gravity.END; setPadding(0, dp(6), 0, 0)
@@ -130,7 +143,7 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
             addView(menuItem("✥", "小抄显示调整") { listener?.onFreeAdjust() })
             addView(menuItem("⚙", "悬浮窗布局调整") { customLayout?.begin("search") })
             addView(menuItem("▣", "校准显示区域") { listener?.onCalibrate() })
-            addView(menuItem("◎", "辅助触控") { listener?.onAssistTouch() })
+            addView(menuItem("◉", "设置开图参照") { listener?.onConfigureAutoReference() })
             addView(menuItem("↺", "重设地图") { listener?.onResetMap() })
             addView(menuItem("⏻", "关闭悬浮窗") { listener?.onClose() })
         }
@@ -141,7 +154,7 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
     private fun updateEyePresentation() {
         val enabled = mapLocked || candidatesAvailable
         eyeButton.isEnabled = true
-        eyeButton.alpha = if (enabled) 1f else .32f
+        presentAlpha(eyeButton, if (enabled) 1f else .32f)
         eyeButton.contentDescription = if (candidatesAvailable) "查看候选地图" else "显示攻略地图"
     }
 
@@ -171,6 +184,7 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
         var downRawY = 0f
         var dragging = false
         var holdGesture = false
+        var clickAvailableAtDown = false
         var activePointerId = MotionEvent.INVALID_POINTER_ID
         var multiTouch = false
         val scaleDetector = android.view.ScaleGestureDetector(context,
@@ -193,6 +207,12 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
                     downRawX = event.rawX; downRawY = event.rawY
                     dragging = false; multiTouch = false
                     activePointerId = event.getPointerId(0)
+                    // A control that was unavailable at press time cannot activate when a scan finishes mid-gesture.
+                    clickAvailableAtDown = when (id) {
+                        "eye" -> mapLocked || candidatesAvailable
+                        "floor" -> mapLocked
+                        else -> true
+                    }
                     // Latch the mode for this gesture, even if preferences change before release.
                     holdGesture = id == "eye" && operationPrefs.holdToActivateEnabled && customLayout?.editing != true && listener?.useAssistTouchToggle() != true
                     if (holdGesture && (mapLocked || candidatesAvailable)) {
@@ -217,8 +237,9 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
                 }
                 MotionEvent.ACTION_UP -> {
                     if (holdGesture) releaseEye()
-                    else if (!dragging && !multiTouch && customLayout?.editing != true) { view.performClick(); click() }
+                    else if (clickAvailableAtDown && !dragging && !multiTouch && customLayout?.editing != true) { view.performClick(); click() }
                     holdGesture = false
+                    clickAvailableAtDown = false
                     true
                 }
                 MotionEvent.ACTION_POINTER_UP -> {
@@ -238,6 +259,7 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
                 MotionEvent.ACTION_CANCEL -> {
                     if (holdGesture) releaseEye()
                     holdGesture = false
+                    clickAvailableAtDown = false
                     true
                 }
                 else -> false
@@ -272,4 +294,137 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
         }
     }
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+}
+
+/** Wait for every independent overlay surface changed by this request. */
+internal class OverlayCaptureFrameBarrier(
+    private val handler: android.os.Handler,
+    private val views: List<Pair<String, View>>,
+    private val current: () -> Boolean,
+    private val log: com.idvb.android.alignment.AlignmentLogSink,
+    private val completed: (Boolean) -> Unit,
+) {
+    private class Pending(val root: View, val observer: android.view.ViewTreeObserver) {
+        var draw: android.view.ViewTreeObserver.OnDrawListener? = null
+        var commit: Runnable? = null
+        var detach: View.OnAttachStateChangeListener? = null
+        var signal: Runnable? = null
+        var queued = false
+        var done = false
+    }
+    private val pending = mutableListOf<Pending>()
+    @Volatile private var active = true
+    private var releaseFrame: android.view.Choreographer.FrameCallback? = null
+    private val started = System.nanoTime()
+
+    fun start() {
+        check(android.os.Looper.myLooper() == handler.looper)
+        views.forEach { (id, view) ->
+            val position = IntArray(2).also(view::getLocationOnScreen)
+            record(com.idvb.android.alignment.AlignmentLogEvent("capture.overlay-hidden-control", id,
+                measurements = mapOf("x" to position[0].toDouble(), "y" to position[1].toDouble(),
+                    "width" to view.width.toDouble(), "height" to view.height.toDouble(), "alpha" to view.alpha.toDouble(),
+                    "visibility" to view.visibility.toDouble()),
+                labels = mapOf("attached" to view.isAttachedToWindow.toString(),
+                    "root" to System.identityHashCode(view.rootView).toString())))
+        }
+        views.map { it.second.rootView }.distinct().filter { it.isAttachedToWindow }.forEach { root ->
+            pending += Pending(root, root.viewTreeObserver)
+        }
+        record(com.idvb.android.alignment.AlignmentLogEvent("capture.overlay-render-barrier", "waiting-for-each-root",
+            measurements = mapOf("roots" to pending.size.toDouble(), "controls" to views.size.toDouble())))
+        if (pending.isEmpty()) { afterAllRoots(); return }
+        pending.forEachIndexed { index, entry ->
+            val root = entry.root
+            fun signal(method: String) {
+                if (!active) return
+                val action = entry.signal ?: return
+                record(com.idvb.android.alignment.AlignmentLogEvent("capture.overlay-root-rendered", method,
+                    measurements = mapOf("rootIndex" to index.toDouble()),
+                    labels = mapOf("root" to System.identityHashCode(entry.root).toString())))
+                handler.post(action)
+            }
+            entry.signal = Runnable {
+                if (!active || entry.done) return@Runnable
+                if (!current()) { finish(false); return@Runnable }
+                entry.done = true
+                remove(entry)
+                if (pending.all { it.done }) afterAllRoots()
+            }
+            entry.detach = object : View.OnAttachStateChangeListener {
+                override fun onViewAttachedToWindow(v: View) = Unit
+                override fun onViewDetachedFromWindow(v: View) {
+                    if (active) {
+                        record(com.idvb.android.alignment.AlignmentLogEvent("capture.overlay-root-detached", index.toString()))
+                        finish(false)
+                    }
+                }
+            }.also(root::addOnAttachStateChangeListener)
+            if (android.os.Build.VERSION.SDK_INT >= 29 && root.isHardwareAccelerated) {
+                entry.commit = Runnable { signal("hardware-frame-commit") }
+                entry.observer.registerFrameCommitCallback(entry.commit!!)
+            } else {
+                entry.draw = android.view.ViewTreeObserver.OnDrawListener {
+                    if (active && !entry.queued) {
+                        entry.queued = true
+                        signal("software-draw-next-ui-frame")
+                    }
+                }.also(entry.observer::addOnDrawListener)
+            }
+            // setVisibility/alpha already invalidated these previously shown roots. Request
+            // traversal explicitly as well, including the transparent guide and notification roots.
+            root.requestLayout()
+            root.invalidate()
+        }
+    }
+
+    private fun afterAllRoots() {
+        if (!active) return
+        // A draw callback precedes software buffer submission. Cross the next UI
+        // frame only after every window has drawn or committed its own hidden state.
+        val frame = android.view.Choreographer.FrameCallback {
+            releaseFrame = null
+            handler.post { if (active) finish(current()) }
+        }
+        releaseFrame = frame
+        android.view.Choreographer.getInstance().postFrameCallback(frame)
+    }
+
+    private fun remove(entry: Pending) {
+        if (entry.observer.isAlive) {
+            entry.draw?.let(entry.observer::removeOnDrawListener)
+            if (android.os.Build.VERSION.SDK_INT >= 29) entry.commit?.let(entry.observer::unregisterFrameCommitCallback)
+        }
+        entry.detach?.let(entry.root::removeOnAttachStateChangeListener)
+        entry.signal?.let(handler::removeCallbacks)
+    }
+
+    private fun finish(success: Boolean) {
+        if (!active) return
+        active = false
+        cleanup()
+        record(com.idvb.android.alignment.AlignmentLogEvent("capture.overlay-render-complete",
+            if (success) "all-roots-rendered" else "invalidated-before-capture",
+            measurements = mapOf("roots" to pending.size.toDouble(), "renderedRoots" to pending.count { it.done }.toDouble()),
+            durationNanos = System.nanoTime() - started))
+        completed(success)
+    }
+
+    fun cancel() {
+        if (!active) return
+        active = false
+        cleanup()
+        record(com.idvb.android.alignment.AlignmentLogEvent("capture.overlay-render-cancelled",
+            durationNanos = System.nanoTime() - started))
+    }
+
+    private fun cleanup() {
+        releaseFrame?.let { android.view.Choreographer.getInstance().removeFrameCallback(it) }
+        releaseFrame = null
+        pending.forEach(::remove)
+    }
+
+    private fun record(event: com.idvb.android.alignment.AlignmentLogEvent) {
+        if (log.enabled) runCatching { log.record(event) }
+    }
 }

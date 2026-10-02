@@ -6,4 +6,7 @@
     <files-path
         name="session_diagnostics"
         path="idvb/diagnostics/sessions/" />
+    <cache-path
+        name="feedback_export"
+        path="feedback-export/" />
 </paths>

@@ -182,7 +182,9 @@ class RecognitionDiagnosticsStore(context: Context) {
         }
         result.sparseGateDiagnostics?.let { scan ->
             put("sparseGateScan", buildJsonObject {
-                put("referenceEvidence", "recognition-structure+prebuilt-lines-v2")
+                put("referenceEvidence", "prepared-reference-only-binary+visibility-scoped-reverse-v3")
+                put("wallObservationPolicy",scan.wallObservationPolicy)
+                put("formalInputPolicy",scan.formalInputPolicy)
                 put("identitySelectionPolicy", "single-explicit-variant-family-minimum-structure-cost")
                 put("elapsedMilliseconds", scan.elapsedMilliseconds)
                 put("preparationMilliseconds", scan.preparationMilliseconds)
@@ -203,6 +205,46 @@ class RecognitionDiagnosticsStore(context: Context) {
                         put("longestConflictPixels", floor.longestConflictPixels)
                         put("spatialConflict", floor.spatialConflict)
                         put("supported", floor.supported)
+                        put("forwardPoints", floor.forwardPoints)
+                        put("reverseSupportedFraction", floor.reverseSupportedFraction)
+                        put("reversePoints", floor.reversePoints)
+                        put("reverseEligiblePoints", floor.reverseEligiblePoints)
+                        put("decisionReason", floor.decisionReason)
+                        put("hypothesisCoordinateDomain", "processing-screen-pixels")
+                        put("hypotheses", buildJsonArray { floor.hypotheses.forEach { add(sparsePose(it)) } })
+                        put("formalAttempts", buildJsonArray { floor.formalAttempts.forEach { attempt -> add(buildJsonObject {
+                            put("seedHypothesisIndex",attempt.seedHypothesisIndex)
+                            put("seed",sparsePose(attempt.seed))
+                            put("checked",attempt.checked?.let(::sparsePose) ?: JsonNull)
+                            putFinite("registrationMilliseconds",attempt.elapsedMilliseconds)
+                            putFinite("verificationMilliseconds",attempt.verificationMilliseconds)
+                            put("registrationAccepted",attempt.registrationAccepted)
+                            put("registrationRejectionReason",attempt.registrationRejectionReason)
+                            put("registrationFailureReason",attempt.registrationFailureReason)
+                            put("verificationFailureReason",attempt.verificationFailureReason)
+                            put("usedGlobalRecovery",attempt.usedGlobalRecovery)
+                            putFinite("registrationCandidateMargin",attempt.registrationCandidateMargin)
+                            put("accepted",attempt.accepted)
+                            put("decisionReason",attempt.decisionReason)
+                            put("registrationBest",attempt.registrationBest?.let { candidate -> buildJsonObject {
+                                putFinite("scale",candidate.scale)
+                                put("referenceX",candidate.referenceX); put("referenceY",candidate.referenceY)
+                                putFinite("offsetX",candidate.offsetX); putFinite("offsetY",candidate.offsetY)
+                                putFinite("chamferPixels",candidate.chamferPixels)
+                                putFinite("edgeCoverage",candidate.edgeCoverage)
+                                putFinite("occupancyCoverage",candidate.occupancyCoverage)
+                                putFinite("referenceCoverage",candidate.referenceCoverage)
+                                put("referenceCoverageDomain",candidate.referenceCoverageDomain)
+                                put("referenceKnownPixels",candidate.referenceKnownPixels)
+                                put("referenceUnknownPixels",candidate.referenceUnknownPixels)
+                                put("referenceKnownOverlapPixels",candidate.referenceKnownOverlapPixels)
+                                put("queryKnownPixels",candidate.queryKnownPixels)
+                                put("consistentPartitions",candidate.consistentPartitions)
+                                putFinite("compositeCost",candidate.compositeCost)
+                                put("isWithinValidBounds",candidate.isWithinValidBounds)
+                                put("usedGlobalSearch",candidate.usedGlobalSearch)
+                            } } ?: JsonNull)
+                        }) } })
                     }) }
                 })
             })
@@ -281,6 +323,10 @@ class RecognitionDiagnosticsStore(context: Context) {
                     putFinite("structureOffsetX", candidate.structureOffsetX)
                     putFinite("structureOffsetY", candidate.structureOffsetY)
                     putNullable("structureRejectionReason", candidate.structureRejectionReason?.name)
+                    put("structureForwardPoints", candidate.structureForwardPoints)
+                    put("structureReversePoints", candidate.structureReversePoints)
+                    put("structureReverseEligiblePoints", candidate.structureReverseEligiblePoints)
+                    putNullable("structureDecisionReason", candidate.structureDecisionReason)
                     put("usedStructureGlobalRecovery", candidate.usedStructureGlobalRecovery)
                     putFinite("structureElapsedMilliseconds", candidate.structureElapsedMilliseconds)
                     putFinite("matchScale", candidate.matchScale)
@@ -301,6 +347,15 @@ class RecognitionDiagnosticsStore(context: Context) {
         })
     }
 
+}
+
+private fun sparsePose(pose: SparseGateHypothesisEvidence): JsonObject = buildJsonObject {
+    putFinite("scale",pose.scale); putFinite("offsetX",pose.offsetX); putFinite("offsetY",pose.offsetY)
+    put("gateIndex",pose.gateIndex); putFinite("gateResidualPixels",pose.gateResidualPixels)
+    putFinite("forwardSupport",pose.forwardSupport); putFinite("reverseSupport",pose.reverseSupport)
+    put("forwardPoints",pose.forwardPoints); put("reversePoints",pose.reversePoints)
+    putFinite("meanDistancePixels",pose.meanDistancePixels); putFinite("longestConflictPixels",pose.longestConflictPixels)
+    put("spatialConflict",pose.spatialConflict); put("rejectionCode",pose.rejectionCode)
 }
 
 private fun kotlinx.serialization.json.JsonObjectBuilder.putFinite(name: String, value: Double) {

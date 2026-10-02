@@ -102,10 +102,14 @@ class IdvmImporterTest {
 
     @Test
     fun `变体组按清单顺序循环切换`() {
-        val catalog = MapCatalogDocument(variantGroups = listOf(
-            MapVariantGroupRecord("group", "class", 0, listOf("a", "b", "c"))
-        ))
+        val group = MapVariantGroupRecord("group", "class", 0, listOf("a", "b", "c"))
+        val catalog = MapCatalogDocument(variantGroups = listOf(group))
+        assertEquals(group, catalog.findVariantGroup("a"))
+        assertEquals(group, catalog.findVariantGroup("b"))
+        assertEquals(group, catalog.findVariantGroup("c"))
+        assertEquals(null, catalog.findVariantGroup("missing"))
         assertEquals("b", catalog.nextVariantMapId("a"))
+        assertEquals("c", catalog.nextVariantMapId("b"))
         assertEquals("a", catalog.nextVariantMapId("c"))
         assertEquals(null, catalog.nextVariantMapId("missing"))
     }

@@ -14,14 +14,21 @@ enum class TutorialStep(val title: String, val instructions: String, val hint: S
     LOBBY("进入加页手记", "正式使用时，回到桌面后打开第五人格，再进入加页手记。这里先用模拟场景练一遍：点画面中的“进入加页手记”，看到对局大厅后点“检查”。", "请先点模拟画面中的“进入加页手记”。"),
     PACKAGE("选用地图包", "点悬浮按钮“…”→“选择地图包”，在旁边展开的列表里点本局要用的地图包。选中后子菜单会收起；切换地图包后请重新扫描。这里先选择“S0 厄运之女 · 困难（示例）”。", "请在“…”旁的子菜单里点“S0 厄运之女 · 困难（示例）”。"),
     CALIBRATE("首次使用先校准地图", "先点“打开游戏地图”。再点悬浮按钮“…”→“校准显示区域”。用手指从地图显示范围的左上角拖到右下角，把整块地图画布框住，不要框进左侧队友和右侧按钮。点“确认并保存”，再检查。", "请打开地图，在“…”里选择“校准显示区域”，框好地图的完整显示范围并保存。"),
+    @Deprecated("已取消注册辅助触控教程步骤")
     ASSIST_TOUCH("设置开图和关图位置", "点“…”→“辅助触控”，从下方键库把“打开”和“关闭”分别拖到对应的游戏按钮位置（左上角小地图与右上角关闭键）。右侧可重置或确认。两个键平时隐藏；正式使用时开启“按住激活”，点击 👁 开图、再次点击关图。这里的练习不会覆盖正式位置。", "请将“打开”拖到左上角小地图、“关闭”拖到右上角关闭键，再点确认。"),
     ENTER("试试从侧门进入", "校准已经练过了。点“从侧门入场”，再点门口的“进入场景”。进入后点“打开游戏地图”。每次扫描前，都要先把游戏里的地图打开。", "请依次点“从侧门入场”“进入场景”“打开游戏地图”。"),
     SCAN("让 IDVB 找地图", "游戏地图已经打开。现在点悬浮按钮“🔍”，等提示扫描完成。这里的扫描是练习结果；真正游戏里会根据你打开的地图画面进行识别。", "请点“🔍”完成一次练习扫描。"),
     SELECT("选中本局地图", "点“👁”打开地图候选列表。对照画面里的房间和走廊，选与本局一致的那张图。练习中请选“本局地图 · A”。选中后列表会收起。", "请点“👁”打开候选列表，再选“本局地图 · A”。"),
-    SHOW("把攻略图显示出来", "选好地图后，再点一次“👁”。正式使用默认会按当前游戏画面自动贴合所选地图和楼层；在“设置 → 操作”里可改成“只展示”。再次点击仍会隐藏地图，每次重新显示都会重新贴合。这里先练习显示和隐藏。", "请再点一次“👁”，让攻略图显示出来。"),
+    SHOW("把攻略图显示出来", "选好地图后，再点一次“👁”。正式使用默认会按当前游戏画面自动贴合所选地图和楼层。再次点击仍会隐藏地图，每次重新显示都会重新贴合。这里先练习显示和隐藏。", "请再点一次“👁”，让攻略图显示出来。"),
     ADJUST("调到看着舒服", "点“…”→“小抄显示调整”。用手指拖动攻略图可以挪位置，双指张开或合拢可以改大小，音量键可以调透明度。练习里也提供大小和透明度按钮。试着调整后点“保存”。", "请进入“小抄显示调整”，改变位置、大小或透明度，再保存。"),
     SWITCH("相似图，一键切换", "有些地图长得很像。如果当前地图不对，点“⇆”就能切换同组的相似图，不用重新扫描。试着点一次，看看图上的标记有什么变化。只有地图包提供了相似图时，才会出现这个按钮。", "请点一次“⇆”，切换到另一张练习地图。"),
     DONE("练习完成，可以去实战了", "正式使用时：启动 IDVB → 在“…”→“选择地图包”选好本局地图包 → 打开第五人格的加页手记 → 打开游戏地图 → 首次使用先校准 → 🔍 扫描 → 👁 选图 → 再点 👁 展示并自动贴合。可到“设置 → 操作”切换为“只展示”。练习的校准和地图选择不会覆盖你的正式设置。", ""),
+    ;
+
+    companion object {
+        /** 活跃注册的教程步骤列表（已取消注册 ASSIST_TOUCH） */
+        val activeSteps: List<TutorialStep> = entries.filter { it != ASSIST_TOUCH }
+    }
 }
 
 @Serializable
@@ -58,7 +65,15 @@ data class TutorialProgress(
 ) {
     fun advance(skip: Boolean = false): TutorialProgress {
         if (step == TutorialStep.DONE) return this
-        val next = TutorialStep.entries[step.ordinal + 1]
+        val active = TutorialStep.activeSteps
+        val currentIndex = active.indexOf(step)
+        val next = if (currentIndex in 0 until active.lastIndex) {
+            active[currentIndex + 1]
+        } else if (step == TutorialStep.ASSIST_TOUCH) {
+            TutorialStep.ENTER
+        } else {
+            TutorialStep.DONE
+        }
         // Prepare the next exercise even when its prerequisite was skipped. These
         // sample prerequisites never count as actions performed by the learner.
         val ready = when (next) {

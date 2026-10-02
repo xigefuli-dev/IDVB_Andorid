@@ -100,10 +100,20 @@ class SparseGateRecognizerInstrumentedTest {
                     val single=run(listOf(a))
                     assertEquals(single.candidates.toString(),1,single.candidates.count { it.disposition==CandidateDisposition.RELIABLE })
                     assertEquals("a",single.automaticallyConfirmedCandidate()?.map?.id)
+                    assertEquals(SparseGateRecognizer.FORMAL_INPUT_POLICY,single.sparseGateDiagnostics!!.formalInputPolicy)
+                    val actualFormal=single.sparseGateDiagnostics!!.floorEvidence.single().formalAttempts.last()
+                    assertTrue(actualFormal.accepted)
+                    assertTrue(actualFormal.registrationBest!!.occupancyCoverage >= .42)
+                    assertEquals(com.idvb.android.recognize.structure.QUERY_KNOWN_REFERENCE_COVERAGE_DOMAIN,
+                        actualFormal.registrationBest!!.referenceCoverageDomain)
+                    assertTrue(actualFormal.registrationBest!!.referenceKnownPixels > 0)
+                    assertTrue(actualFormal.registrationBest!!.queryKnownPixels > 0)
                     assertNull(single.copy(sparseGateDiagnostics=single.sparseGateDiagnostics!!.copy(retrievalComplete=false))
                         .automaticallyConfirmedCandidate())
                     val warm=run(listOf(a))
-                    assertEquals(single.candidates,warm.candidates)
+                    // Timings are measured per execution; every decision field remains equal.
+                    assertEquals(single.candidates.map { it.copy(structureElapsedMilliseconds=0.0) },
+                        warm.candidates.map { it.copy(structureElapsedMilliseconds=0.0) })
                     val shiftedGate=gate.copy(screenBounds=gate.screenBounds.copy(x=gate.screenBounds.x+14))
                     val jittered=run(listOf(a),listOf(shiftedGate))
                     assertEquals(jittered.candidates.toString(),1,jittered.candidates.count { it.disposition==CandidateDisposition.RELIABLE })
@@ -132,6 +142,43 @@ class SparseGateRecognizerInstrumentedTest {
                 } finally { lines.release(); reference.release() }
             }
         } finally { SparseGateSearch.clear(); color.release(); frame.recycle(); isolated.deleteRecursively() }
+    }
+
+    @Test fun denseReferenceAliasCannotPassBidirectionalVisibleEvidence() {
+        assertTrue(OpenCvRuntime.initialize())
+        val observed=Mat.zeros(160,200,CvType.CV_8UC1)
+        val reference=Mat.zeros(160,200,CvType.CV_8UC1)
+        val domain=Mat.ones(160,200,CvType.CV_8UC1)
+        domain.setTo(Scalar.all(255.0))
+        try {
+            Imgproc.line(observed,Point(30.0,5.0),Point(30.0,150.0),Scalar.all(255.0),1)
+            observed.copyTo(reference)
+            for (x in 50..190 step 20) Imgproc.line(reference,Point(x.toDouble(),5.0),Point(x.toDouble(),150.0),Scalar.all(255.0),1)
+            val points=SparseGateSearch.pixels(observed)
+            val contours=listOf(listOf(points.first(),points.last()))
+            val pose=SparseGateSearch.Pose(1.0,0.0,0.0)
+            val index=SparseGateSearch.build(reference)
+            assertTrue("The old one-way alias has perfect observed support",
+                SparseGateSearch.verify(index,pose,points,contours,200,160).supported)
+            VpsgLiveExtractor.Observation(observed.clone(),domain.clone(),observed.clone(),domain.clone()).use { live ->
+                val evidence=SparseGateSearch.verify(index,pose,points,contours,200,160,
+                    reverse=SparseGateSearch.ReverseObservation(live))
+                assertEquals(1.0,evidence.support,0.0)
+                assertFalse(evidence.supported)
+                assertEquals("visible-reference-conflict",evidence.rejectionCode)
+                assertTrue(evidence.reverseSupport<.65)
+            }
+            // The same extra walls in unexplored pixels are unknown, not contradictions.
+            domain.setTo(Scalar.all(0.0))
+            Imgproc.rectangle(domain,Rect(24,0,13,160),Scalar.all(255.0),-1)
+            VpsgLiveExtractor.Observation(observed.clone(),domain.clone(),observed.clone(),domain.clone()).use { live ->
+                val evidence=SparseGateSearch.verify(index,pose,points,contours,200,160,
+                    reverse=SparseGateSearch.ReverseObservation(live))
+                assertTrue(evidence.toString(),evidence.supported)
+                assertTrue(evidence.reversePoints>=80)
+                assertEquals(1.0,evidence.reverseSupport,0.0)
+            }
+        } finally { observed.release(); reference.release(); domain.release() }
     }
 
     @Test fun distanceQuantizationAndDenseConflictsRetainDesktopBoundaries() {

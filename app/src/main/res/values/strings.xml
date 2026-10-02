@@ -1,4 +1,4 @@
 <resources>
     <string name="app_name">IDVB</string>
-    <string name="accessibility_service_description">用于截取识别画面，并按你的辅助触控设置点击开图和关图位置；不读取界面节点。</string>
+    <string name="accessibility_service_description">用于截取识别画面；不读取界面节点。</string>
 </resources>

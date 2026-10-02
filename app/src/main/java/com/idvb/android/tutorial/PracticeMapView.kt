@@ -29,7 +29,7 @@ class PracticeMapView(context: Context, private val store: TutorialStore) : View
         val next = if (p.mapOpen) { if (p.scene == "lobby") "calibration" else "map" }
             else when (p.scene) { "side" -> "side"; "game" -> "game"; else -> "lobby" }
         if (next != asset || bitmap == null) {
-            val decoded = context.assets.open("tutorial/$next.png").use {
+            val decoded = context.assets.open("tutorial/$next.webp").use {
                 BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = 2 })
             }
             bitmap?.recycle(); bitmap = decoded; asset = next

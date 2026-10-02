@@ -6,7 +6,8 @@ package com.idvb.android.data
 object DefaultSettings {
     const val OPACITY = 0.46f
     const val LOCKED = false
-    const val HOLD_TO_ACTIVATE = true
+    const val HOLD_TO_ACTIVATE = false
+    const val AUTO_DETECT_MAP_OPEN = false
     const val ALIGNMENT_REPLAY_INPUTS = true
     const val AUTO_START_ON_BOOT = false
     const val DEBUG_MODE = false

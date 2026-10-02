@@ -10,8 +10,8 @@ import com.idvb.android.recognize.cv.OpenCvRuntime
 import com.idvb.android.recognize.gate.ScreenRect
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.*
-import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.OutputStream
 import java.security.MessageDigest
 import java.util.concurrent.Executors
 import java.util.zip.ZipEntry
@@ -27,7 +27,12 @@ class AlignmentDiagnosticsStore(context: Context) {
     private val app = context.applicationContext
     private val history = com.idvb.android.diagnostics.DiagnosticHistory(File(app.filesDir, "idvb/diagnostics"))
     private val requestSessions = java.util.concurrent.ConcurrentHashMap<String, String>()
-    private val writer = Executors.newSingleThreadExecutor { task -> Thread(task, "idvb-alignment-diagnostics").apply { isDaemon = true } }
+    private val writer = Executors.newSingleThreadExecutor { task ->
+        Thread({
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+            task.run()
+        }, "idvb-alignment-diagnostics").apply { isDaemon = true }
+    }
 
     /** Post-result user actions cannot be appended to an already closed ZIP. Keep a correlated sidecar. */
     fun recordLifecycle(requestId: String, stage: String, detail: String, measurements: Map<String, Double> = emptyMap(), sessionId: String? = null) {
@@ -88,14 +93,36 @@ class AlignmentDiagnosticsStore(context: Context) {
                     zip.putNextEntry(ZipEntry(name)); zip.write(bytes); zip.closeEntry()
                     artifacts[name] = bytes.size.toLong() to sha256(bytes)
                 }
-                if (frame != null && trace.captureArtifacts) {
-                    val encoded = trace.measure("diagnostics.encode-capture") {
-                        ByteArrayOutputStream().use { output ->
-                            check(frame.compress(Bitmap.CompressFormat.PNG, 100, output))
-                            output.toByteArray()
+                if (frame != null && !frame.isRecycled && trace.captureArtifacts) {
+                    trace.measure("diagnostics.write-capture") {
+                        zip.putNextEntry(ZipEntry("captured.png"))
+                        val digest = MessageDigest.getInstance("SHA-256")
+                        var byteCount = 0L
+                        val entryStream = object : OutputStream() {
+                            override fun write(b: Int) {
+                                zip.write(b)
+                                digest.update(b.toByte())
+                                byteCount++
+                            }
+                            override fun write(b: ByteArray) {
+                                write(b, 0, b.size)
+                            }
+                            override fun write(b: ByteArray, off: Int, len: Int) {
+                                zip.write(b, off, len)
+                                digest.update(b, off, len)
+                                byteCount += len
+                            }
+                            override fun flush() {
+                                zip.flush()
+                            }
                         }
+                        val success = trace.measure("diagnostics.encode-capture") {
+                            frame.compress(Bitmap.CompressFormat.PNG, 100, entryStream)
+                        }
+                        check(success) { "无法编码诊断截图" }
+                        zip.closeEntry()
+                        artifacts["captured.png"] = byteCount to digest.digest().joinToString("") { "%02x".format(it) }
                     }
-                    trace.measure("diagnostics.write-capture") { add("captured.png", encoded) }
                 }
                 trace.measure("diagnostics.write-intermediates") {
                     trace.artifactSnapshot().forEach { (name, bytes) -> add(name, bytes) }

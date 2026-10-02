@@ -18,6 +18,7 @@ import com.idvb.android.alignment.AlignmentCancellation
 
 /** Desktop Vpsg3FastLiveExtractor 的结构色域、轮廓和动态遮挡路径。 */
 internal object VpsgLiveExtractor {
+    const val RESOLVED_WALL_POLICY = "resolved-walls-canny120-240-dilate3-v1"
     data class Observation(val edges: Mat, val valid: Mat, val proposal: Mat,
         val revealed: Mat? = null) : AutoCloseable {
         override fun close() {
@@ -29,7 +30,8 @@ internal object VpsgLiveExtractor {
     }
 
     fun extract(bgr: Mat, log: AlignmentLogSink = AlignmentLogSink.NONE,
-        visibilityScopedReverse: Boolean = false): Observation {
+        visibilityScopedReverse: Boolean = false,
+        captureRevealedDomain: Boolean = visibilityScopedReverse): Observation {
         require(!bgr.empty() && bgr.channels() == 3)
         val hsv = Mat()
         val gray = Mat()
@@ -41,7 +43,7 @@ internal object VpsgLiveExtractor {
         val strong = Mat()
         val support = Mat()
         val proposal = Mat()
-        val revealed = if (visibilityScopedReverse) Mat() else null
+        val revealed = if (captureRevealedDomain) Mat() else null
         var transferred = false
         val uncertain = Mat()
         val invalid = Mat()
@@ -128,7 +130,8 @@ internal object VpsgLiveExtractor {
                     }
                     log.emit(AlignmentLogEvent("vpsg.extract.wall-confidence-policy",
                         thresholds = mapOf("cannyLow" to 120.0, "cannyHigh" to 240.0, "supportDilation" to 3.0),
-                        labels = mapOf("weakBoundary" to "unknown-not-conflict", "artifact" to "resolved-wall-support.gray8")))
+                        labels = mapOf("observationPolicy" to RESOLVED_WALL_POLICY,
+                            "weakBoundary" to "unknown-not-conflict", "artifact" to "resolved-wall-support.gray8")))
                 }
                 log.measure("vpsg.extract.valid-mask") {
                 Core.bitwise_and(candidates, support, observed)

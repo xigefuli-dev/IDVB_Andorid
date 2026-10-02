@@ -1,5 +1,10 @@
 package com.idvb.android.ui.screens
 
+import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
@@ -22,6 +27,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -41,6 +47,20 @@ import com.idvb.android.R
 import com.idvb.android.ui.theme.AfdianPurple
 
 private const val AFDIAN_URL = "https://afdian.com/a/xigefuli?utm_source=copylink&utm_medium=link"
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+private fun copyAfdianUrlToClipboard(context: Context, showToast: Boolean = true) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+    clipboard?.setPrimaryClip(ClipData.newPlainText("爱发电赞助链接", AFDIAN_URL))
+    if (showToast) {
+        Toast.makeText(context, "赞助链接已复制，可前往浏览器打开", Toast.LENGTH_SHORT).show()
+    }
+}
 
 @Composable
 fun SponsorDialog(onDismiss: () -> Unit) {
@@ -87,10 +107,17 @@ fun SponsorDialog(onDismiss: () -> Unit) {
                             color = MaterialTheme.colorScheme.onSurface,
                             lineHeight = 22.sp,
                         )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "提示：若遇国产定制系统拦截外部跳转，可点击「复制链接」并在浏览器中打开。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            lineHeight = 16.sp,
+                        )
                         Spacer(modifier = Modifier.height(20.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             TextButton(
@@ -102,18 +129,34 @@ fun SponsorDialog(onDismiss: () -> Unit) {
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
-                            Spacer(modifier = Modifier.width(8.dp))
+                            OutlinedButton(
+                                onClick = {
+                                    copyAfdianUrlToClipboard(context)
+                                },
+                                shape = RoundedCornerShape(2.dp),
+                            ) {
+                                Text("复制链接")
+                            }
                             Button(
                                 onClick = {
+                                    val activity = context.findActivity()
+                                    val targetContext = activity ?: context
                                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(AFDIAN_URL)).apply {
-                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        if (activity == null) {
+                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
                                     }
                                     try {
-                                        context.startActivity(intent)
+                                        targetContext.startActivity(intent)
+                                        onDismiss()
                                     } catch (e: Exception) {
-                                        Toast.makeText(context, "无法打开浏览器", Toast.LENGTH_SHORT).show()
+                                        copyAfdianUrlToClipboard(context, showToast = false)
+                                        Toast.makeText(
+                                            context,
+                                            "无法打开浏览器，已自动复制赞助链接",
+                                            Toast.LENGTH_LONG,
+                                        ).show()
                                     }
-                                    onDismiss()
                                 },
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = AfdianPurple,
@@ -121,7 +164,7 @@ fun SponsorDialog(onDismiss: () -> Unit) {
                                 ),
                                 shape = RoundedCornerShape(2.dp),
                             ) {
-                                Text("赞助")
+                                Text("前往赞助")
                             }
                         }
                     }

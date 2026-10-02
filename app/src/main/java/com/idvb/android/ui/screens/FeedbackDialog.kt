@@ -1,5 +1,6 @@
 package com.idvb.android.ui.screens
 
+import android.content.Context
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -7,6 +8,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -21,8 +23,8 @@ import kotlinx.coroutines.withContext
 
 class FeedbackViewModel : ViewModel() {
     var description by mutableStateOf("")
-    var logs by mutableStateOf(false)
-    var diagnostics by mutableStateOf(false)
+    val logs = true
+    val diagnostics = true
     var busy by mutableStateOf(false)
         private set
     var success by mutableStateOf(false)
@@ -53,11 +55,32 @@ class FeedbackViewModel : ViewModel() {
         }
     }
 
+    fun shareExportPackage(context: Context) {
+        if (busy) return
+        val text = description
+        busy = true
+        status = "正在整理日志与诊断数据并生成导出包…"
+        viewModelScope.launch {
+            try {
+                val service = FeedbackService(AppServices.context)
+                val packageFile = withContext(Dispatchers.IO) {
+                    service.createExportPackage(text)
+                }
+                service.launchShareChooser(context, packageFile)
+                status = "已生成合并导出包并唤起系统分享。"
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                status = "导出包分享失败：${error.message ?: "未知异常，请稍后重试。"}"
+            } finally {
+                busy = false
+            }
+        }
+    }
+
     fun dismiss() {
         if (success) {
             description = ""
-            logs = false
-            diagnostics = false
             success = false
         }
         status = ""
@@ -66,6 +89,7 @@ class FeedbackViewModel : ViewModel() {
 
 @Composable
 fun FeedbackDialog(onDismiss: () -> Unit, model: FeedbackViewModel = viewModel()) {
+    val context = LocalContext.current
     val close = { model.dismiss(); onDismiss() }
     AlertDialog(
         onDismissRequest = { if (!model.busy) close() },
@@ -82,22 +106,59 @@ fun FeedbackDialog(onDismiss: () -> Unit, model: FeedbackViewModel = viewModel()
                 )
                 Text("当前加权字数：${FeedbackText.weightedLength(model.description)}（至少 11；中文算 2，最多 4000 字符）")
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(model.logs, { model.logs = it }, enabled = !model.busy && !model.success)
-                    Text("发送日志")
+                    Checkbox(
+                        checked = true,
+                        onCheckedChange = null,
+                        enabled = false,
+                        colors = CheckboxDefaults.colors(
+                            disabledCheckedColor = MaterialTheme.colorScheme.primary,
+                        ),
+                    )
+                    Text("发送日志（必选）")
                 }
                 Text("发送最近最多 20 场已保存的应用日志，补充当前进程最近最多 1000 条日志，以及版本、系统、机型、屏幕分辨率、DPI 和缩放信息。")
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(model.diagnostics, { model.diagnostics = it }, enabled = !model.busy && !model.success)
-                    Text("发送诊断数据")
+                    Checkbox(
+                        checked = true,
+                        onCheckedChange = null,
+                        enabled = false,
+                        colors = CheckboxDefaults.colors(
+                            disabledCheckedColor = MaterialTheme.colorScheme.primary,
+                        ),
+                    )
+                    Text("发送诊断数据（必选）")
                 }
-                Text("发送最近最多 20 场全部已保存的识别和对齐诊断，包含捕获的游戏画面、结果与追踪记录。启动悬浮窗或重置地图开始新场次；同场重复扫描不会挤占其他场次。勾选前请确认画面中没有需要保密的内容。附件可能较大，建议使用 Wi-Fi。")
+                Text("发送最近最多 20 场全部已保存的识别和对齐诊断，包含捕获的游戏画面、结果与追踪记录。启动悬浮窗或重置地图开始新场次；同场重复扫描不会挤占其他场次。提交前请确认画面中没有需要保密的内容。附件可能较大，建议使用 Wi-Fi。")
+                Text(
+                    "提示：若网络异常或无法在线提交，可点击下方「导出包分享」将日志与诊断数据合并打包直接分享给其他应用。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 if (model.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                 if (model.status.isNotBlank()) Text(model.status)
             }
         },
         confirmButton = {
             if (model.success) TextButton(onClick = close) { Text("完成") }
-            else TextButton(onClick = model::submit, enabled = !model.busy && FeedbackText.isValid(model.description)) { Text("立即反馈") }
+            else {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    TextButton(
+                        onClick = { model.shareExportPackage(context) },
+                        enabled = !model.busy,
+                    ) {
+                        Text("导出包分享")
+                    }
+                    TextButton(
+                        onClick = model::submit,
+                        enabled = !model.busy && FeedbackText.isValid(model.description),
+                    ) {
+                        Text("立即反馈")
+                    }
+                }
+            }
         },
         dismissButton = {
             if (!model.success) TextButton(onClick = close, enabled = !model.busy) { Text("取消") }

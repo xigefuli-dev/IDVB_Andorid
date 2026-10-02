@@ -134,7 +134,6 @@ private fun PracticeBoard(store: TutorialStore, modifier: Modifier) {
                                 if (!p.mapOpen || p.scene != "lobby") message = "请在校准练习中先打开游戏地图。"
                                 else change { it.copy(mode = "calibrate", menu = false, packageMenu = false) }
                             }) { Text("校准显示区域") }
-                            TextButton(onClick = { change { it.copy(mode = "assist", menu = false, packageMenu = false) } }) { Text("辅助触控") }
                             TextButton(onClick = {
                                 if (!p.selected) message = "请先扫描并选中地图。"
                                 else change { it.copy(mode = "adjust", menu = false, packageMenu = false, visible = true, changed = false) }

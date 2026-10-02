@@ -30,16 +30,23 @@ private val LightColors = lightColorScheme(
     secondary = Color(0xFF397E2E), onSecondary = Color.White, secondaryContainer = Color(0xFFD6F3C3),
     onSecondaryContainer = Color(0xFF152511), background = Paper, onBackground = Color(0xFF171C19), surface = Color(0xFFFFFFFF),
     onSurface = Color(0xFF171C19), surfaceVariant = PaperTwo, onSurfaceVariant = Color(0xFF515A54),
+    surfaceContainer = Color(0xFFEFF2EB), surfaceContainerHigh = Color(0xFFE5EAE0), surfaceContainerHighest = Color(0xFFDCE2D6),
+    surfaceContainerLow = Color(0xFFF4F6F1), surfaceContainerLowest = Color(0xFFFFFFFF),
     outline = Color(0xFF6F7972), outlineVariant = Color(0xFFC9CFC8),
-    inverseSurface = Deep, inverseOnSurface = Paper, error = Color(0xFF9F332F),
+    inverseSurface = Deep, inverseOnSurface = Paper, error = Color(0xFF9F332F), onError = Color.White,
 )
 
 private val DarkColors = darkColorScheme(
     primary = Color(0xFF9AF16A), onPrimary = Color(0xFF10220A), primaryContainer = Color(0xFF355F29),
-    onPrimaryContainer = Color(0xFFF3FFEc), secondary = Color(0xFF8EE85D), background = Color(0xFF0D0F12),
-    onBackground = Color(0xFFF2F3F5), surface = Color(0xFF1A1D22), onSurface = Color(0xFFF4F5F6),
-    surfaceVariant = Color(0xFF252932), onSurfaceVariant = Color(0xFFC5C9D0), outline = Color(0xFF9298A2),
-    outlineVariant = Color(0xFF404650), inverseSurface = Color(0xFFE9EBEF), inverseOnSurface = Color(0xFF181B20),
+    onPrimaryContainer = Color(0xFFF3FFEc), secondary = Color(0xFF8EE85D), onSecondary = Color(0xFF10220A),
+    secondaryContainer = Color(0xFF2A4923), onSecondaryContainer = Color(0xFFDCF8CD),
+    background = Color(0xFF0D0F12), onBackground = Color(0xFFF2F3F5), surface = Color(0xFF1A1D22),
+    onSurface = Color(0xFFF4F5F6), surfaceVariant = Color(0xFF252932), onSurfaceVariant = Color(0xFFC5C9D0),
+    surfaceContainer = Color(0xFF1F2228), surfaceContainerHigh = Color(0xFF282C34), surfaceContainerHighest = Color(0xFF323741),
+    surfaceContainerLow = Color(0xFF191C21), surfaceContainerLowest = Color(0xFF0D0F12),
+    outline = Color(0xFF9298A2), outlineVariant = Color(0xFF404650),
+    inverseSurface = Color(0xFFE9EBEF), inverseOnSurface = Color(0xFF181B20),
+    error = Color(0xFFFFB4AB), onError = Color(0xFF690005),
 )
 
 private val IDVBTypography = Typography(

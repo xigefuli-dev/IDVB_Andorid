@@ -36,7 +36,8 @@ internal class MapStructureRegistrar(
         allowStrongSeedEarlyExit: Boolean = false,
     ): StructureRegistrationResult {
         if (!viewportBounds.isValid || !seedScale.isFinite() || seedScale <= .05 ||
-            reference.edges.empty() || live.edges.empty()
+            reference.edges.empty() || live.edges.empty() ||
+            live.knownDomain?.let { it.empty() || it.type() != CvType.CV_8UC1 || it.size() != live.edges.size() } == true
         ) return reject(StructureRejectionReason.INVALID_INPUT, "结构配准输入或侧门位姿种子无效。")
 
         // Same reciprocal-scale policy as desktop global recovery: for a
@@ -122,6 +123,7 @@ internal class MapStructureRegistrar(
         val edges: Mat,
         val bounds: Rect,
         val edgeCount: Int,
+        val knownDomain: Mat?,
     ) : AutoCloseable {
         fun usable(tuning: StructureRegistrationTuning): Boolean =
             edgeCount >= tuning.minimumEdgePixels &&
@@ -131,6 +133,7 @@ internal class MapStructureRegistrar(
         override fun close() {
             structure.release()
             edges.release()
+            knownDomain?.release()
         }
     }
 
@@ -143,9 +146,11 @@ internal class MapStructureRegistrar(
         )
         val structure = Mat()
         val edges = Mat()
+        val knownDomain = live.knownDomain?.let { Mat() }
         try {
             Imgproc.resize(live.structureMask, structure, target, 0.0, 0.0, Imgproc.INTER_NEAREST)
             Imgproc.resize(live.edges, edges, target, 0.0, 0.0, Imgproc.INTER_NEAREST)
+            if (knownDomain != null) Imgproc.resize(live.knownDomain!!, knownDomain, target, 0.0, 0.0, Imgproc.INTER_NEAREST)
             val edgeCount = Core.countNonZero(edges)
             val points = Mat()
             val bounds = try {
@@ -154,10 +159,11 @@ internal class MapStructureRegistrar(
             } finally {
                 points.release()
             }
-            return QueryGeometry(scale, structure, edges, bounds, edgeCount)
+            return QueryGeometry(scale, structure, edges, bounds, edgeCount, knownDomain)
         } catch (error: Throwable) {
             structure.release()
             edges.release()
+            knownDomain?.release()
             throw error
         }
     }
@@ -498,11 +504,14 @@ internal class MapStructureRegistrar(
         val queryStructure = query.structure.submat(query.bounds)
         val distancePatch = distance.submat(patchRect)
         val referenceStructure = reference.structureMask.submat(patchRect)
+        val queryKnown = query.knownDomain?.submat(query.bounds)
         try {
             val chamfer = Core.mean(distancePatch, queryEdges).`val`[0]
             val withinTolerance = Mat()
             val coveredEdges = Mat()
             val overlap = Mat()
+            val knownReference = queryKnown?.let { Mat() }
+            val knownOverlap = queryKnown?.let { Mat() }
             try {
                 Core.compare(distancePatch, Scalar(tuning.edgeDistanceTolerancePixels), withinTolerance, Core.CMP_LE)
                 Core.bitwise_and(withinTolerance, queryEdges, coveredEdges)
@@ -512,7 +521,22 @@ internal class MapStructureRegistrar(
                 val queryStructureCount = Core.countNonZero(queryStructure)
                 val referenceStructureCount = Core.countNonZero(referenceStructure)
                 val occupancyCoverage = overlapCount / queryStructureCount.toDouble().coerceAtLeast(1.0)
-                val referenceCoverage = if (referenceStructureCount > 0) overlapCount / referenceStructureCount.toDouble() else 0.0
+                // The domain belongs to this resized query, not to one reference seed.
+                // Every candidate projects that same query-local known mask onto its own patch.
+                // Observed forward walls and occupancy retain their existing semantics.
+                val referenceKnownCount: Int
+                val referenceKnownOverlapCount: Int
+                if (queryKnown == null) {
+                    referenceKnownCount = referenceStructureCount
+                    referenceKnownOverlapCount = overlapCount
+                } else {
+                    Core.bitwise_and(referenceStructure, queryKnown, knownReference!!)
+                    Core.bitwise_and(overlap, queryKnown, knownOverlap!!)
+                    referenceKnownCount = Core.countNonZero(knownReference)
+                    referenceKnownOverlapCount = Core.countNonZero(knownOverlap)
+                }
+                val referenceCoverage = if (referenceKnownCount > 0)
+                    referenceKnownOverlapCount / referenceKnownCount.toDouble() else 0.0
                 val consistentPartitions = countConsistentPartitions(queryEdges, coveredEdges)
                 val composite = chamfer +
                     (1.0 - edgeCoverage) * 4.0 +
@@ -548,17 +572,26 @@ internal class MapStructureRegistrar(
                     compositeCost = composite + if (isWithinBounds) 0.0 else 6.0,
                     isWithinValidBounds = isWithinBounds,
                     usedGlobalSearch = usedGlobalSearch,
+                    referenceCoverageDomain = if (queryKnown == null) LEGACY_REFERENCE_COVERAGE_DOMAIN
+                        else QUERY_KNOWN_REFERENCE_COVERAGE_DOMAIN,
+                    referenceKnownPixels = referenceKnownCount,
+                    referenceUnknownPixels = referenceStructureCount - referenceKnownCount,
+                    referenceKnownOverlapPixels = referenceKnownOverlapCount,
+                    queryKnownPixels = queryKnown?.let(Core::countNonZero) ?: query.bounds.width * query.bounds.height,
                 )
             } finally {
                 withinTolerance.release()
                 coveredEdges.release()
                 overlap.release()
+                knownReference?.release()
+                knownOverlap?.release()
             }
         } finally {
             queryEdges.release()
             queryStructure.release()
             distancePatch.release()
             referenceStructure.release()
+            queryKnown?.release()
         }
     }
 
@@ -740,10 +773,12 @@ internal class MapStructureRegistrar(
     private fun resizeFeatures(source: StructureFeatures, scale: Double): StructureFeatures {
         val structure = Mat()
         val edges = Mat()
+        val knownDomain = source.knownDomain?.let { Mat() }
         try {
             if (abs(scale - 1.0) < 1e-9) {
                 source.structureMask.copyTo(structure)
                 source.edges.copyTo(edges)
+                if (knownDomain != null) source.knownDomain!!.copyTo(knownDomain)
             } else {
                 val target = Size(
                     max(1, (source.edges.cols() * scale).roundToInt()).toDouble(),
@@ -751,11 +786,13 @@ internal class MapStructureRegistrar(
                 )
                 Imgproc.resize(source.structureMask, structure, target, 0.0, 0.0, Imgproc.INTER_NEAREST)
                 Imgproc.resize(source.edges, edges, target, 0.0, 0.0, Imgproc.INTER_NEAREST)
+                if (knownDomain != null) Imgproc.resize(source.knownDomain!!, knownDomain, target, 0.0, 0.0, Imgproc.INTER_NEAREST)
             }
-            return StructureFeatures(structure, edges)
+            return StructureFeatures(structure, edges, knownDomain)
         } catch (error: Throwable) {
             structure.release()
             edges.release()
+            knownDomain?.release()
             throw error
         }
     }

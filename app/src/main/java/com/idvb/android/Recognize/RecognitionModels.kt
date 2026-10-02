@@ -28,6 +28,10 @@ data class RecognitionCandidate(
     val structureOffsetX: Double = Double.NaN,
     val structureOffsetY: Double = Double.NaN,
     val structureRejectionReason: StructureRejectionReason? = null,
+    val structureForwardPoints: Int = 0,
+    val structureReversePoints: Int = 0,
+    val structureReverseEligiblePoints: Int = 0,
+    val structureDecisionReason: String? = null,
     val usedStructureGlobalRecovery: Boolean = false,
     val structureElapsedMilliseconds: Double = 0.0,
     val matchScale: Double = 0.0,
@@ -88,6 +92,8 @@ data class SparseGateScanDiagnostics(
     /** True when support belongs to one map or one explicitly declared variant family. */
     val identityUnique: Boolean,
     val floorEvidence: List<SparseGateFloorEvidence>,
+    val wallObservationPolicy: String = "unrecorded",
+    val formalInputPolicy: String = "unrecorded",
 )
 
 data class SparseGateFloorEvidence(
@@ -99,6 +105,38 @@ data class SparseGateFloorEvidence(
     val longestConflictPixels: Double,
     val spatialConflict: Boolean,
     val supported: Boolean,
+    val forwardPoints: Int = 0,
+    val reverseSupportedFraction: Double = 0.0,
+    val reversePoints: Int = 0,
+    val reverseEligiblePoints: Int = 0,
+    val decisionReason: String = "legacy-evidence",
+    val hypotheses: List<SparseGateHypothesisEvidence> = emptyList(),
+    val formalAttempts: List<SparseGateFormalAttemptEvidence> = emptyList(),
+)
+
+/** Poses and residuals remain in processing coordinates; processingScale is recorded. */
+data class SparseGateHypothesisEvidence(
+    val scale: Double, val offsetX: Double, val offsetY: Double, val gateIndex: Int,
+    val gateResidualPixels: Double, val forwardSupport: Double, val reverseSupport: Double,
+    val forwardPoints: Int, val reversePoints: Int, val meanDistancePixels: Double,
+    val longestConflictPixels: Double, val spatialConflict: Boolean, val rejectionCode: String,
+)
+
+data class SparseGateFormalAttemptEvidence(
+    val seedHypothesisIndex: Int,
+    val seed: SparseGateHypothesisEvidence,
+    val checked: SparseGateHypothesisEvidence?,
+    val elapsedMilliseconds: Double,
+    val registrationAccepted: Boolean,
+    val registrationRejectionReason: String,
+    val registrationFailureReason: String,
+    val usedGlobalRecovery: Boolean,
+    val registrationCandidateMargin: Double,
+    val accepted: Boolean,
+    val decisionReason: String,
+    val verificationMilliseconds: Double = 0.0,
+    val registrationBest: com.idvb.android.recognize.structure.StructureCandidate? = null,
+    val verificationFailureReason: String = "",
 )
 
 data class RecognitionResult(

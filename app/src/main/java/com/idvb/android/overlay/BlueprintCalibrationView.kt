@@ -14,7 +14,10 @@ import kotlin.math.max
 import kotlin.math.min
 
 /** 全屏蓝图模式：遮罩、吞掉全部触摸，并让用户框选地图显示区域。 */
-class BlueprintCalibrationView(context: Context) : View(context) {
+class BlueprintCalibrationView(context: Context,
+    private val title: String = "蓝图模式 · 框选地图显示区域",
+    private val instruction: String = "触摸不会传递到其他应用",
+) : View(context) {
     interface Listener {
         fun onConfirmed(region: RectF)
         fun onCancelled()
@@ -50,11 +53,10 @@ class BlueprintCalibrationView(context: Context) : View(context) {
         super.onDraw(canvas)
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), mask)
         val headerCenterX = width / 2f
-        val title = "蓝图模式 · 框选地图显示区域"
         text.textSize = dp(18f)
         text.textSize *= min(1f, (width - dp(24f)) / text.measureText(title))
         canvas.drawText(title, headerCenterX, safeTop + dp(42f), text)
-        text.textSize = dp(13f); canvas.drawText("触摸不会传递到其他应用", headerCenterX, safeTop + dp(66f), text)
+        text.textSize = dp(13f); canvas.drawText(instruction, headerCenterX, safeTop + dp(66f), text)
         selection?.let {
             // 框内减弱滤镜，方便精确对齐底层游戏画面。
             canvas.save()

@@ -117,7 +117,6 @@ import com.idvb.android.tutorial.TutorialStore
 import com.idvb.android.tutorial.TutorialStep
 import com.idvb.android.tutorial.TutorialPanel
 import com.idvb.android.tutorial.TutorialPracticeActivity
-import androidx.compose.foundation.layout.heightIn
 
 class MainActivity : ComponentActivity() {
     private var catalogTick by mutableIntStateOf(0)
@@ -283,7 +282,7 @@ class MainActivity : ComponentActivity() {
                                     permissionsReady = permissions.snapshot.readyToStart,
                                     onPractice = openPractice,
                                     onPause = { tutorialStore.update { it.copy(active = false) } },
-                                    modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp),
+                                    modifier = Modifier.fillMaxWidth(),
                                 )
                                 Box(Modifier.weight(1f)) {
                                     when (currentPage) {

@@ -29,7 +29,7 @@ class TutorialProgressTest {
 
     @Test fun `skipping supplies sample prerequisites but does not pass an exercise`() {
         var p = TutorialProgress()
-        repeat(TutorialStep.DONE.ordinal) {
+        while (p.step != TutorialStep.DONE) {
             val previous = p.step
             p = p.advance(skip = true)
             assertTrue(previous in p.skipped)
@@ -39,6 +39,14 @@ class TutorialProgressTest {
         }
         assertEquals(TutorialStep.DONE, p.step)
         assertEquals(p, p.advance())
+    }
+
+    @Test fun `assist touch step is deregistered from active tutorial flow`() {
+        assertFalse(TutorialStep.activeSteps.contains(TutorialStep.ASSIST_TOUCH))
+        val calibrateProgress = TutorialProgress(step = TutorialStep.CALIBRATE)
+        assertEquals(TutorialStep.ENTER, calibrateProgress.advance().step)
+        val legacyAssistProgress = TutorialProgress(step = TutorialStep.ASSIST_TOUCH)
+        assertEquals(TutorialStep.ENTER, legacyAssistProgress.advance().step)
     }
 
     @Test fun `restoring checkpoint retains unfinished calibration and adjustment`() {

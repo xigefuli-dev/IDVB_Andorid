@@ -66,84 +66,37 @@ class EyeHoldInstrumentedTest {
         }
     }
 
-    @Test fun configuredAssistUsesCompletedTapInsteadOfInjectingDuringHold() {
+    @Test fun holdToActivateIsDeregisteredDefaultDisabledAndCannotBeTurnedOn() {
         InstrumentationRegistry.getInstrumentation().runOnMainSync {
             val f = Fixture()
             try {
-                f.assist = true
-                f.event(MotionEvent.ACTION_DOWN)
-                assertEquals(0, f.opens); assertEquals(0, f.toggles)
-                f.event(MotionEvent.ACTION_UP)
-                assertEquals(1, f.toggles); assertEquals(0, f.closes)
-                f.event(MotionEvent.ACTION_DOWN); f.event(MotionEvent.ACTION_CANCEL)
-                assertEquals(1, f.toggles)
-            } finally { f.dispose() }
-        }
-    }
-
-    @Test fun defaultHoldOpensOnDownAndClosesOnUpWithoutClickOrDrag() {
-        InstrumentationRegistry.getInstrumentation().runOnMainSync {
-            val f = Fixture()
-            try {
-                assertTrue(f.prefs.holdToActivateEnabled)
-                f.event(MotionEvent.ACTION_DOWN)
-                assertEquals(1, f.opens)
-                assertEquals(0, f.closes)
-                f.event(MotionEvent.ACTION_MOVE, 200f)
-                assertEquals(0, f.moves)
-                f.event(MotionEvent.ACTION_UP, 200f)
-                assertEquals(1, f.closes)
-                assertEquals(0, f.toggles)
-            } finally { f.dispose() }
-        }
-    }
-
-    @Test fun cancelAndHiddenWindowReleaseOnceAndSettingChangesDoNotLatchDisplay() {
-        val instrumentation = InstrumentationRegistry.getInstrumentation()
-        lateinit var f: Fixture
-        lateinit var anchor: OverlayWindowManager
-        instrumentation.runOnMainSync {
-            f = Fixture()
-            anchor = f.attach()
-        }
-        instrumentation.waitForIdleSync()
-        instrumentation.runOnMainSync {
-            try {
-                assertTrue(f.balls.isAttachedToWindow)
-                f.event(MotionEvent.ACTION_DOWN)
-                f.event(MotionEvent.ACTION_CANCEL)
-                f.event(MotionEvent.ACTION_CANCEL)
-                assertEquals(1, f.closes)
-                f.event(MotionEvent.ACTION_DOWN)
-                f.balls.visibility = View.INVISIBLE
-                assertEquals(2, f.closes)
-                f.event(MotionEvent.ACTION_UP)
-                assertEquals(2, f.closes)
-                f.balls.visibility = View.VISIBLE
-                f.event(MotionEvent.ACTION_DOWN)
-                f.prefs.holdToActivateEnabled = false
-                f.event(MotionEvent.ACTION_UP)
-                assertEquals(3, f.closes)
-                assertEquals(0, f.toggles)
-                assertFalse(OverlayPrefs(f.context).holdToActivateEnabled)
-                f.event(MotionEvent.ACTION_DOWN)
-                assertEquals(3, f.opens)
-                f.event(MotionEvent.ACTION_UP)
-                assertEquals(1, f.toggles)
-                f.event(MotionEvent.ACTION_DOWN)
-                f.event(MotionEvent.ACTION_MOVE, 200f)
-                f.event(MotionEvent.ACTION_UP, 200f)
-                assertEquals(1, f.toggles)
-                assertEquals(1, f.moves)
+                assertFalse(f.prefs.holdToActivateEnabled)
                 f.prefs.holdToActivateEnabled = true
+                assertFalse(f.prefs.holdToActivateEnabled)
+                assertFalse(OverlayPrefs(f.context).holdToActivateEnabled)
+
+                // Eye button triggers toggle on tap instead of hold
                 f.event(MotionEvent.ACTION_DOWN)
-                anchor.remove()
-                assertEquals(4, f.closes)
-            } finally { anchor.remove(); f.dispose() }
+                assertEquals(0, f.opens)
+                f.event(MotionEvent.ACTION_UP)
+                assertEquals(1, f.toggles)
+                assertEquals(0, f.closes)
+            } finally { f.dispose() }
         }
     }
 
-    @Test fun unavailableEyeDoesNothingAndPendingCandidatesUseOpenEntry() {
+    @Test fun moreMenuDeregisteredAssistTouch() {
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            val f = Fixture()
+            try {
+                val menuLabels = (0 until f.balls.morePanel.childCount)
+                    .map { (f.balls.morePanel.getChildAt(it) as android.widget.TextView).text.toString() }
+                assertTrue(menuLabels.none { it.contains("辅助触控") })
+            } finally { f.dispose() }
+        }
+    }
+
+    @Test fun unavailableEyeDoesNothingAndPendingCandidatesUseToggleEntry() {
         InstrumentationRegistry.getInstrumentation().runOnMainSync {
             val f = Fixture()
             try {
@@ -158,8 +111,11 @@ class EyeHoldInstrumentedTest {
                 f.balls.candidatesAvailable = true
                 f.event(MotionEvent.ACTION_DOWN)
                 f.event(MotionEvent.ACTION_UP)
-                assertEquals(1, f.opens)
-                assertEquals(1, f.closes)
+                assertEquals(1, f.toggles)
+                f.event(MotionEvent.ACTION_DOWN)
+                f.event(MotionEvent.ACTION_CANCEL)
+                f.event(MotionEvent.ACTION_UP)
+                assertEquals("A cancelled press cannot toggle from a late release", 1, f.toggles)
             } finally { f.dispose() }
         }
     }
@@ -189,18 +145,18 @@ class EyeHoldInstrumentedTest {
             SystemClock.sleep(2200)
             instrumentation.runOnMainSync {
                 assertFalse(layout.editing)
-                assertEquals(1, f.opens)
+                assertEquals(0, f.opens)
                 f.event(MotionEvent.ACTION_UP)
-                assertEquals(1, f.closes)
+                assertEquals(1, f.toggles)
                 val layoutItem = (0 until f.balls.morePanel.childCount)
                     .map { f.balls.morePanel.getChildAt(it) as android.widget.TextView }
                     .first { it.text.contains("悬浮窗布局调整") }
                 layoutItem.performClick()
                 assertTrue(layout.editing)
-                val before = f.opens
+                val before = f.toggles
                 f.event(MotionEvent.ACTION_DOWN)
                 f.event(MotionEvent.ACTION_UP)
-                assertEquals(before, f.opens)
+                assertEquals(before, f.toggles)
             }
         } finally {
             instrumentation.runOnMainSync { layout.dispose(); anchor.remove(); f.dispose() }
@@ -247,21 +203,16 @@ class EyeHoldInstrumentedTest {
                 // Ball container must enable motion event splitting between children
                 assertTrue(f.balls.isMotionEventSplittingEnabled)
 
-                // 1. Hold eye button (finger 1 down)
+                // 1. Tap eye button (finger 1 down and up)
                 f.event(MotionEvent.ACTION_DOWN, id = "eye")
-                assertEquals(1, f.opens)
-                assertEquals(0, f.closes)
+                f.event(MotionEvent.ACTION_UP, id = "eye")
+                assertEquals(1, f.toggles)
 
-                // 2. While eye is held, tap search button (finger 2 down and up)
+                // 2. Tap search button (finger 2 down and up)
                 f.event(MotionEvent.ACTION_DOWN, id = "search")
                 f.event(MotionEvent.ACTION_UP, id = "search")
                 assertEquals(1, f.searches)
-                assertEquals(1, f.opens)
-                assertEquals(0, f.closes) // eye must still remain open!
-
-                // 3. Release eye button (finger 1 up)
-                f.event(MotionEvent.ACTION_UP, id = "eye")
-                assertEquals(1, f.closes)
+                assertEquals(1, f.toggles)
             } finally {
                 anchor.remove()
                 f.dispose()
