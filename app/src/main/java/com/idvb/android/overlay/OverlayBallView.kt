@@ -17,6 +17,7 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
         fun onAssistTouch() {}
         fun useAssistTouchToggle(): Boolean = false
         fun onConfigureAutoReference() {}
+        fun onScreenTouch(x: Float, y: Float) {}
         fun onResetMap() {}
         fun onChooseMapClass() {}
         fun onOpenGuide() {}
@@ -143,7 +144,6 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
             addView(menuItem("✥", "小抄显示调整") { listener?.onFreeAdjust() })
             addView(menuItem("⚙", "悬浮窗布局调整") { customLayout?.begin("search") })
             addView(menuItem("▣", "校准显示区域") { listener?.onCalibrate() })
-            addView(menuItem("◉", "设置开图参照") { listener?.onConfigureAutoReference() })
             addView(menuItem("↺", "重设地图") { listener?.onResetMap() })
             addView(menuItem("⏻", "关闭悬浮窗") { listener?.onClose() })
         }
@@ -293,6 +293,17 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
             click()
         }
     }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_OUTSIDE || event.actionMasked == MotionEvent.ACTION_DOWN) {
+            val location = IntArray(2).also(::getLocationOnScreen)
+            val rx = if (event.rawX != 0f) event.rawX else (location[0] + event.x)
+            val ry = if (event.rawY != 0f) event.rawY else (location[1] + event.y)
+            listener?.onScreenTouch(rx, ry)
+        }
+        return super.onTouchEvent(event)
+    }
+
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 }
 

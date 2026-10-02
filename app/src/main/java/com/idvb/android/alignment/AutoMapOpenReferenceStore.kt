@@ -28,7 +28,7 @@ data class AutoMapOpenReference(
 )
 
 /** Private, replayable references. Invalid or incomplete files never enable the detector. */
-class AutoMapOpenReferenceStore(context: Context) {
+class AutoMapOpenReferenceStore(private val context: Context) {
     private val directory = File(context.filesDir, "idvb/auto-map-open")
     private val ownPackage = context.packageName
 
@@ -80,6 +80,55 @@ class AutoMapOpenReferenceStore(context: Context) {
             AutoMapOpenReference(id, landscape, screenWidth, screenHeight, region, pixels,
                 targetPackage, createdAtMillis, expectedHash)
         }.onFailure { Log.w("IDVB-AutoMap", "开图参照无效，自动检测保持停止：${it.message}") }.getOrNull()
+    }
+
+    /**
+     * 加载内置侧边栏开图参照。
+     * 用户无需手动截取参照，使用内置的标准侧边栏图像（位于 assets/recognition/map_open_sidebar.png），
+     * 识别区域从用户已校准区域的最右侧边延伸至屏幕本身的最右侧边（高度为屏幕横放高度）。
+     */
+    fun loadBuiltin(screenWidth: Int, screenHeight: Int, calibratedRightRatio: Float, targetPackage: String? = null): AutoMapOpenReference? = synchronized(lock) {
+        if (screenWidth <= 0 || screenHeight <= 0 || calibratedRightRatio <= 0f || calibratedRightRatio >= 1f) return@synchronized null
+        val pixels = getOrLoadBuiltinSignature() ?: return@synchronized null
+        val hash = getOrLoadBuiltinHash()
+        val region = floatArrayOf(calibratedRightRatio, 0f, 1f, 1f)
+        AutoMapOpenReference(
+            id = "builtin-sidebar",
+            landscape = true,
+            screenWidth = screenWidth,
+            screenHeight = screenHeight,
+            region = region,
+            signaturePixels = pixels,
+            targetPackage = targetPackage ?: "",
+            createdAtMillis = 0L,
+            pngSha256 = hash,
+        )
+    }
+
+    private var cachedBuiltinSignature: IntArray? = null
+    private var cachedBuiltinHash: String = ""
+
+    private fun getOrLoadBuiltinSignature(): IntArray? {
+        cachedBuiltinSignature?.let { return it }
+        return runCatching {
+            val bytes = context.assets.open(BUILTIN_SIDEBAR_ASSET).use { it.readBytes() }
+            cachedBuiltinHash = sha256(bytes)
+            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+            try {
+                val pixels = samplePixels(bitmap)
+                cachedBuiltinSignature = pixels
+                pixels
+            } finally {
+                bitmap.recycle()
+            }
+        }.onFailure { Log.w("IDVB-AutoMap", "无法加载内置开图参照：${it.message}") }.getOrNull()
+    }
+
+    private fun getOrLoadBuiltinHash(): String {
+        if (cachedBuiltinHash.isEmpty()) {
+            getOrLoadBuiltinSignature()
+        }
+        return cachedBuiltinHash
     }
 
     /** Borrows the full captured frame; only the selected native patch is persisted. */
@@ -147,6 +196,7 @@ class AutoMapOpenReferenceStore(context: Context) {
     }
 
     companion object {
+        const val BUILTIN_SIDEBAR_ASSET = "recognition/map_open_sidebar.png"
         const val SAMPLE_WIDTH = 32
         const val SAMPLE_HEIGHT = 24
         private const val SCHEMA_VERSION = 1

@@ -86,6 +86,9 @@ class OverlayWindowManager(private val context: Context) {
         if (locked) {
             // 锁定态整窗点击穿透，对应 WS_EX_TRANSPARENT
             flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        } else {
+            // 非锁定态开启外部触摸监听，用于接收象限点击事件同时保持游戏触控完全穿透
+            flags = flags or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
         }
         return WindowManager.LayoutParams(
             width, height,
@@ -144,9 +147,9 @@ class OverlayWindowManager(private val context: Context) {
         if (locked != null) {
             isTouchThrough = locked
             p.flags = if (locked) {
-                p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                (p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) and WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH.inv()
             } else {
-                p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                (p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()) or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
             }
         }
         p.flags = p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_SPLIT_TOUCH

@@ -166,22 +166,6 @@ private fun OperationChoice(label: String, selected: Boolean, onSelect: () -> Un
 
 @Composable
 private fun AutoMapOpenSettings(enabled: Boolean, onEnabledChanged: (Boolean) -> Unit) {
-    val context = LocalContext.current
-    val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
-    val referenceStore = remember(context) { AutoMapOpenReferenceStore(context) }
-    var hasLandscapeReference by remember { mutableStateOf(referenceStore.load(true) != null) }
-    var hasPortraitReference by remember { mutableStateOf(referenceStore.load(false) != null) }
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner, landscape) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                hasLandscapeReference = referenceStore.load(true) != null
-                hasPortraitReference = referenceStore.load(false) != null
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(2.dp),
@@ -192,40 +176,17 @@ private fun AutoMapOpenSettings(enabled: Boolean, onEnabledChanged: (Boolean) ->
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f).padding(end = 10.dp)) {
                     Text("自动检测开图", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-                    Text("检测到游戏地图打开后自动尝试贴合，关图后停止。",
+                    Text("智能识别游戏开图并自动贴合，关图后停止。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Switch(enabled, onCheckedChange = onEnabledChanged)
             }
-            Text(
-                "横屏：${if (hasLandscapeReference) "已设置" else "未设置"} · 竖屏：${if (hasPortraitReference) "已设置" else "未设置"}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 8.dp),
-            )
-            Text("先启动悬浮窗，在游戏中打开地图，再从“···”选择“设置开图参照”，框选攻略图之外的固定界面。横屏和竖屏分别设置。",
+            Text("点击屏幕第二象限（左上）时将频繁检测开图并自动贴合，点击第一象限（右上）时将频繁检测关图并关闭。系统已内置地图侧边栏参照，校准显示区域后即可自动生效，无需手动截取参照。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 6.dp),
             )
-            OutlinedButton(
-                onClick = {
-                    when {
-                        !UsageConsent.isAccepted(context) ->
-                            Toast.makeText(context, "请先阅读并确认使用声明。", Toast.LENGTH_SHORT).show()
-                        !OverlayService.isControlOverlayVisible() ->
-                            Toast.makeText(context, "请先在悬浮窗页面启动悬浮窗。", Toast.LENGTH_SHORT).show()
-                        else -> {
-                            OverlayService.sendAction(context, OverlayService.ACTION_CONFIGURE_AUTO_MAP_REFERENCE)
-                            Toast.makeText(context, "返回游戏并打开地图，从悬浮窗“···”选择“设置开图参照”。", Toast.LENGTH_LONG).show()
-                        }
-                    }
-                },
-                modifier = Modifier.padding(top = 10.dp),
-            ) {
-                Text(if (hasLandscapeReference || hasPortraitReference) "重新设置开图参照帧" else "设置开图参照帧")
-            }
         }
     }
 }

@@ -86,6 +86,7 @@ captures/
 !app/src/main/res/mipmap-*/ic_launcher_round.webp
 !app/src/main/res/drawable/sponsor_poster.png
 !app/src/main/res/drawable-nodpi/sponsor_poster.png
+!app/src/main/assets/recognition/map_open_sidebar.png
 
 # Documentation and other non-code content
 *.md

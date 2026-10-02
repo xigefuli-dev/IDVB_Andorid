@@ -125,8 +125,9 @@ class OverlayService : Service() {
     private var autoReferenceScreen = ""
     private var autoContext = ""
     private var autoGuideOwned = false
-    private var autoReferenceCapturing = false
-    private var autoReferenceEditor = false
+    private enum class AutoMapBurstMode { IDLE, OPEN, CLOSE }
+    private var autoBurstMode = AutoMapBurstMode.IDLE
+    private var autoBurstDeadlineMs = 0L
     private var autoBlocked = false
     private var autoCaptureBusy = false
     private var autoCaptureGeneration = 0
@@ -256,6 +257,7 @@ class OverlayService : Service() {
         scanProgressWindow = OverlayWindowManager(overlayContext)
         notifications = OverlayNotifications(overlayContext, ::screenSize)
         getSystemService(DisplayManager::class.java).registerDisplayListener(displayListener, Handler(Looper.getMainLooper()))
+        com.idvb.android.recognize.AccessibilityScreenCaptureService.screenTapListener = ::handleScreenTap
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -394,10 +396,9 @@ class OverlayService : Service() {
                 override fun onFreeAdjust() = enterFreeAdjustMode()
                 override fun onCalibrate() = enterBlueprintMode()
                 override fun onConfigureAutoReference() {
-                    if (autoExternalPackage() == null) notifyOverlay("请先返回游戏并打开地图")
-                    else if (scanning || blueprintView != null || candidateView != null || adjustView != null) notifyOverlay("请先完成当前操作")
-                    else enterAutoReferenceMode()
+                    notifyOverlay("已内置开图识别参照，无需手动截取设置")
                 }
+                override fun onScreenTouch(x: Float, y: Float) = handleScreenTap(x, y)
                 override fun onResetMap() = resetMapIdentity()
                 override fun onChooseMapClass() = toggleMapClassSubmenu()
                 override fun onClose() = stopSelf()
@@ -1741,25 +1742,52 @@ class OverlayService : Service() {
         return resolved
     }
 
-    private fun scheduleAutoMapOpen(delayMs: Long = com.idvb.android.alignment.AutoMapOpenTiming.INTERVAL_MS) {
+    private fun scheduleAutoMapOpen(delayMs: Long = com.idvb.android.alignment.AutoMapOpenTiming.BURST_INTERVAL_MS) {
         mainHandler.removeCallbacks(autoTick)
         if (!destroyed && AppServices.prefs.autoDetectMapOpenEnabled)
             mainHandler.postDelayed(autoTick, delayMs)
     }
 
+    private fun handleScreenTap(x: Float, y: Float) {
+        if (!AppServices.prefs.autoDetectMapOpenEnabled || !com.idvb.android.UsageConsent.isAccepted(this)) return
+        if (practiceForeground || scanning || blueprintView != null || adjustView != null || candidateView != null) return
+        val screen = screenSize()
+        if (screen.first <= screen.second) return
+        val target = autoExternalPackage() ?: return
+
+        val quadrant = com.idvb.android.alignment.ScreenQuadrant.fromCoordinates(x, y, screen.first, screen.second)
+        when (quadrant) {
+            com.idvb.android.alignment.ScreenQuadrant.SECOND -> {
+                // 点击第二象限区域（左上）：在接下来的一段时间里频繁尝试开图相似识别
+                triggerAutoMapBurst(AutoMapBurstMode.OPEN)
+            }
+            com.idvb.android.alignment.ScreenQuadrant.FIRST -> {
+                // 点击第一象限区域（右上）：频繁尝试关图相似识别
+                if (guideVisible || autoDetector?.isOpen == true) {
+                    triggerAutoMapBurst(AutoMapBurstMode.CLOSE)
+                }
+            }
+            else -> {}
+        }
+    }
+
+    private fun triggerAutoMapBurst(mode: AutoMapBurstMode) {
+        autoBurstMode = mode
+        autoBurstDeadlineMs = android.os.SystemClock.uptimeMillis() + com.idvb.android.alignment.AutoMapOpenTiming.BURST_DURATION_MS
+        mainHandler.removeCallbacks(autoTick)
+        scheduleAutoMapOpen(0L)
+    }
+
     private fun stopAutoMapGuide(reason: String) {
         autoPreviousMapFrame?.recycle(); autoPreviousMapFrame = null
-        val interruptedReferenceCapture = autoReferenceCapturing
         autoCaptureGeneration++
         val abort = abortAutoCapture
-        abortAutoCapture = null; autoCaptureBusy = false; autoReferenceCapturing = false
+        abortAutoCapture = null; autoCaptureBusy = false
         if (autoGuideOwned) {
             autoDetector?.alignmentInterrupted()
             hideGuide(manual = false)
         }
         abort?.invoke()
-        // The editor removed its monitoring tick. Cancellation on a map/floor change must restore it.
-        if (interruptedReferenceCapture) scheduleAutoMapOpen()
         if (autoPauseReason != reason) {
             autoPauseReason = reason
             autoDiagnostics.event(reason, autoReference, sessionLogs.sessionId, lastAlignmentRequestId,
@@ -1797,75 +1825,132 @@ class OverlayService : Service() {
     }
 
     private fun pollAutoMapOpen() {
-        // Reference setup owns its one-off capture even when detection is disabled or has no reference.
-        if (destroyed || autoReferenceEditor || autoReferenceCapturing) return
+        if (destroyed) return
         val now = android.os.SystemClock.uptimeMillis()
         if (!com.idvb.android.UsageConsent.isAccepted(this) || practiceForeground || !OverlayState.state.value.visible) {
-            stopAutoMapGuide("not-visible-or-consented"); scheduleAutoMapOpen(1_000L); return
+            stopAutoMapGuide("not-visible-or-consented")
+            autoBurstMode = AutoMapBurstMode.IDLE
+            return
         }
-        if (!AppServices.prefs.autoDetectMapOpenEnabled) { stopAutoMapGuide("disabled"); return }
+        if (!AppServices.prefs.autoDetectMapOpenEnabled) {
+            stopAutoMapGuide("disabled")
+            autoBurstMode = AutoMapBurstMode.IDLE
+            return
+        }
+
+        // 仅在脉冲激活窗口期内进行识别尝试
+        if (autoBurstMode == AutoMapBurstMode.IDLE || now > autoBurstDeadlineMs) {
+            autoBurstMode = AutoMapBurstMode.IDLE
+            return
+        }
+
         val screen = screenSize()
-        val screenKey = "$screen"
-        if (autoReferenceScreen != screenKey) {
-            stopAutoMapGuide("screen-changed")
+        if (screen.first <= screen.second) {
+            autoBurstMode = AutoMapBurstMode.IDLE
+            return
+        }
+
+        val calibrated = captureRegionPixels(screen.first, screen.second)
+        if (calibrated == null) {
+            // 用户尚未校准显示区域，无法确定右侧识别区域边界
+            autoBurstMode = AutoMapBurstMode.IDLE
+            return
+        }
+
+        val targetPackage = autoExternalPackage()
+        if (targetPackage == null) {
+            autoBurstMode = AutoMapBurstMode.IDLE
+            return
+        }
+
+        val calibRight = calibrated.right
+        val screenKey = "$screen:${calibRight.toInt()}"
+        if (autoReferenceScreen != screenKey || autoReference == null) {
             autoReferenceScreen = screenKey
-            autoReference = autoReferenceStore.load(screen.first > screen.second)?.takeIf {
-                it.screenWidth == screen.first && it.screenHeight == screen.second
-            }
-            autoDetector = null; autoContext = ""; autoBlocked = false; autoDiagnostics.clearFrames()
+            autoReference = autoReferenceStore.loadBuiltin(screen.first, screen.second, calibRight / screen.first, targetPackage)
+            autoDetector = null
+            autoContext = ""
+            autoBlocked = false
+            autoDiagnostics.clearFrames()
         }
         val reference = autoReference
-        if (reference == null) { stopAutoMapGuide("reference-required"); scheduleAutoMapOpen(1_000L); return }
-        val context = "${reference.id}:$screen:${currentMap?.id}:$floorIndex:${AppServices.prefs.alignmentMethodId}:${AppServices.prefs.captureRegion(screen.first > screen.second)?.joinToString(",")}:${AppServices.prefs.guideRegion(screen.first > screen.second)?.joinToString(",")}"
+        if (reference == null) {
+            autoBurstMode = AutoMapBurstMode.IDLE
+            return
+        }
+
+        val context = "${reference.id}:$screen:${currentMap?.id}:$floorIndex:${AppServices.prefs.alignmentMethodId}:${calibrated.toShortString()}"
         if (context != autoContext || autoDetector == null) {
             stopAutoMapGuide("context-changed")
             autoContext = context
             autoBlocked = false
             autoDetector = com.idvb.android.alignment.AutoMapOpenDetector(
-                com.idvb.android.alignment.AutoMapOpenDetector.signature(reference.signaturePixels))
+                com.idvb.android.alignment.AutoMapOpenDetector.signature(reference.signaturePixels),
+                com.idvb.android.alignment.AutoMapOpenConfig(
+                    openThreshold = 0.70,
+                    closeThreshold = 0.35,
+                    openFrames = 1,
+                    closeFrames = 1,
+                )
+            )
         }
         val detector = requireNotNull(autoDetector)
-        if (AccessibilityScreenCaptureService.foregroundPackage != reference.targetPackage || !AccessibilityScreenCaptureService.available || autoBlocked) {
-            detector.observe(null, now); stopAutoMapGuide(if (autoBlocked) "reference-overlapped" else "game-not-foreground-or-capture-unavailable")
-            scheduleAutoMapOpen(1_000L); return
+        if (AccessibilityScreenCaptureService.foregroundPackage != targetPackage || !AccessibilityScreenCaptureService.available || autoBlocked) {
+            detector.observe(null, now)
+            stopAutoMapGuide(if (autoBlocked) "reference-overlapped" else "game-not-foreground-or-capture-unavailable")
+            autoBurstMode = AutoMapBurstMode.IDLE
+            return
         }
-        // The readiness capture owns the screenshot slot until it releases its clean map frame.
-        if (autoReferenceCapturing || autoCaptureBusy) { scheduleAutoMapOpen(); return }
+
+        if (autoCaptureBusy) {
+            scheduleAutoMapOpen(com.idvb.android.alignment.AutoMapOpenTiming.BURST_INTERVAL_MS)
+            return
+        }
         if (scanning || blueprintView != null || adjustView != null || candidateView != null || candidateResult != null) {
-            detector.observe(null, now); stopAutoMapGuide("manual-work"); scheduleAutoMapOpen(); return
+            detector.observe(null, now)
+            stopAutoMapGuide("manual-work")
+            autoBurstMode = AutoMapBurstMode.IDLE
+            return
         }
+
         val region = autoReferenceBounds(reference)
         if (autoRegionOccluded(region)) {
             detector.observe(null, now)
-            if (now - lastAutoFrameMs > 1_500L) stopAutoMapGuide("reference-temporarily-occluded")
-            scheduleAutoMapOpen(); return
+            scheduleAutoMapOpen(com.idvb.android.alignment.AutoMapOpenTiming.BURST_INTERVAL_MS)
+            return
         }
+
         autoCaptureBusy = true
         val generation = ++autoCaptureGeneration
         val started = System.nanoTime()
         val startedAtMs = android.os.SystemClock.uptimeMillis()
-        val mapRegion = captureRegionPixels(screen.first, screen.second)?.let {
+
+        val mapRegion = calibrated.let {
             Rect(it.left.toInt().coerceIn(0, screen.first), it.top.toInt().coerceIn(0, screen.second),
                 it.right.toInt().coerceIn(0, screen.first), it.bottom.toInt().coerceIn(0, screen.second))
-        }?.takeIf { currentMap != null && !aligning && it.width() > 0 && it.height() > 0 && !autoRegionOccluded(RectF(it)) }
+        }.takeIf { currentMap != null && !aligning && it.width() > 0 && it.height() > 0 && !autoRegionOccluded(RectF(it)) }
+
         val referenceRegion = Rect(region.left.toInt(), region.top.toInt(), region.right.toInt(), region.bottom.toInt())
         val captureBounds = if (mapRegion == null) referenceRegion else Rect(0, 0, screen.first, screen.second)
         val sampler = com.idvb.android.alignment.AutoMapOpenFrameSampler(mainHandler, accessibilityCaptureExecutor) { rect, callback ->
             AccessibilityScreenCaptureService.capture(rect, accessibilityCaptureExecutor, callback, AlignmentLogSink { event -> autoDiagnostics.captureEvent(event) })
         }
+
         abortAutoCapture = sampler.sampleWithFrame(referenceRegion, captureBounds, mapRegion,
             isCurrent = { !destroyed && generation == autoCaptureGeneration && autoContext == context &&
                 !scanning && blueprintView == null && adjustView == null && candidateView == null &&
                 AppServices.prefs.autoDetectMapOpenEnabled && com.idvb.android.UsageConsent.isAccepted(this) &&
                 !practiceForeground && OverlayState.state.value.visible && screenSize() == screen &&
-                AccessibilityScreenCaptureService.foregroundPackage == reference.targetPackage },
+                AccessibilityScreenCaptureService.foregroundPackage == targetPackage &&
+                autoBurstMode != AutoMapBurstMode.IDLE },
             isOccluded = { autoRegionOccluded(region) },
             isMapOccluded = { mapRegion == null || autoRegionOccluded(RectF(mapRegion)) },
             log = AlignmentLogSink { event -> autoDiagnostics.captureEvent(event) }) { result ->
             if (destroyed || generation != autoCaptureGeneration) {
                 result.getOrNull()?.mapFrame?.recycle(); return@sampleWithFrame
             }
-            abortAutoCapture = null; autoCaptureBusy = false
+            abortAutoCapture = null
+            autoCaptureBusy = false
             val sampleTime = android.os.SystemClock.uptimeMillis()
             val pixels = result.getOrNull()?.pixels
             var mapFrame = result.getOrNull()?.mapFrame
@@ -1876,15 +1961,31 @@ class OverlayService : Service() {
             val observation = detector.observe(pixels?.let(com.idvb.android.alignment.AutoMapOpenDetector::signature), sampleTime)
             val decisionMs = (System.nanoTime() - decidedAt) / 1e6
             if (pixels != null) lastAutoFrameMs = sampleTime
-            val recordingAt = System.nanoTime()
+
             autoDiagnostics.frame(reference, pixels, observation, sampleTime, (decidedAt - started) / 1e6,
                 startedAtMs, decisionMs, mapFrame != null, result.exceptionOrNull()?.toString())
-            autoDiagnostics.captureEvent(AlignmentLogEvent("diagnostics.detector-frame", "frame-json-and-logcat-cost-excluding-this-event",
-                durationNanos = System.nanoTime() - recordingAt))
-            if (observation.transition == com.idvb.android.alignment.AutoMapOpenTransition.CLOSED) stopAutoMapGuide("closed")
-            if (observation.transition != com.idvb.android.alignment.AutoMapOpenTransition.NONE)
-                autoDiagnostics.event(observation.transition.name.lowercase(), reference, sessionLogs.sessionId, lastAlignmentRequestId)
-            if (pixels == null && sampleTime - lastAutoFrameMs > 1_500L) stopAutoMapGuide("capture-unavailable")
+
+            val score = observation.comparison?.score ?: 0.0
+            val isOpenScore = score >= detector.config.openThreshold
+            val isCloseScore = score <= detector.config.closeThreshold
+
+            if (autoBurstMode == AutoMapBurstMode.CLOSE) {
+                if (observation.transition == com.idvb.android.alignment.AutoMapOpenTransition.CLOSED || isCloseScore) {
+                    stopAutoMapGuide("closed")
+                    autoDiagnostics.event("closed", reference, sessionLogs.sessionId, lastAlignmentRequestId)
+                    autoBurstMode = AutoMapBurstMode.IDLE
+                }
+            } else if (autoBurstMode == AutoMapBurstMode.OPEN) {
+                if (observation.transition == com.idvb.android.alignment.AutoMapOpenTransition.OPENED || isOpenScore) {
+                    autoDiagnostics.event("opened", reference, sessionLogs.sessionId, lastAlignmentRequestId)
+                    autoBurstMode = AutoMapBurstMode.IDLE
+                }
+            }
+
+            if (observation.transition == com.idvb.android.alignment.AutoMapOpenTransition.CLOSED) {
+                stopAutoMapGuide("closed")
+            }
+
             if (pixels != null && currentMap != null && !aligning && (!guideVisible || autoGuideOwned) && detector.shouldAttemptAlignment(sampleTime)) {
                 val cycle = detector.alignmentStarted(sampleTime)
                 if (cycle != null) {
@@ -1902,102 +2003,34 @@ class OverlayService : Service() {
                     try {
                         if (showGuide(renderGuide = false)) {
                             alignGuide(began, System.nanoTime() - began, cycle, preparedFrames)
-                            // Permission/calibration preflight can return before an alignment trace exists.
                             if (!aligning && detector.alignmentInFlight) detector.alignmentFinished(false, sampleTime, cycle)
-                        } else { autoGuideOwned = false; detector.alignmentFinished(false, sampleTime, cycle) }
-                    } finally { preparedFrames.forEach { it.recycle() } }
+                        } else {
+                            autoGuideOwned = false; detector.alignmentFinished(false, sampleTime, cycle)
+                        }
+                    } finally {
+                        preparedFrames.forEach { it.recycle() }
+                    }
                 }
             }
-            if (mapFrame != null && observation.comparison?.score?.let { it >= detector.config.openThreshold } == true && !aligning) {
-                autoPreviousMapFrame = mapFrame; mapFrame = null
+
+            if (mapFrame != null && isOpenScore && !aligning) {
+                autoPreviousMapFrame = mapFrame
+                mapFrame = null
             }
             mapFrame?.recycle()
-            // A prior frame is either consumed by readiness above or replaced/discarded here.
             if (!previousTransferred) previous?.recycle()
-            scheduleAutoMapOpen(com.idvb.android.alignment.AutoMapOpenTiming.delayAfterSample(startedAtMs, android.os.SystemClock.uptimeMillis()))
-        }
-    }
 
-    private fun enterAutoReferenceMode() {
-        val target = autoExternalPackage() ?: return
-        mainHandler.removeCallbacks(autoTick)
-        stopAutoMapGuide("setting-reference")
-        autoDetector?.reset()
-        val size = screenSize()
-        blueprintWindow.x = 0; blueprintWindow.y = 0; blueprintWindow.width = size.first; blueprintWindow.height = size.second
-        autoReferenceEditor = true
-        blueprintView = BlueprintCalibrationView(overlayContext, "开图参照 · 框选固定游戏界面", "请选择攻略图覆盖之外的按钮、边框等细节").apply {
-            listener = object : BlueprintCalibrationView.Listener {
-                override fun onCancelled() { exitBlueprintMode(); autoReferenceEditor = false; scheduleAutoMapOpen() }
-                override fun onConfirmed(region: RectF) {
-                    exitBlueprintMode(); autoReferenceEditor = false
-                    val occupied = captureRegionPixels(size.first, size.second)
-                    if (occupied != null && RectF.intersects(region, occupied)) {
-                        notifyOverlay("检测区域应在攻略图覆盖之外，请重新设置开图参照", 6_000L); scheduleAutoMapOpen(); return
-                    }
-                    if (autoRegionOccluded(region)) {
-                        notifyOverlay("检测区域被悬浮窗遮挡，请移开控制球后重设", 6_000L); scheduleAutoMapOpen(); return
-                    }
-                    val normalized = floatArrayOf(region.left / size.first, region.top / size.second, region.right / size.first, region.bottom / size.second)
-                    captureAutoReference(size, normalized, target)
-                }
+            if (autoBurstMode != AutoMapBurstMode.IDLE && android.os.SystemClock.uptimeMillis() < autoBurstDeadlineMs) {
+                scheduleAutoMapOpen(com.idvb.android.alignment.AutoMapOpenTiming.delayAfterSample(startedAtMs, android.os.SystemClock.uptimeMillis()))
+            } else {
+                autoBurstMode = AutoMapBurstMode.IDLE
             }
         }
-        blueprintWindow.add(requireNotNull(blueprintView), locked = false)
-    }
-
-    private fun captureAutoReference(size: Pair<Int, Int>, region: FloatArray, target: String) {
-        autoReferenceCapturing = true
-        val generation = ++autoCaptureGeneration
-        val bounds = RectF(kotlin.math.floor(region[0].toDouble() * size.first).toFloat(),
-            kotlin.math.floor(region[1].toDouble() * size.second).toFloat(),
-            kotlin.math.ceil(region[2].toDouble() * size.first).toFloat(), kotlin.math.ceil(region[3].toDouble() * size.second).toFloat())
-        fun current() = !destroyed && generation == autoCaptureGeneration && screenSize() == size &&
-            autoExternalPackage() == target && !autoRegionOccluded(bounds)
-        // Only the one-off editor is removed; monitoring never toggles overlay surfaces.
-        balls?.postOnAnimation { balls?.postOnAnimation ready@{
-            if (!current()) {
-                if (generation == autoCaptureGeneration) {
-                    autoReferenceCapturing = false
-                    notifyOverlay("参照区域或游戏状态已改变，请重新设置"); scheduleAutoMapOpen()
-                }
-                return@ready
-            }
-            abortAutoCapture = AccessibilityScreenCaptureService.capture(Rect(0, 0, size.first, size.second), accessibilityCaptureExecutor, { result ->
-                mainHandler.post captured@{
-                    val bitmap = result.getOrNull()
-                    if (!current()) {
-                        bitmap?.recycle()
-                        if (generation == autoCaptureGeneration) {
-                            abortAutoCapture = null; autoReferenceCapturing = false
-                            notifyOverlay("参照捕获时出现遮挡或画面改变，请重新设置"); scheduleAutoMapOpen()
-                        }
-                        return@captured
-                    }
-                    accessibilityCaptureExecutor.execute {
-                        val saved = runCatching {
-                            requireNotNull(bitmap) { result.exceptionOrNull()?.message ?: "截图失败" }
-                            autoReferenceStore.save(bitmap, region, target)
-                        }
-                        bitmap?.recycle()
-                        mainHandler.post {
-                            if (!destroyed && generation == autoCaptureGeneration) {
-                                abortAutoCapture = null; autoReferenceCapturing = false
-                                saved.onSuccess {
-                                    autoReference = it; autoReferenceScreen = "$size"; autoContext = ""; autoDetector = null; autoBlocked = false
-                                    autoDiagnostics.clearFrames()
-                                    notifyOverlay("开图参照已保存", 3_000L)
-                                }.onFailure { notifyOverlay("无法保存开图参照：${it.message}", 6_000L) }
-                                scheduleAutoMapOpen()
-                            }
-                        }
-                    }
-                }
-            })
-        } }
     }
 
     override fun onDestroy() {
+        com.idvb.android.recognize.AccessibilityScreenCaptureService.screenTapListener = null
+        autoBurstMode = AutoMapBurstMode.IDLE
         autoPreviousMapFrame?.recycle(); autoPreviousMapFrame = null
         mainHandler.removeCallbacks(autoTick)
         autoCaptureGeneration++; abortAutoCapture?.invoke(); abortAutoCapture = null

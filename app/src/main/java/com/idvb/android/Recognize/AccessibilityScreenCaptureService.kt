@@ -22,7 +22,15 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+        if (event == null) return
+        if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            val rect = Rect()
+            event.source?.getBoundsInScreen(rect)
+            if (!rect.isEmpty) {
+                screenTapListener?.invoke(rect.centerX().toFloat(), rect.centerY().toFloat())
+            }
+        }
+        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         // Overlay views are our UI above the game, not a change of the underlying app.
         if (event.className?.toString()?.startsWith("com.idvb.android.overlay.") == true) return
         val updated = event.packageName?.toString()
@@ -33,7 +41,7 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
     override fun onInterrupt() { foregroundPackage = null }
 
     override fun onDestroy() {
-        if (instance === this) { instance = null; foregroundPackage = null }
+        if (instance === this) { instance = null; foregroundPackage = null; screenTapListener = null }
         super.onDestroy()
     }
 
@@ -41,6 +49,7 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
         @Volatile private var instance: AccessibilityScreenCaptureService? = null
         @Volatile var foregroundPackage: String? = null
             private set
+        @Volatile var screenTapListener: ((Float, Float) -> Unit)? = null
         // Shared by detection, readiness and scan. Android platform baseline is 333ms;
         // retain a small scheduling margin rather than causing request-local retry storms.
         private var lastScreenshotAttemptMs = 0L

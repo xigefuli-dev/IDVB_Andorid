@@ -5,23 +5,23 @@ import org.junit.Test
 
 class AutoMapOpenTimingTest {
     @Test fun captureAndProcessingDoNotAddAnotherFullPollingInterval() {
-        assertEquals(325L, AutoMapOpenTiming.delayAfterSample(1_000L, 1_025L))
-        assertEquals(0L, AutoMapOpenTiming.delayAfterSample(1_000L, 1_350L))
-        assertEquals(0L, AutoMapOpenTiming.delayAfterSample(1_000L, 1_900L))
+        assertEquals(155L, AutoMapOpenTiming.delayAfterSample(1_000L, 1_025L))
+        assertEquals(0L, AutoMapOpenTiming.delayAfterSample(1_000L, 1_180L))
+        assertEquals(0L, AutoMapOpenTiming.delayAfterSample(1_000L, 1_500L))
     }
 
-    @Test fun twoFrameConfirmationKeepsTheSameBoundAcrossRepeatedOpenCloseCycles() {
+    @Test fun burstIntervalKeepsTheSameBoundAcrossRepeatedSamples() {
         var now = 0L
         repeat(20) {
             val began = now
             now += 25L
             now += AutoMapOpenTiming.delayAfterSample(began, now)
-            assertEquals(began + 350L, now)
+            assertEquals(began + 180L, now)
         }
     }
 
     @Test fun clockBeforeRequestDoesNotCauseANegativeOrUnboundedDelay() {
-        assertEquals(350L, AutoMapOpenTiming.delayAfterSample(1_000L, 900L))
-        assertEquals(350L, AutoMapOpenTiming.delayAfterSample(1_000L, 1_000L))
+        assertEquals(180L, AutoMapOpenTiming.delayAfterSample(1_000L, 900L))
+        assertEquals(180L, AutoMapOpenTiming.delayAfterSample(1_000L, 1_000L))
     }
 }
