@@ -398,7 +398,8 @@ class OverlayService : Service() {
                 override fun onConfigureAutoReference() {
                     notifyOverlay("已内置开图识别参照，无需手动截取设置")
                 }
-                override fun onScreenTouch(x: Float, y: Float) = handleScreenTap(x, y)
+                override fun onOutsideTouch() = handleOutsideTouch()
+                override fun onScreenTouch(x: Float, y: Float) = handleOutsideTouch()
                 override fun onResetMap() = resetMapIdentity()
                 override fun onChooseMapClass() = toggleMapClassSubmenu()
                 override fun onClose() = stopSelf()
@@ -1748,32 +1749,39 @@ class OverlayService : Service() {
             mainHandler.postDelayed(autoTick, delayMs)
     }
 
-    private fun handleScreenTap(x: Float, y: Float) {
+    private var lastOpenBurstFailureCooldownMs = 0L
+    private var openBurstMissCount = 0
+
+    private fun handleOutsideTouch() {
         if (!AppServices.prefs.autoDetectMapOpenEnabled || !com.idvb.android.UsageConsent.isAccepted(this)) return
         if (practiceForeground || scanning || blueprintView != null || adjustView != null || candidateView != null) return
         val screen = screenSize()
         if (screen.first <= screen.second) return
-        val target = autoExternalPackage() ?: return
 
-        val quadrant = com.idvb.android.alignment.ScreenQuadrant.fromCoordinates(x, y, screen.first, screen.second)
-        when (quadrant) {
-            com.idvb.android.alignment.ScreenQuadrant.SECOND -> {
-                // 点击第二象限区域（左上）：在接下来的一段时间里频繁尝试开图相似识别
-                triggerAutoMapBurst(AutoMapBurstMode.OPEN)
+        val now = android.os.SystemClock.uptimeMillis()
+        if (guideVisible || autoDetector?.isOpen == true) {
+            android.util.Log.i("IDVB-AutoMap", "handleOutsideTouch: guide open -> triggering CLOSE burst")
+            triggerAutoMapBurst(AutoMapBurstMode.CLOSE)
+        } else {
+            if (now < lastOpenBurstFailureCooldownMs) {
+                return
             }
-            com.idvb.android.alignment.ScreenQuadrant.FIRST -> {
-                // 点击第一象限区域（右上）：频繁尝试关图相似识别
-                if (guideVisible || autoDetector?.isOpen == true) {
-                    triggerAutoMapBurst(AutoMapBurstMode.CLOSE)
-                }
-            }
-            else -> {}
+            android.util.Log.i("IDVB-AutoMap", "handleOutsideTouch: guide closed -> triggering OPEN burst")
+            triggerAutoMapBurst(AutoMapBurstMode.OPEN)
         }
     }
 
+    private fun handleScreenTap(x: Float, y: Float) {
+        handleOutsideTouch()
+    }
+
     private fun triggerAutoMapBurst(mode: AutoMapBurstMode) {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (autoBurstMode == mode && now < autoBurstDeadlineMs) return
         autoBurstMode = mode
-        autoBurstDeadlineMs = android.os.SystemClock.uptimeMillis() + com.idvb.android.alignment.AutoMapOpenTiming.BURST_DURATION_MS
+        openBurstMissCount = 0
+        autoBurstDeadlineMs = now + com.idvb.android.alignment.AutoMapOpenTiming.BURST_DURATION_MS
+        android.util.Log.i("IDVB-AutoMap", "triggerAutoMapBurst: mode=$mode deadlineMs=$autoBurstDeadlineMs")
         mainHandler.removeCallbacks(autoTick)
         scheduleAutoMapOpen(0L)
     }
@@ -1819,9 +1827,12 @@ class OverlayService : Service() {
     }
 
     private fun autoExternalPackage(): String? {
-        val name = AccessibilityScreenCaptureService.foregroundPackage ?: return null
+        val name = AccessibilityScreenCaptureService.foregroundPackage
         val home = packageManager.resolveActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0)?.activityInfo?.packageName
-        return name.takeUnless { it == packageName || it == "com.idvb.android" || it == home || it == "android" || it.startsWith("com.android.") }
+        if (name != null) {
+            return name.takeUnless { it == packageName || it == "com.idvb.android" || it == home || it == "android" || it.startsWith("com.android.") }
+        }
+        return "external_game"
     }
 
     private fun pollAutoMapOpen() {
@@ -1857,11 +1868,7 @@ class OverlayService : Service() {
             return
         }
 
-        val targetPackage = autoExternalPackage()
-        if (targetPackage == null) {
-            autoBurstMode = AutoMapBurstMode.IDLE
-            return
-        }
+        val targetPackage = autoExternalPackage() ?: "external_game"
 
         val calibRight = calibrated.right
         val screenKey = "$screen:${calibRight.toInt()}"
@@ -1895,7 +1902,10 @@ class OverlayService : Service() {
             )
         }
         val detector = requireNotNull(autoDetector)
-        if (AccessibilityScreenCaptureService.foregroundPackage != targetPackage || !AccessibilityScreenCaptureService.available || autoBlocked) {
+        val currentPkg = AccessibilityScreenCaptureService.foregroundPackage
+        val home = packageManager.resolveActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0)?.activityInfo?.packageName
+        val isBlockedPkg = currentPkg != null && (currentPkg == packageName || currentPkg == "com.idvb.android" || currentPkg == home || currentPkg == "android" || currentPkg.startsWith("com.android."))
+        if (isBlockedPkg || !AccessibilityScreenCaptureService.available || autoBlocked) {
             detector.observe(null, now)
             stopAutoMapGuide(if (autoBlocked) "reference-overlapped" else "game-not-foreground-or-capture-unavailable")
             autoBurstMode = AutoMapBurstMode.IDLE
@@ -1941,7 +1951,6 @@ class OverlayService : Service() {
                 !scanning && blueprintView == null && adjustView == null && candidateView == null &&
                 AppServices.prefs.autoDetectMapOpenEnabled && com.idvb.android.UsageConsent.isAccepted(this) &&
                 !practiceForeground && OverlayState.state.value.visible && screenSize() == screen &&
-                AccessibilityScreenCaptureService.foregroundPackage == targetPackage &&
                 autoBurstMode != AutoMapBurstMode.IDLE },
             isOccluded = { autoRegionOccluded(region) },
             isMapOccluded = { mapRegion == null || autoRegionOccluded(RectF(mapRegion)) },
@@ -1968,17 +1977,27 @@ class OverlayService : Service() {
             val score = observation.comparison?.score ?: 0.0
             val isOpenScore = score >= detector.config.openThreshold
             val isCloseScore = score <= detector.config.closeThreshold
+            android.util.Log.i("IDVB-AutoMap", "sample: mode=$autoBurstMode score=${"%.3f".format(score)} isOpen=$isOpenScore isClose=$isCloseScore decisionMs=${"%.1f".format(decisionMs)}")
 
             if (autoBurstMode == AutoMapBurstMode.CLOSE) {
                 if (observation.transition == com.idvb.android.alignment.AutoMapOpenTransition.CLOSED || isCloseScore) {
+                    android.util.Log.i("IDVB-AutoMap", "CLOSE burst matched (score=${"%.3f".format(score)}) -> closing guide")
                     stopAutoMapGuide("closed")
                     autoDiagnostics.event("closed", reference, sessionLogs.sessionId, lastAlignmentRequestId)
                     autoBurstMode = AutoMapBurstMode.IDLE
                 }
             } else if (autoBurstMode == AutoMapBurstMode.OPEN) {
                 if (observation.transition == com.idvb.android.alignment.AutoMapOpenTransition.OPENED || isOpenScore) {
+                    android.util.Log.i("IDVB-AutoMap", "OPEN burst matched (score=${"%.3f".format(score)}) -> opening guide")
                     autoDiagnostics.event("opened", reference, sessionLogs.sessionId, lastAlignmentRequestId)
                     autoBurstMode = AutoMapBurstMode.IDLE
+                } else {
+                    openBurstMissCount++
+                    if (openBurstMissCount >= 2 && score < 0.20) {
+                        android.util.Log.i("IDVB-AutoMap", "OPEN burst missed ($openBurstMissCount attempts, score=${"%.3f".format(score)}) -> cooldown 800ms")
+                        autoBurstMode = AutoMapBurstMode.IDLE
+                        lastOpenBurstFailureCooldownMs = android.os.SystemClock.uptimeMillis() + 800L
+                    }
                 }
             }
 

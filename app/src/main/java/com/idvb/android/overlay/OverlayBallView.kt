@@ -18,6 +18,7 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
         fun useAssistTouchToggle(): Boolean = false
         fun onConfigureAutoReference() {}
         fun onScreenTouch(x: Float, y: Float) {}
+        fun onOutsideTouch() {}
         fun onResetMap() {}
         fun onChooseMapClass() {}
         fun onOpenGuide() {}
@@ -295,7 +296,11 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (event.actionMasked == MotionEvent.ACTION_OUTSIDE || event.actionMasked == MotionEvent.ACTION_DOWN) {
+        if (event.actionMasked == MotionEvent.ACTION_OUTSIDE) {
+            android.util.Log.d("IDVB-AutoMap", "OverlayBallView: ACTION_OUTSIDE received")
+            listener?.onOutsideTouch()
+            return true
+        } else if (event.actionMasked == MotionEvent.ACTION_DOWN) {
             val location = IntArray(2).also(::getLocationOnScreen)
             val rx = if (event.rawX != 0f) event.rawX else (location[0] + event.x)
             val ry = if (event.rawY != 0f) event.rawY else (location[1] + event.y)

@@ -182,7 +182,7 @@ private fun AutoMapOpenSettings(enabled: Boolean, onEnabledChanged: (Boolean) ->
                 }
                 Switch(enabled, onCheckedChange = onEnabledChanged)
             }
-            Text("点击屏幕第二象限（左上）时将频繁检测开图并自动贴合，点击第一象限（右上）时将频繁检测关图并关闭。系统已内置地图侧边栏参照，校准显示区域后即可自动生效，无需手动截取参照。",
+            Text("点击屏幕时自动触发即时检测与贴合，关闭地图后自动隐去。系统已内置地图侧边栏参照，校准显示区域后即可生效，无需手动截取参照，空闲时 0 轮询以保证流畅与省电。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 6.dp),
