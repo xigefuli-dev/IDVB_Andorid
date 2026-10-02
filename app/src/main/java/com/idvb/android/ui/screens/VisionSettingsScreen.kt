@@ -2,6 +2,8 @@ package com.idvb.android.ui.screens
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -24,23 +26,38 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.LayoutDirection
 import com.idvb.android.AppServices
+import com.idvb.android.data.ScreenCaptureMethod
 import com.idvb.android.ui.openAccessibilityServiceSettings
 import com.idvb.android.ui.theme.SignalGreenDeep
 
 @Composable
 fun VisionSettingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
+    var captureMethod by remember { mutableStateOf(AppServices.prefs.screenCaptureMethod) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp)) {
         Row(Modifier.fillMaxWidth().height(76.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回") }
             Text("视觉", style = MaterialTheme.typography.headlineSmall)
         }
         Spacer(Modifier.height(10.dp))
-        Text("无障碍", style = MaterialTheme.typography.labelLarge, color = SignalGreenDeep)
-        Text("通过 IDVB 无障碍服务截取识别画面。需要 Android 11 或更高版本。",
-            style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 12.dp))
-        TextButton(onClick = { openAccessibilityServiceSettings(context) }, modifier = Modifier.align(Alignment.End)) {
-            Text("打开 IDVB 无障碍设置")
+        Text("屏幕捕获方式", style = MaterialTheme.typography.labelLarge, color = SignalGreenDeep)
+        Column(Modifier.selectableGroup().padding(vertical = 10.dp)) {
+            CaptureSourceOption("屏幕捕获", "使用实时屏幕帧，自动开图响应更快；启动服务时确认系统屏幕授权。",
+                captureMethod == ScreenCaptureMethod.MEDIA_PROJECTION) {
+                captureMethod = ScreenCaptureMethod.MEDIA_PROJECTION
+                AppServices.prefs.screenCaptureMethod = captureMethod
+            }
+            CaptureSourceOption("无障碍", "通过 IDVB 无障碍服务截图。系统限制约 333ms 一次；需要 Android 11 或更高版本。",
+                captureMethod == ScreenCaptureMethod.ACCESSIBILITY,
+                enabled = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                captureMethod = ScreenCaptureMethod.ACCESSIBILITY
+                AppServices.prefs.screenCaptureMethod = captureMethod
+            }
+        }
+        if (captureMethod == ScreenCaptureMethod.ACCESSIBILITY) {
+            TextButton(onClick = { openAccessibilityServiceSettings(context) }, modifier = Modifier.align(Alignment.End)) {
+                Text("打开 IDVB 无障碍设置")
+            }
         }
         Spacer(Modifier.height(8.dp))
         Text("攻略地图显示", style = MaterialTheme.typography.labelLarge, color = SignalGreenDeep)
@@ -79,6 +96,20 @@ fun VisionSettingsScreen(onBack: () -> Unit) {
                 AppServices.prefs.removeGuideBackground = it
             },
         )
+    }
+}
+
+@Composable
+private fun CaptureSourceOption(title: String, description: String, selected: Boolean, enabled: Boolean = true, onSelect: () -> Unit) {
+    Row(Modifier.fillMaxWidth().selectable(selected, onClick = onSelect,
+        enabled = enabled, role = androidx.compose.ui.semantics.Role.RadioButton).padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        RadioButton(selected, onClick = null, enabled = enabled)
+        Column(Modifier.padding(start = 12.dp)) {
+            Text(title, fontWeight = FontWeight.Medium)
+            Text(description, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 

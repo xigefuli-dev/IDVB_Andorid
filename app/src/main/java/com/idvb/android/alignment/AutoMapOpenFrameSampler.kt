@@ -11,6 +11,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 class AutoMapOpenFrameSampler(
     private val handler: Handler,
     private val executor: Executor,
+    private val captureMethod: String = "ACCESSIBILITY",
+    private val compare: ((IntArray) -> AutoMapOpenComparison)? = null,
+    private val frameSequence: () -> Long? = { null },
     private val captureFrame: (Rect, (Result<Bitmap>) -> Unit) -> (() -> Unit),
 ) {
     fun sample(bounds: Rect, isCurrent: () -> Boolean, isOccluded: () -> Boolean,
@@ -57,18 +60,21 @@ class AutoMapOpenFrameSampler(
                                 val pixels = try { AutoMapOpenReferenceStore.samplePixels(patch) }
                                     finally { if (patch !== bitmap) patch.recycle() }
                                 log.emit(AlignmentLogEvent("sample.roi", durationNanos = System.nanoTime() - reducedAt))
-                                if (retainMap && captureBounds.contains(requireNotNull(mapBounds))) {
+                                val decidedAt = System.nanoTime()
+                                val comparison = compare?.invoke(pixels)
+                                val decisionMs = (System.nanoTime() - decidedAt) / 1e6
+                                if (retainMap && (comparison == null || comparison.score >= .85) && captureBounds.contains(requireNotNull(mapBounds))) {
                                     val copiedAt = System.nanoTime()
                                     val cropped = Bitmap.createBitmap(bitmap, mapBounds.left - captureBounds.left,
                                         mapBounds.top - captureBounds.top, mapBounds.width(), mapBounds.height())
                                     val owned = if (cropped === bitmap) requireNotNull(bitmap.copy(Bitmap.Config.ARGB_8888, false)) else cropped
-                                    retained = PreparedMapFrame(owned, Rect(mapBounds), startedAtMs, receivedAtMs)
+                                    retained = PreparedMapFrame(owned, Rect(mapBounds), startedAtMs, receivedAtMs, captureMethod, frameSequence())
                                     log.emit(AlignmentLogEvent("sample.clean-viewport", durationNanos = System.nanoTime() - copiedAt,
                                         measurements = mapOf("captureStartedAtMs" to startedAtMs.toDouble(), "captureReceivedAtMs" to receivedAtMs.toDouble(),
                                             "left" to mapBounds.left.toDouble(), "top" to mapBounds.top.toDouble(),
                                             "width" to mapBounds.width().toDouble(), "height" to mapBounds.height().toDouble())))
                                 }
-                                AutoMapOpenSample(pixels, retained)
+                                AutoMapOpenSample(pixels, retained, comparison, decisionMs)
                             }
                             if (sampled.isFailure) retained?.recycle()
                             bitmap.recycle()

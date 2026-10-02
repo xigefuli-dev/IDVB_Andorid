@@ -19,29 +19,26 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
     override fun onServiceConnected() {
         instance = this
         foregroundPackage = null
+        foregroundChangedListener?.invoke(null)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
-        if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
-            val rect = Rect()
-            event.source?.getBoundsInScreen(rect)
-            if (!rect.isEmpty) {
-                screenTapListener?.invoke(rect.centerX().toFloat(), rect.centerY().toFloat())
-            }
-        }
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         // Overlay views are our UI above the game, not a change of the underlying app.
         if (event.className?.toString()?.startsWith("com.idvb.android.overlay.") == true) return
         val updated = event.packageName?.toString()
         if (updated != foregroundPackage) android.util.Log.i("IDVB-Foreground",
             "previous=$foregroundPackage package=$updated class=${event.className} window=${event.windowId}")
-        foregroundPackage = updated
+        if (updated != foregroundPackage) {
+            foregroundPackage = updated
+            foregroundChangedListener?.invoke(updated)
+        }
     }
-    override fun onInterrupt() { foregroundPackage = null }
+    override fun onInterrupt() { foregroundPackage = null; foregroundChangedListener?.invoke(null) }
 
     override fun onDestroy() {
-        if (instance === this) { instance = null; foregroundPackage = null; screenTapListener = null }
+        if (instance === this) { instance = null; foregroundPackage = null; foregroundChangedListener?.invoke(null) }
         super.onDestroy()
     }
 
@@ -49,7 +46,7 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
         @Volatile private var instance: AccessibilityScreenCaptureService? = null
         @Volatile var foregroundPackage: String? = null
             private set
-        @Volatile var screenTapListener: ((Float, Float) -> Unit)? = null
+        @Volatile var foregroundChangedListener: ((String?) -> Unit)? = null
         // Shared by detection, readiness and scan. Android platform baseline is 333ms;
         // retain a small scheduling margin rather than causing request-local retry storms.
         private var lastScreenshotAttemptMs = 0L

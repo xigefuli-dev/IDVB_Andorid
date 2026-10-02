@@ -25,6 +25,7 @@ data class AutoMapOpenReference(
     val targetPackage: String,
     val createdAtMillis: Long,
     val pngSha256: String,
+    val sidebarAspectRatio: Double? = null,
 )
 
 /** Private, replayable references. Invalid or incomplete files never enable the detector. */
@@ -88,7 +89,8 @@ class AutoMapOpenReferenceStore(private val context: Context) {
      * 识别区域从用户已校准区域的最右侧边延伸至屏幕本身的最右侧边（高度为屏幕横放高度）。
      */
     fun loadBuiltin(screenWidth: Int, screenHeight: Int, calibratedRightRatio: Float, targetPackage: String? = null): AutoMapOpenReference? = synchronized(lock) {
-        if (screenWidth <= 0 || screenHeight <= 0 || calibratedRightRatio <= 0f || calibratedRightRatio >= 1f) return@synchronized null
+        if (screenWidth <= screenHeight || screenHeight <= 0 || !calibratedRightRatio.isFinite() ||
+            calibratedRightRatio <= 0f || calibratedRightRatio >= 1f || targetPackage.isNullOrBlank()) return@synchronized null
         val pixels = getOrLoadBuiltinSignature() ?: return@synchronized null
         val hash = getOrLoadBuiltinHash()
         val region = floatArrayOf(calibratedRightRatio, 0f, 1f, 1f)
@@ -102,11 +104,13 @@ class AutoMapOpenReferenceStore(private val context: Context) {
             targetPackage = targetPackage ?: "",
             createdAtMillis = 0L,
             pngSha256 = hash,
+            sidebarAspectRatio = cachedBuiltinAspectRatio,
         )
     }
 
     private var cachedBuiltinSignature: IntArray? = null
     private var cachedBuiltinHash: String = ""
+    private var cachedBuiltinAspectRatio: Double? = null
 
     private fun getOrLoadBuiltinSignature(): IntArray? {
         cachedBuiltinSignature?.let { return it }
@@ -116,6 +120,10 @@ class AutoMapOpenReferenceStore(private val context: Context) {
             val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
             try {
                 val pixels = samplePixels(bitmap)
+                require(AutoMapOpenDetector.isUsableReference(AutoMapOpenDetector.signature(pixels))) {
+                    "内置侧边栏参照缺少可辨识细节"
+                }
+                cachedBuiltinAspectRatio = bitmap.width.toDouble() / bitmap.height
                 cachedBuiltinSignature = pixels
                 pixels
             } finally {

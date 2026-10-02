@@ -5,6 +5,25 @@ import org.junit.Test
 import kotlin.math.roundToInt
 
 class AutoMapOpenDetectorTest {
+    @Test fun continuousOneFramePresenceDoesNotRequireAnyTouchOrSecondOpenSample() {
+        val pixels = IntArray(AutoMapOpenDetector.PIXELS) { i ->
+            if (i / 32 % 4 < 2) 0xff687580.toInt() else 0xffc0c8d0.toInt()
+        }
+        val reference = AutoMapOpenDetector.signature(pixels)
+        val absent = AutoMapOpenDetector.signature(IntArray(pixels.size) { 0xff000000.toInt() })
+        val detector = AutoMapOpenDetector(reference, AutoMapOpenConfig(openFrames = 1, closeFrames = 1))
+        repeat(200) { detector.observeComparison(detector.compareCandidate(absent), it * 16L) }
+        assertFalse(detector.isOpen)
+        assertEquals(AutoMapOpenTransition.OPENED, detector.observeComparison(detector.compareCandidate(reference), 3_200L).transition)
+        assertTrue(detector.shouldAttemptAlignment(3_200L))
+        detector.manualClose()
+        detector.observeComparison(null, 3_216L)
+        assertTrue(detector.manualSuppressed)
+        assertEquals(AutoMapOpenTransition.CLOSED, detector.observeComparison(detector.compareCandidate(absent), 3_232L).transition)
+        assertEquals(AutoMapOpenTransition.OPENED, detector.observeComparison(detector.compareCandidate(reference), 3_248L).transition)
+        assertTrue(detector.shouldAttemptAlignment(3_248L))
+    }
+
     private val referencePixels = IntArray(AutoMapOpenDetector.PIXELS) { i ->
         val x = i % AutoMapOpenDetector.WIDTH
         val y = i / AutoMapOpenDetector.WIDTH

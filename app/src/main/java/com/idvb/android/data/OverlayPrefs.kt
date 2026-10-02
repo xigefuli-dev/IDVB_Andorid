@@ -149,10 +149,12 @@ class OverlayPrefs(context: Context) {
         get() = prefs.getInt("route_line_thickness", DefaultSettings.ROUTE_LINE_THICKNESS).coerceIn(0, 3)
         set(value) = prefs.edit().putInt("route_line_thickness", value.coerceIn(0, 3)).apply()
 
-    /** 固定使用无障碍；旧版屏幕捕获偏好不再生效。 */
+    /** Preserve the selected source; upgrades never overwrite an explicit user choice. */
     var screenCaptureMethod: ScreenCaptureMethod
-        get() = ScreenCaptureMethod.ACCESSIBILITY
-        set(@Suppress("UNUSED_PARAMETER") value) = prefs.edit().remove("screen_capture_method").apply()
+        get() = runCatching { ScreenCaptureMethod.valueOf(prefs.getString("screen_capture_method", null).orEmpty()) }
+            .getOrDefault(if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) ScreenCaptureMethod.ACCESSIBILITY
+                else ScreenCaptureMethod.MEDIA_PROJECTION)
+        set(value) = prefs.edit().putString("screen_capture_method", value.name).apply()
 
     /** 按当前方向保存蓝图校准区域，值为 0..1 的屏幕比例。 */
     fun setCaptureRegion(landscape: Boolean, left: Float, top: Float, right: Float, bottom: Float) {

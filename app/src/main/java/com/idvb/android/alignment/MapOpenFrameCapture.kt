@@ -17,6 +17,8 @@ class MapOpenFrameCapture(
     private val reference: MapFrameSignature?,
     private val callback: (Result<Bitmap>, MapFrameSignature?) -> Unit,
     private val captureFrame: ((Rect, (Result<Bitmap>) -> Unit) -> (() -> Unit))? = null,
+    private val intervalMs: Long = MapOpenReadiness.INTERVAL_MS,
+    private val maximumFrameAgeMs: Long = AutoMapOpenConfig().maximumFrameAgeMs,
 ) {
     private var stopped = false
     private var previous: MapFrameSignature? = null
@@ -42,7 +44,7 @@ class MapOpenFrameCapture(
         bounds = Rect(region); started = SystemClock.elapsedRealtime()
         prepared.addAll(initialFrames)
         trace.emit(AlignmentLogEvent("readiness.configuration", "desktop-standard-map-gate-v1",
-            thresholds = mapOf("timeoutMs" to MapOpenReadiness.TIMEOUT_MS.toDouble(), "intervalMs" to MapOpenReadiness.INTERVAL_MS.toDouble(),
+            thresholds = mapOf("timeoutMs" to MapOpenReadiness.TIMEOUT_MS.toDouble(), "intervalMs" to intervalMs.toDouble(),
                 "color" to MapOpenReadiness.COLOR_THRESHOLD, "brightnessDelta" to MapOpenReadiness.BRIGHTNESS_LIMIT),
             labels = mapOf("sample" to "160x100 nearest-neighbor ARGB32 big-endian", "reference" to if (reference == null) "missing" else "accepted-alignment",
                 "replay" to if (trace.captureArtifacts) "sample-inputs-recorded" else "not-replayable-input-recording-disabled")))
@@ -134,7 +136,7 @@ class MapOpenFrameCapture(
                                 bitmap.recycle()
                                 val remaining = MapOpenReadiness.TIMEOUT_MS - (SystemClock.elapsedRealtime() - started)
                                 if (remaining <= 0) deadline.run() else handler.postDelayed(next,
-                                    if (prepared.isNotEmpty()) 0L else minOf(MapOpenReadiness.INTERVAL_MS, remaining))
+                                    if (prepared.isNotEmpty()) 0L else minOf(intervalMs, remaining))
                             }
                         }
                     }
@@ -147,11 +149,11 @@ class MapOpenFrameCapture(
         while (prepared.isNotEmpty() && reused == null) {
             val candidate = prepared.removeFirst()
             val now = SystemClock.uptimeMillis()
-            val valid = candidate.isFreshFor(bounds, now)
+            val valid = candidate.isFreshFor(bounds, now, maximumFrameAgeMs)
             trace.emit(AlignmentLogEvent("readiness.prepared-frame", if (valid) "reused-clean-detector-capture" else "discarded-stale-or-region-changed",
                 measurements = mapOf("attempt" to number.toDouble(), "captureStartedAtMs" to candidate.captureStartedAtMs.toDouble(),
                     "captureReceivedAtMs" to candidate.captureReceivedAtMs.toDouble(), "ageMs" to (now - candidate.captureStartedAtMs).toDouble()),
-                thresholds = mapOf("maximumFrameAgeMs" to AutoMapOpenConfig().maximumFrameAgeMs.toDouble()),
+                thresholds = mapOf("maximumFrameAgeMs" to maximumFrameAgeMs.toDouble()),
                 labels = mapOf("ownership" to "unoccluded-map-viewport", "ageOrigin" to "capture-request-start-including-queue")))
             if (valid) reused = candidate else candidate.recycle()
         }

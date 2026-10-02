@@ -119,6 +119,16 @@ import com.idvb.android.tutorial.TutorialPanel
 import com.idvb.android.tutorial.TutorialPracticeActivity
 
 class MainActivity : ComponentActivity() {
+    override fun onStart() {
+        super.onStart()
+        OverlayService.setHostForeground(true)
+    }
+
+    override fun onStop() {
+        OverlayService.setHostForeground(false)
+        super.onStop()
+    }
+
     private var catalogTick by mutableIntStateOf(0)
     private var openHomeRequest by mutableIntStateOf(0)
 

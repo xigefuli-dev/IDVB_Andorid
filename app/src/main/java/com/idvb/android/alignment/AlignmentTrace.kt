@@ -15,6 +15,7 @@ class AlignmentTrace(
     private val artifacts = linkedMapOf<String, ByteArray>()
     private val deferredArtifacts = linkedMapOf<String, () -> ByteArray>()
     private var recordingNanos = 0L
+    private val recordingIntervals = mutableListOf<Pair<Long, Long>>()
     val completed = AtomicBoolean(false)
 
     @Synchronized override fun record(event: AlignmentLogEvent) {
@@ -22,7 +23,9 @@ class AlignmentTrace(
         val associated = event.copy(labels = event.labels + ("requestId" to id))
         events += associated
         downstream.emit(associated)
-        recordingNanos += System.nanoTime() - started
+        val ended = System.nanoTime()
+        recordingNanos += ended - started
+        recordingIntervals += started to ended
     }
 
     override fun attach(name: String, bytes: () -> ByteArray) {
@@ -45,6 +48,26 @@ class AlignmentTrace(
     @Synchronized fun snapshot(): List<AlignmentLogEvent> = events.toList() + AlignmentLogEvent(
         "diagnostics.trace-recording", "Cumulative adapter and trace append cost, already included in enclosing spans; event construction excluded",
         measurements = mapOf("recordingMs" to recordingNanos / 1e6, "eventCount" to events.size.toDouble()))
+
+    /** Union of synchronous diagnostic spans inside a call, so nested artifact/copy spans
+     * are counted once. Deferred encoding/persistence outside the call is excluded. */
+    @Synchronized fun diagnosticNanosBetween(started: Long, ended: Long): Long {
+        val spans = recordingIntervals + events.mapNotNull { event ->
+            event.durationNanos?.takeIf { it > 0 && event.stage.startsWith("diagnostics.") }
+                ?.let { event.timestampNanos - it to event.timestampNanos }
+        }
+        val clipped = spans.mapNotNull { (from, to) ->
+            val a = maxOf(started, from); val b = minOf(ended, to)
+            if (b > a) a to b else null
+        }.sortedBy { it.first }
+        var total = 0L
+        var previousEnd = started
+        for ((from, to) in clipped) {
+            if (to > previousEnd) total += to - maxOf(from, previousEnd)
+            previousEnd = maxOf(previousEnd, to)
+        }
+        return total
+    }
     @Synchronized fun artifactSnapshot(): Map<String, ByteArray> {
         for ((name, encode) in deferredArtifacts) {
             artifacts[name] = measure("diagnostics.encode-deferred-artifact") { encode() }

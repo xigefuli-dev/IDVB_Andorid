@@ -30,6 +30,7 @@ local.properties
 .idea/
 .vscode/
 .gradle/
+.gradle-user-home/
 .kotlin/
 gradle/gradle-daemon-jvm.properties
 **/build/

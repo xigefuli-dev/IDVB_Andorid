@@ -22,6 +22,8 @@ data class AutoMapOpenComparison(
     val edge: Double,
     val offsetX: Int,
     val offsetY: Int,
+    val windowLeft: Double = 0.0,
+    val windowWidth: Double = 1.0,
 )
 
 data class AutoMapOpenConfig(
@@ -32,10 +34,12 @@ data class AutoMapOpenConfig(
     val maximumAttempts: Int = 3,
     val retryCooldownMs: Long = 1_000L,
     val maximumFrameAgeMs: Long = 1_000L,
+    val sidebarWidthFraction: Double? = null,
 ) {
     init {
         require(closeThreshold in 0.0..1.0 && openThreshold in 0.0..1.0 && closeThreshold < openThreshold)
         require(openFrames > 0 && closeFrames > 0 && maximumAttempts > 0 && retryCooldownMs >= 0L && maximumFrameAgeMs > 0L)
+        require(sidebarWidthFraction == null || sidebarWidthFraction.isFinite() && sidebarWidthFraction > 0.0 && sidebarWidthFraction <= 1.0)
     }
 }
 
@@ -81,9 +85,17 @@ class AutoMapOpenDetector(
 
     /** A failed capture is unknown, never evidence that the game map closed. */
     fun observe(candidate: AutoMapOpenSignature?, nowMs: Long): AutoMapOpenObservation {
+        return observeComparison(candidate?.let(::compareCandidate), nowMs)
+    }
+
+    /** Immutable inputs; the costly spatial search runs on the sampling worker. */
+    fun compareCandidate(candidate: AutoMapOpenSignature): AutoMapOpenComparison =
+        config.sidebarWidthFraction?.let { compareSidebar(reference, candidate, it) } ?: compare(reference, candidate)
+
+    /** Presence/attempt bookkeeping remains owned by the main thread. */
+    fun observeComparison(comparison: AutoMapOpenComparison?, nowMs: Long): AutoMapOpenObservation {
         lastFrameAtMs = nowMs
         var transition = AutoMapOpenTransition.NONE
-        val comparison = candidate?.let { compare(reference, it) }
         frameAllowsAlignment = comparison != null && comparison.score >= config.openThreshold
         when {
             comparison == null -> { consecutiveOpen = 0; consecutiveClose = 0 }
@@ -208,6 +220,37 @@ class AutoMapOpenDetector(
 
         fun isUsableReference(signature: AutoMapOpenSignature): Boolean =
             max(signature.luminanceDeviation, signature.chromaDeviation) >= .025 && signature.edgeStrength >= .008
+
+        /** Locate the built-in sidebar inside the calibrated right-hand search strip, without
+         * stretching the whole strip to the template width. Only the builtin uses this search;
+         * recorded user references retain their original comparison and thresholds. */
+        fun compareSidebar(reference: AutoMapOpenSignature, candidate: AutoMapOpenSignature,
+            widthFraction: Double): AutoMapOpenComparison {
+            require(widthFraction.isFinite() && widthFraction > 0.0 && widthFraction <= 1.0)
+            var best = compare(reference, candidate)
+            for (scale in listOf(.85, 1.0, 1.15)) {
+                val width = (WIDTH * widthFraction * scale).coerceIn(4.0, WIDTH.toDouble())
+                val last = WIDTH - width
+                // At most 57 windows per scale, each with the existing bounded nine probes.
+                val steps = kotlin.math.ceil(last / .5).toInt()
+                for (step in 0..steps) {
+                    val left = min(step * .5, last)
+                    fun resample(values: DoubleArray): DoubleArray = DoubleArray(PIXELS) { index ->
+                        val x = index % WIDTH
+                        val row = index / WIDTH * WIDTH
+                        val source = (left + (x + .5) * width / WIDTH - .5).coerceIn(0.0, WIDTH - 1.0)
+                        val x0 = source.toInt()
+                        val fraction = source - x0
+                        values[row + x0] * (1 - fraction) + values[row + min(x0 + 1, WIDTH - 1)] * fraction
+                    }
+                    val window = AutoMapOpenSignature(resample(candidate.luminance), resample(candidate.redChroma),
+                        resample(candidate.blueChroma), candidate.luminanceDeviation, candidate.chromaDeviation, candidate.edgeStrength)
+                    val comparison = compare(reference, window).copy(windowLeft = left / WIDTH, windowWidth = width / WIDTH)
+                    if (comparison.score > best.score) best = comparison
+                }
+            }
+            return best
+        }
 
         /** Bounded nine-position spatial comparison; a global histogram cannot establish presence. */
         fun compare(reference: AutoMapOpenSignature, candidate: AutoMapOpenSignature): AutoMapOpenComparison {

@@ -11,12 +11,15 @@ class PreparedMapFrame(
     val bounds: Rect,
     val captureStartedAtMs: Long,
     val captureReceivedAtMs: Long,
+    val captureMethod: String = "ACCESSIBILITY",
+    val frameSequence: Long? = null,
 ) {
-    fun isFreshFor(region: Rect, nowMs: Long): Boolean = !bitmap.isRecycled && bounds == region &&
+    fun isFreshFor(region: Rect, nowMs: Long, maximumAgeMs: Long = AutoMapOpenConfig().maximumFrameAgeMs): Boolean = !bitmap.isRecycled && bounds == region &&
         bitmap.width == region.width() && bitmap.height == region.height() &&
-        nowMs >= captureStartedAtMs && nowMs - captureStartedAtMs <= AutoMapOpenConfig().maximumFrameAgeMs
+        nowMs >= captureStartedAtMs && nowMs - captureStartedAtMs <= maximumAgeMs
 
     fun recycle() { if (!bitmap.isRecycled) bitmap.recycle() }
 }
 
-data class AutoMapOpenSample(val pixels: IntArray, val mapFrame: PreparedMapFrame?)
+data class AutoMapOpenSample(val pixels: IntArray, val mapFrame: PreparedMapFrame?,
+    val comparison: AutoMapOpenComparison? = null, val decisionMs: Double = 0.0)

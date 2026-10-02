@@ -74,6 +74,18 @@ class OverlayService : Service() {
         const val EXTRA_FLOOR_DELTA = "floor_delta"
         private var currentService: OverlayService? = null
         private var practiceForeground = false
+        private var hostForeground = false
+
+        fun setHostForeground(active: Boolean) {
+            hostForeground = active
+            currentService?.let { service ->
+                if (active) {
+                    service.mainHandler.removeCallbacks(service.autoTick)
+                    service.stopAutoMapGuide("host-foreground")
+                    service.autoDetector?.reset()
+                } else service.scheduleAutoMapOpen(0L)
+            }
+        }
 
         /** Read on the main thread at check time; persisted startup history is not visibility. */
         fun isControlOverlayVisible(): Boolean = currentService?.let { service ->
@@ -125,9 +137,13 @@ class OverlayService : Service() {
     private var autoReferenceScreen = ""
     private var autoContext = ""
     private var autoGuideOwned = false
-    private enum class AutoMapBurstMode { IDLE, OPEN, CLOSE }
-    private var autoBurstMode = AutoMapBurstMode.IDLE
-    private var autoBurstDeadlineMs = 0L
+    private var guidePreparationKey: String? = null
+    private var guidePreparationFailedKey: String? = null
+    private var autoOpeningFrameNanos = 0L
+    private var autoStaticResume = false
+    private var lastAutoSampleId = ""
+    private val guidePreparationExecutor = Executors.newSingleThreadExecutor { task -> Thread(task, "idvb-guide-prepare") }
+    private val autoFrameCallbackQueued = java.util.concurrent.atomic.AtomicBoolean(false)
     private var autoBlocked = false
     private var autoCaptureBusy = false
     private var autoCaptureGeneration = 0
@@ -160,14 +176,22 @@ class OverlayService : Service() {
             if (!destroyed) {
                 stopAutoMapGuide("setting-changed")
                 autoDetector?.reset(); autoDetector = null; autoContext = ""
-                scheduleAutoMapOpen(0L)
+                if (AppServices.prefs.autoDetectMapOpenEnabled) scheduleAutoMapOpen(0L)
+                else mainHandler.removeCallbacks(autoTick)
             }
         }
         if (key == "screen_capture_method") mainHandler.post {
-            if (!destroyed) synchronizeCaptureSession()
+            if (!destroyed) {
+                stopAutoMapGuide("capture-method-changed")
+                autoDetector = null; autoContext = ""
+                synchronizeCaptureSession()
+                scheduleAutoMapOpen(0L)
+            }
         }
         if (key in setOf("show_routes", "route_line_thickness", "remove_guide_background")) mainHandler.post {
-            if (!destroyed && guideVisible) loadGuideFloor()
+            if (!destroyed) {
+                if (guideVisible) loadGuideFloor() else prewarmGuideFloor()
+            }
         }
         if (key == "selected_map_class_id") {
             val changedGeneration = scanGeneration
@@ -197,6 +221,7 @@ class OverlayService : Service() {
     }
 
     private fun synchronizeCaptureSession() {
+        if (!com.idvb.android.UsageConsent.isAccepted(this)) return
         val method = AppServices.prefs.screenCaptureMethod
         val changed = captureMethod != method
         val renewed = captureSession?.let { it.grantRevision != ScreenCaptureGrant.revision } == true
@@ -209,7 +234,18 @@ class OverlayService : Service() {
         if (method == ScreenCaptureMethod.MEDIA_PROJECTION && captureSession == null && ScreenCaptureGrant.available) {
             startForegroundCompat()
             val size = screenSize()
-            captureSession = ScreenCaptureSession(this).also { it.start(size.first, size.second) }
+            captureSession = ScreenCaptureSession(this).also { session ->
+                session.onFrameAvailable = {
+                    if (autoFrameCallbackQueued.compareAndSet(false, true)) mainHandler.post {
+                        autoFrameCallbackQueued.set(false)
+                        if (!autoCaptureBusy && !destroyed) scheduleAutoMapOpen(0L)
+                    }
+                }
+                session.onStopped = { mainHandler.post {
+                    if (!destroyed) stopAutoMapGuide("screen-capture-authorization-expired")
+                } }
+                session.start(size.first, size.second)
+            }
         }
         Log.d("IDVBCapture", "source=$method grant=${ScreenCaptureGrant.revision} session=${captureSession != null}")
     }
@@ -257,7 +293,7 @@ class OverlayService : Service() {
         scanProgressWindow = OverlayWindowManager(overlayContext)
         notifications = OverlayNotifications(overlayContext, ::screenSize)
         getSystemService(DisplayManager::class.java).registerDisplayListener(displayListener, Handler(Looper.getMainLooper()))
-        com.idvb.android.recognize.AccessibilityScreenCaptureService.screenTapListener = ::handleScreenTap
+        AccessibilityScreenCaptureService.foregroundChangedListener = ::handleAutoForegroundChanged
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -366,6 +402,7 @@ class OverlayService : Service() {
         val orderedFloors = currentMap?.floors?.sortedBy { it.sortOrder }.orEmpty()
         floorIndex = orderedFloors.indexOfFirst { it.key == AppServices.prefs.lastFloorKey }
             .let { if (it < 0) 0 else it }
+        prewarmGuideFloor()
         // 收起菜单时窗口必须与小球同高，避免不可见的透明区域拦截底层应用触摸。
         val hasVariants = catalog.nextVariantMapId(currentMap?.id.orEmpty()) != null
         window.width = ((if (hasVariants) 264 else 212) * density).toInt(); window.height = (48 * density).toInt()
@@ -1129,8 +1166,15 @@ class OverlayService : Service() {
     ) {
         // Pausing and resuming can start a new request in the same physical opening.
         // A cycle token alone cannot distinguish that request from a late cancelled one.
-        if (lastAlignmentRequestId == requestId && autoDetector === requestDetector && autoContext == requestContext)
+        if (lastAlignmentRequestId == requestId && autoDetector === requestDetector && autoContext == requestContext) {
             requestDetector?.alignmentFinished(success, android.os.SystemClock.uptimeMillis(), cycle)
+            if (!success && requestDetector != null) mainHandler.postDelayed({
+                if (!destroyed && autoDetector === requestDetector && autoContext == requestContext && requestDetector.isOpen) {
+                    autoStaticResume = true
+                    scheduleAutoMapOpen(0L)
+                }
+            }, requestDetector.config.retryCooldownMs)
+        }
     }
 
     private fun isAlignmentCatalogCurrent(catalog: com.idvb.android.idvm.MapCatalogDocument,
@@ -1172,19 +1216,21 @@ class OverlayService : Service() {
         })
         preparedFrames.removeAll { frame ->
             val now = android.os.SystemClock.uptimeMillis()
-            val invalid = method != ScreenCaptureMethod.ACCESSIBILITY || !frame.isFreshFor(bounds, now)
+            val invalid = method.name != frame.captureMethod || !frame.isFreshFor(bounds, now,
+                requestDetector?.config?.maximumFrameAgeMs ?: 1_000L)
             if (invalid) {
                 trace.emit(AlignmentLogEvent("capture.prepared-frame.discarded", "stale-viewport-or-capture-method-changed",
                     measurements = mapOf("ageMs" to (now - frame.captureStartedAtMs).toDouble(),
                         "left" to frame.bounds.left.toDouble(), "top" to frame.bounds.top.toDouble(),
                         "width" to frame.bounds.width().toDouble(), "height" to frame.bounds.height().toDouble()),
-                    thresholds = mapOf("maximumFrameAgeMs" to com.idvb.android.alignment.AutoMapOpenConfig().maximumFrameAgeMs.toDouble()),
+                    thresholds = mapOf("maximumFrameAgeMs" to (requestDetector?.config?.maximumFrameAgeMs ?: 1_000L).toDouble()),
                     labels = mapOf("captureMethod" to method.name)))
                 frame.recycle()
             }
             invalid
         }
         val hasPreparedFrame = preparedFrames.isNotEmpty()
+        var alignmentWorkNanos = 0L
         val diagnosticContext = AlignmentDiagnosticContext(methodId, map, floor.key, viewport, screen.first, screen.second, method.name, sessionLogs.sessionId)
         val cancellation = AlignmentCancellation()
         val assistEvidence = assistOpenEvidence.takeIf { assistController?.active == true }
@@ -1207,6 +1253,7 @@ class OverlayService : Service() {
             labels = mapOf("eyeAction" to AppServices.prefs.eyeButtonAction.name,
                 "requestSource" to if (autoCycle == null) "manual-eye" else "auto-map-open",
                 "autoOpenCycle" to (autoCycle?.toString() ?: "none"),
+                "autoSampleId" to if (autoCycle == null) "none" else lastAutoSampleId,
                 "autoReferenceId" to if (autoCycle == null) "none" else autoReference?.id.orEmpty(),
                 "identitySource" to AppServices.prefs.lastMapIdentitySource.name,
                 "showAlignmentOutput" to AppServices.prefs.showAlignmentOutput.toString()),
@@ -1214,6 +1261,17 @@ class OverlayService : Service() {
                 "captureX" to viewport.x, "captureY" to viewport.y, "captureWidth" to viewport.width, "captureHeight" to viewport.height)))
         fun complete(outcome: AlignmentResult?, terminal: String, frame: Bitmap? = null) {
             if (trace.completed.get()) return
+            val latency = com.idvb.android.alignment.AlignmentLatency.measure(clicked, System.nanoTime(), alignmentWorkNanos)
+            trace.emit(AlignmentLogEvent("request.non-alignment", "capture-to-terminal-minus-alignment-call",
+                durationNanos = (latency.overheadMs * 1e6).toLong(),
+                measurements = mapOf("totalMs" to latency.totalMs, "alignmentMs" to latency.alignmentMs,
+                    "nonAlignmentMs" to latency.overheadMs),
+                thresholds = if (autoCycle != null && method == ScreenCaptureMethod.MEDIA_PROJECTION)
+                    mapOf("maximumNonAlignmentMs" to com.idvb.android.alignment.AutoMapOpenTiming.NON_ALIGNMENT_BUDGET_MS.toDouble()) else emptyMap(),
+                labels = mapOf("captureMethod" to method.name, "budgetResult" to
+                    if (autoCycle == null || method != ScreenCaptureMethod.MEDIA_PROJECTION) "not-applicable"
+                    else if (latency.withinBudget) "passed" else "exceeded",
+                    "timingOrigin" to if (autoCycle == null) "eye-click" else "observed-open-frame-received")))
             if (autoCycle != null) {
                 finishAutoAlignment(requestDetector, requestAutoContext, autoCycle, trace.id,
                     outcome is AlignmentResult.Aligned && terminal == "drawn")
@@ -1274,8 +1332,9 @@ class OverlayService : Service() {
             (if (autoCycle == null) AppServices.prefs.eyeButtonAction == EyeButtonAction.SHOW_AND_ALIGN else
                 autoGuideOwned && autoContext == requestAutoContext && autoDetector === requestDetector &&
                 requestDetector?.isOpen == true && requestDetector.manualSuppressed == false &&
-                AppServices.prefs.autoDetectMapOpenEnabled && autoReference?.targetPackage == AccessibilityScreenCaptureService.foregroundPackage &&
-                android.os.SystemClock.uptimeMillis() - lastAutoFrameMs <= 1_500L) &&
+                AppServices.prefs.autoDetectMapOpenEnabled && autoReference?.targetPackage == autoExternalPackage() &&
+                (if (method == ScreenCaptureMethod.MEDIA_PROJECTION) ScreenCaptureGrant.available && captureSession === session
+                    else android.os.SystemClock.uptimeMillis() - lastAutoFrameMs <= 1_500L)) &&
             AppServices.prefs.alignmentMethodId == methodId && AppServices.prefs.screenCaptureMethod == method &&
             com.idvb.android.UsageConsent.isAccepted(this)
         // Independent control/notification roots that are shown need their own receipt.
@@ -1286,7 +1345,7 @@ class OverlayService : Service() {
                 notifications?.captureView?.takeIf { it.isShown }?.let { "notifications" to it })
         hideScanProgress()
         trace.measure("capture.prepare") {
-            if (method == ScreenCaptureMethod.MEDIA_PROJECTION) session?.prepareCapture()
+            if (method == ScreenCaptureMethod.MEDIA_PROJECTION && !hasPreparedFrame) session?.prepareCapture()
             applyPracticeVisibility()
         }
         val hidden = System.nanoTime()
@@ -1335,15 +1394,25 @@ class OverlayService : Service() {
                         mainHandler.post {
                             if (current()) { lastAlignmentTerminal = "computing"; updateAlignmentNotice(notice, "正在自动贴合 · 结构校验", 0L) }
                         }
+                        val algorithmStarted = System.nanoTime()
                         val result = runCatching {
                             AppServices.alignmentMethods.align(methodId, AlignmentRequest(bitmap, viewport, map, floor, cancellation), trace)
                         }
                         val solvedAt = System.nanoTime()
+                        val algorithmNanos = solvedAt - algorithmStarted
+                        val algorithmDiagnosticNanos = trace.diagnosticNanosBetween(algorithmStarted, solvedAt)
+                        trace.emit(AlignmentLogEvent("algorithm.cost", "diagnostic-spans-unioned-within-alignment-call",
+                            measurements = mapOf("callWallMs" to algorithmNanos / 1e6,
+                                "alignmentWorkMs" to (algorithmNanos - algorithmDiagnosticNanos) / 1e6,
+                                "nestedDiagnosticMs" to algorithmDiagnosticNanos / 1e6),
+                            labels = mapOf("nestedCosts" to "diagnostics-in-call-not-added-twice",
+                                "overheadBudget" to "includes-synchronous-diagnostics")))
                         val cancelledAtWorkerExit = cancellation.isCancelled
                         AppServices.alignmentDiagnostics.recordLifecycle(trace.id, "worker.exited",
                             if (cancelledAtWorkerExit) "cancelled" else "finished",
                             if (cancelledAtWorkerExit) mapOf("cancelResponseMs" to (solvedAt - cancellation.requestedAtNanos) / 1e6) else emptyMap())
                         mainHandler.post finish@{
+                            alignmentWorkNanos = algorithmNanos - algorithmDiagnosticNanos
                             trace.emit(AlignmentLogEvent("render.callback-queue", durationNanos = System.nanoTime() - solvedAt))
                             if (cancellation.isCancelled) {
                                 complete(result.getOrNull(), if (cancelledAtWorkerExit) "cancelled-during-algorithm" else "cancelled-after-algorithm", bitmap)
@@ -1416,11 +1485,15 @@ class OverlayService : Service() {
                 }
                 Unit
             }
-            if (method == ScreenCaptureMethod.ACCESSIBILITY) {
+            if (method == ScreenCaptureMethod.ACCESSIBILITY || autoCycle != null) {
                 updateAlignmentNotice(notice, "等待游戏地图画面 · 最多 3 秒", 0L)
                 abortAlignmentCapture = com.idvb.android.alignment.MapOpenFrameCapture(
                     mainHandler, accessibilityCaptureExecutor, cancellation, trace, reference,
                     callback = { result, signature -> readySignature = signature; callback(result) },
+                    captureFrame = if (method == ScreenCaptureMethod.MEDIA_PROJECTION)
+                        { rect, received -> requireNotNull(session).captureNext(rect, trace, received) } else null,
+                    intervalMs = if (method == ScreenCaptureMethod.MEDIA_PROJECTION) 0L else com.idvb.android.alignment.MapOpenReadiness.INTERVAL_MS,
+                    maximumFrameAgeMs = requestDetector?.config?.maximumFrameAgeMs ?: 1_000L,
                 ).start(bounds, preparedFrames.toList().also { preparedFrames.clear() })
             } else {
                 session!!.capture(bounds, callback)
@@ -1460,6 +1533,7 @@ class OverlayService : Service() {
         alignedGuideBounds = null
         alignedGuideViewport = null
         guideView?.clearAlignment()
+        prewarmGuideFloor()
         if (guideVisible) {
             if (!loadGuideFloor()) {
                 guideVisible = false
@@ -1530,9 +1604,10 @@ class OverlayService : Service() {
         ballMenu?.updatePosition()
     }
 
-    private fun loadGuideFloor(): Boolean {
-        val map = currentMap ?: return false
-        val floor = map.floors.sortedBy { it.sortOrder }.getOrNull(floorIndex) ?: return false
+    /** Snapshot settings before leaving the main thread; render never touches windows/views. */
+    private fun guideFloorPreparation(): Pair<String, () -> Bitmap?>? {
+        val map = currentMap ?: return null
+        val floor = map.floors.sortedBy { it.sortOrder }.getOrNull(floorIndex) ?: return null
         val file = AppServices.repository.floorImageFile(map.id, floor.imagePath)
         val maxDimension = maxOf(screenSize().first, screenSize().second) * 2
         val selected = AppServices.repository.loadPreviewRegion(map.id, floor)
@@ -1542,42 +1617,86 @@ class OverlayService : Service() {
         val metadata = java.io.File(AppServices.repository.mapsRoot, "${map.id}/data").listFiles()
             .orEmpty().filter { it.extension == "json" }.sortedBy { it.name }
             .joinToString { "${it.name}:${it.length()}:${it.lastModified()}" }
+        val removeBackground = AppServices.prefs.removeGuideBackground
+        val showRoutes = AppServices.prefs.showRoutes
+        val thickness = AppServices.prefs.routeLineThickness
         val key = "$map|$floor|${file.canonicalPath}|${file.length()}|${file.lastModified()}|$selected|$freeCrop|$maxDimension|$metadata|" +
-            "${AppServices.prefs.removeGuideBackground}|$classMarkedForRemoval|${AppServices.prefs.showRoutes}|${AppServices.prefs.routeLineThickness}"
-        guideBitmap?.takeIf { !it.isRecycled && guideBitmapKey == key }?.let {
-            guideWindow.opacity = AppServices.prefs.opacity
-            guideView?.showBitmap(it)
-            return true
+            "$removeBackground|$classMarkedForRemoval|$showRoutes|$thickness"
+        val render: () -> Bitmap? = render@{
+            var next = decodeMapRegion(file, selected, maxDimension, freeCrop) ?: return@render null
+            try {
+                if (removeBackground) {
+                    val processed = MapBackgroundRemover.remove(
+                        bitmap = next,
+                        classMarkedForRemoval = classMarkedForRemoval,
+                        layers = AppServices.repository.loadBackgroundLayers(map.id, floor.key),
+                        sourceWidth = floor.imageWidth,
+                        sourceHeight = floor.imageHeight,
+                        region = selected,
+                    )
+                    if (processed !== next && !next.isRecycled) next.recycle()
+                    next = processed
+                }
+                if (showRoutes) {
+                    val rendered = com.idvb.android.graphics.MapRouteRenderer.render(
+                        next, AppServices.repository.loadRouteAnnotations(map, floor.key), selected,
+                        floor.imageWidth, floor.imageHeight, freeCrop, thickness)
+                    if (rendered !== next) next.recycle()
+                    next = rendered
+                }
+                next
+            } catch (error: Throwable) { if (!next.isRecycled) next.recycle(); throw error }
         }
-        var next = decodeMapRegion(file, selected, maxDimension,
-            freeCrop) ?: return false
-        if (AppServices.prefs.removeGuideBackground) {
-            val processed = MapBackgroundRemover.remove(
-                bitmap = next,
-                classMarkedForRemoval = classMarkedForRemoval,
-                layers = AppServices.repository.loadBackgroundLayers(map.id, floor.key),
-                sourceWidth = floor.imageWidth,
-                sourceHeight = floor.imageHeight,
-                region = selected,
-            )
-            if (processed !== next && !next.isRecycled) next.recycle()
-            next = processed
-        }
-        if (AppServices.prefs.showRoutes) {
-            val rendered = com.idvb.android.graphics.MapRouteRenderer.render(
-                next, AppServices.repository.loadRouteAnnotations(map, floor.key), selected,
-                floor.imageWidth, floor.imageHeight,
-                AppServices.repository.loadFreeCropPoints(map.id, floor), AppServices.prefs.routeLineThickness)
-            if (rendered !== next) next.recycle()
-            next = rendered
-        }
+        return key to render
+    }
+
+    private fun installGuideBitmap(key: String, next: Bitmap) {
         val previous = guideBitmap
         guideBitmap = next
         guideBitmapKey = key
         guideWindow.opacity = AppServices.prefs.opacity
         guideView?.showBitmap(next)
         previous?.let { if (!it.isRecycled) it.recycle() }
+    }
+
+    private fun loadGuideFloor(): Boolean {
+        val (key, render) = guideFloorPreparation() ?: return false
+        guideBitmap?.takeIf { !it.isRecycled && guideBitmapKey == key }?.let {
+            guideWindow.opacity = AppServices.prefs.opacity
+            guideView?.showBitmap(it)
+            return true
+        }
+        val next = render() ?: return false
+        installGuideBitmap(key, next)
         return true
+    }
+
+    private fun prewarmGuideFloor() {
+        if (destroyed || !com.idvb.android.UsageConsent.isAccepted(this)) return
+        val (key, render) = guideFloorPreparation() ?: return
+        if (guideBitmap?.isRecycled == false && guideBitmapKey == key || guidePreparationKey == key || guidePreparationFailedKey == key) return
+        guidePreparationKey = key
+        val mapId = currentMap?.id.orEmpty()
+        val started = System.nanoTime()
+        guidePreparationExecutor.execute {
+            val result = runCatching(render)
+            val ended = System.nanoTime()
+            mainHandler.post {
+                if (guidePreparationKey == key) guidePreparationKey = null
+                val valid = !destroyed && guideFloorPreparation()?.first == key
+                if (valid) guidePreparationFailedKey = key.takeIf { result.getOrNull() == null }
+                if (!destroyed) autoDiagnostics.captureEvent(AlignmentLogEvent("guide.prewarm", if (valid && result.getOrNull() != null) "ready" else "discarded-or-unavailable",
+                    durationNanos = ended - started, labels = mapOf("mapId" to mapId, "cacheKey" to key,
+                        "costScope" to "background-preparation-before-map-opening", "failure" to result.exceptionOrNull()?.toString().orEmpty())))
+                result.getOrNull()?.let { bitmap ->
+                    if (valid) installGuideBitmap(key, bitmap) else bitmap.recycle()
+                }
+                if (valid) {
+                    autoStaticResume = autoDetector?.isOpen == true
+                    scheduleAutoMapOpen(0L)
+                }
+            }
+        }
     }
 
     private fun applyGuidePlacement(region: RectF) {
@@ -1743,50 +1862,28 @@ class OverlayService : Service() {
         return resolved
     }
 
-    private fun scheduleAutoMapOpen(delayMs: Long = com.idvb.android.alignment.AutoMapOpenTiming.BURST_INTERVAL_MS) {
+    private fun scheduleAutoMapOpen(delayMs: Long = com.idvb.android.alignment.AutoMapOpenTiming.INTERVAL_MS) {
         mainHandler.removeCallbacks(autoTick)
         if (!destroyed && AppServices.prefs.autoDetectMapOpenEnabled)
             mainHandler.postDelayed(autoTick, delayMs)
     }
 
-    private var lastOpenBurstFailureCooldownMs = 0L
-    private var openBurstMissCount = 0
-
     private fun handleOutsideTouch() {
-        if (!AppServices.prefs.autoDetectMapOpenEnabled || !com.idvb.android.UsageConsent.isAccepted(this)) return
-        if (practiceForeground || scanning || blueprintView != null || adjustView != null || candidateView != null) return
-        val screen = screenSize()
-        if (screen.first <= screen.second) return
+        // Ordinary gameplay touches do not control or toggle automatic recognition.
+    }
 
-        val now = android.os.SystemClock.uptimeMillis()
-        if (guideVisible || autoDetector?.isOpen == true) {
-            android.util.Log.i("IDVB-AutoMap", "handleOutsideTouch: guide open -> triggering CLOSE burst")
-            triggerAutoMapBurst(AutoMapBurstMode.CLOSE)
-        } else {
-            if (now < lastOpenBurstFailureCooldownMs) {
-                return
-            }
-            android.util.Log.i("IDVB-AutoMap", "handleOutsideTouch: guide closed -> triggering OPEN burst")
-            triggerAutoMapBurst(AutoMapBurstMode.OPEN)
+    private fun handleAutoForegroundChanged(name: String?) {
+        if (destroyed) return
+        if (name != null && autoExternalPackage() == name) scheduleAutoMapOpen(0L)
+        else {
+            mainHandler.removeCallbacks(autoTick)
+            stopAutoMapGuide("game-not-foreground-or-capture-unavailable")
+            autoDetector?.reset()
         }
     }
 
-    private fun handleScreenTap(x: Float, y: Float) {
-        handleOutsideTouch()
-    }
-
-    private fun triggerAutoMapBurst(mode: AutoMapBurstMode) {
-        val now = android.os.SystemClock.uptimeMillis()
-        if (autoBurstMode == mode && now < autoBurstDeadlineMs) return
-        autoBurstMode = mode
-        openBurstMissCount = 0
-        autoBurstDeadlineMs = now + com.idvb.android.alignment.AutoMapOpenTiming.BURST_DURATION_MS
-        android.util.Log.i("IDVB-AutoMap", "triggerAutoMapBurst: mode=$mode deadlineMs=$autoBurstDeadlineMs")
-        mainHandler.removeCallbacks(autoTick)
-        scheduleAutoMapOpen(0L)
-    }
-
     private fun stopAutoMapGuide(reason: String) {
+        autoStaticResume = false
         autoPreviousMapFrame?.recycle(); autoPreviousMapFrame = null
         autoCaptureGeneration++
         val abort = abortAutoCapture
@@ -1827,51 +1924,55 @@ class OverlayService : Service() {
     }
 
     private fun autoExternalPackage(): String? {
+        if (hostForeground) return null
         val name = AccessibilityScreenCaptureService.foregroundPackage
         val home = packageManager.resolveActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0)?.activityInfo?.packageName
         if (name != null) {
             return name.takeUnless { it == packageName || it == "com.idvb.android" || it == home || it == "android" || it.startsWith("com.android.") }
         }
-        return "external_game"
+        // Projection works without an accessibility service. This is a display source,
+        // not an invented foreground application identity.
+        return "media-projection-display".takeIf {
+            AppServices.prefs.screenCaptureMethod == ScreenCaptureMethod.MEDIA_PROJECTION &&
+                !AccessibilityScreenCaptureService.available
+        }
     }
 
     private fun pollAutoMapOpen() {
         if (destroyed) return
         val now = android.os.SystemClock.uptimeMillis()
-        if (!com.idvb.android.UsageConsent.isAccepted(this) || practiceForeground || !OverlayState.state.value.visible) {
+        if (!com.idvb.android.UsageConsent.isAccepted(this) || hostForeground || practiceForeground || !OverlayState.state.value.visible) {
             stopAutoMapGuide("not-visible-or-consented")
-            autoBurstMode = AutoMapBurstMode.IDLE
             return
         }
         if (!AppServices.prefs.autoDetectMapOpenEnabled) {
             stopAutoMapGuide("disabled")
-            autoBurstMode = AutoMapBurstMode.IDLE
             return
         }
-
-        // 仅在脉冲激活窗口期内进行识别尝试
-        if (autoBurstMode == AutoMapBurstMode.IDLE || now > autoBurstDeadlineMs) {
-            autoBurstMode = AutoMapBurstMode.IDLE
-            return
-        }
+        // Static screens do not start a long screenshot wait. The next distinct image
+        // resumes observation directly, so opening latency begins at that frame.
+        if (AppServices.prefs.screenCaptureMethod == ScreenCaptureMethod.MEDIA_PROJECTION &&
+            captureSession?.hasFreshAutoFrame() != true && !autoStaticResume) return
 
         val screen = screenSize()
         if (screen.first <= screen.second) {
-            autoBurstMode = AutoMapBurstMode.IDLE
+            stopAutoMapGuide("landscape-required")
             return
         }
 
         val calibrated = captureRegionPixels(screen.first, screen.second)
         if (calibrated == null) {
-            // 用户尚未校准显示区域，无法确定右侧识别区域边界
-            autoBurstMode = AutoMapBurstMode.IDLE
+            stopAutoMapGuide("capture-region-missing")
             return
         }
 
-        val targetPackage = autoExternalPackage() ?: "external_game"
+        val targetPackage = autoExternalPackage() ?: run {
+            stopAutoMapGuide("foreground-package-unavailable")
+            return
+        }
 
         val calibRight = calibrated.right
-        val screenKey = "$screen:${calibRight.toInt()}"
+        val screenKey = "$screen:${calibRight}:$targetPackage"
         if (autoReferenceScreen != screenKey || autoReference == null) {
             autoReferenceScreen = screenKey
             autoReference = autoReferenceStore.loadBuiltin(screen.first, screen.second, calibRight / screen.first, targetPackage)
@@ -1882,51 +1983,62 @@ class OverlayService : Service() {
         }
         val reference = autoReference
         if (reference == null) {
-            autoBurstMode = AutoMapBurstMode.IDLE
+            stopAutoMapGuide("builtin-reference-unavailable")
             return
         }
 
-        val context = "${reference.id}:$screen:${currentMap?.id}:$floorIndex:${AppServices.prefs.alignmentMethodId}:${calibrated.toShortString()}"
+        val method = AppServices.prefs.screenCaptureMethod
+        val interval = if (method == ScreenCaptureMethod.MEDIA_PROJECTION)
+            com.idvb.android.alignment.AutoMapOpenTiming.INTERVAL_MS else 350L
+        val context = "${reference.id}:$targetPackage:$screen:${currentMap?.id}:$floorIndex:${AppServices.prefs.alignmentMethodId}:$method:${calibrated.toShortString()}"
         if (context != autoContext || autoDetector == null) {
+            val widthFraction = reference.sidebarAspectRatio?.let { aspect ->
+                (aspect * screen.second / ((1.0 - reference.region[0]) * screen.first)).coerceIn(1e-6, 1.0)
+            }
+            val config = com.idvb.android.alignment.AutoMapOpenConfig(sidebarWidthFraction = widthFraction,
+                openFrames = 1, closeFrames = 1,
+                maximumFrameAgeMs = 1_000L)
+            autoDiagnostics.configure(config, method.name, interval)
+            prewarmGuideFloor()
             stopAutoMapGuide("context-changed")
+            autoOpeningFrameNanos = 0L
             autoContext = context
             autoBlocked = false
             autoDetector = com.idvb.android.alignment.AutoMapOpenDetector(
                 com.idvb.android.alignment.AutoMapOpenDetector.signature(reference.signaturePixels),
-                com.idvb.android.alignment.AutoMapOpenConfig(
-                    openThreshold = 0.70,
-                    closeThreshold = 0.35,
-                    openFrames = 1,
-                    closeFrames = 1,
-                )
+                config
             )
         }
         val detector = requireNotNull(autoDetector)
         val currentPkg = AccessibilityScreenCaptureService.foregroundPackage
         val home = packageManager.resolveActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0)?.activityInfo?.packageName
         val isBlockedPkg = currentPkg != null && (currentPkg == packageName || currentPkg == "com.idvb.android" || currentPkg == home || currentPkg == "android" || currentPkg.startsWith("com.android."))
-        if (isBlockedPkg || !AccessibilityScreenCaptureService.available || autoBlocked) {
+        val sourceAvailable = if (method == ScreenCaptureMethod.MEDIA_PROJECTION)
+            captureSession != null && ScreenCaptureGrant.available else AccessibilityScreenCaptureService.available
+        if (isBlockedPkg || !sourceAvailable || autoBlocked) {
             detector.observe(null, now)
             stopAutoMapGuide(if (autoBlocked) "reference-overlapped" else "game-not-foreground-or-capture-unavailable")
-            autoBurstMode = AutoMapBurstMode.IDLE
             return
         }
 
         if (autoCaptureBusy) {
-            scheduleAutoMapOpen(com.idvb.android.alignment.AutoMapOpenTiming.BURST_INTERVAL_MS)
             return
         }
         if (scanning || blueprintView != null || adjustView != null || candidateView != null || candidateResult != null) {
             detector.observe(null, now)
             stopAutoMapGuide("manual-work")
-            autoBurstMode = AutoMapBurstMode.IDLE
+            scheduleAutoMapOpen(interval)
             return
         }
 
         val region = autoReferenceBounds(reference)
         if (autoRegionOccluded(region)) {
             detector.observe(null, now)
-            scheduleAutoMapOpen(com.idvb.android.alignment.AutoMapOpenTiming.BURST_INTERVAL_MS)
+            if (autoPauseReason != "reference-occluded") {
+                autoPauseReason = "reference-occluded"
+                autoDiagnostics.event(autoPauseReason, reference, sessionLogs.sessionId, lastAlignmentRequestId)
+            }
+            scheduleAutoMapOpen(interval)
             return
         }
 
@@ -1941,20 +2053,38 @@ class OverlayService : Service() {
         }.takeIf { currentMap != null && !aligning && it.width() > 0 && it.height() > 0 && !autoRegionOccluded(RectF(it)) }
 
         val referenceRegion = Rect(region.left.toInt(), region.top.toInt(), region.right.toInt(), region.bottom.toInt())
-        val captureBounds = if (mapRegion == null) referenceRegion else Rect(0, 0, screen.first, screen.second)
-        val sampler = com.idvb.android.alignment.AutoMapOpenFrameSampler(mainHandler, accessibilityCaptureExecutor) { rect, callback ->
-            AccessibilityScreenCaptureService.capture(rect, accessibilityCaptureExecutor, callback, AlignmentLogSink { event -> autoDiagnostics.captureEvent(event) })
+        val captureBounds = Rect(referenceRegion).apply { if (mapRegion != null) union(mapRegion) }
+        val session = captureSession
+        val reuseStaticFrame = autoStaticResume
+        autoStaticResume = false
+        val observedFrameNanos = java.util.concurrent.atomic.AtomicLong(started)
+        val observedFrameSequence = java.util.concurrent.atomic.AtomicLong(-1L)
+        val sampleId = "$generation:$startedAtMs"
+        val captureLog = AlignmentLogSink { event ->
+            event.measurements["frameReceivedNanos"]?.let { observedFrameNanos.set(it.toLong()) }
+            event.measurements["frameSequence"]?.let { observedFrameSequence.set(it.toLong()) }
+            autoDiagnostics.captureEvent(event.copy(labels = event.labels + ("autoSampleId" to sampleId)))
         }
+        val sampler = com.idvb.android.alignment.AutoMapOpenFrameSampler(mainHandler, accessibilityCaptureExecutor,
+            captureFrame = { rect, callback ->
+                if (method == ScreenCaptureMethod.MEDIA_PROJECTION) {
+                    if (reuseStaticFrame) requireNotNull(session).captureRetained(rect, captureLog, callback)
+                    else requireNotNull(session).captureAuto(rect, captureLog, callback)
+                }
+                else AccessibilityScreenCaptureService.capture(rect, accessibilityCaptureExecutor, callback, captureLog)
+            }, captureMethod = method.name,
+            compare = { pixels -> detector.compareCandidate(com.idvb.android.alignment.AutoMapOpenDetector.signature(pixels)) },
+            frameSequence = { observedFrameSequence.get().takeIf { it >= 0 } })
 
         abortAutoCapture = sampler.sampleWithFrame(referenceRegion, captureBounds, mapRegion,
             isCurrent = { !destroyed && generation == autoCaptureGeneration && autoContext == context &&
                 !scanning && blueprintView == null && adjustView == null && candidateView == null &&
                 AppServices.prefs.autoDetectMapOpenEnabled && com.idvb.android.UsageConsent.isAccepted(this) &&
                 !practiceForeground && OverlayState.state.value.visible && screenSize() == screen &&
-                autoBurstMode != AutoMapBurstMode.IDLE },
+                autoExternalPackage() == targetPackage && AppServices.prefs.screenCaptureMethod == method },
             isOccluded = { autoRegionOccluded(region) },
             isMapOccluded = { mapRegion == null || autoRegionOccluded(RectF(mapRegion)) },
-            log = AlignmentLogSink { event -> autoDiagnostics.captureEvent(event) }) { result ->
+            log = captureLog) { result ->
             if (destroyed || generation != autoCaptureGeneration) {
                 result.getOrNull()?.mapFrame?.recycle(); return@sampleWithFrame
             }
@@ -1967,54 +2097,57 @@ class OverlayService : Service() {
             var previousTransferred = false
             autoPreviousMapFrame = null
             val decidedAt = System.nanoTime()
-            val observation = detector.observe(pixels?.let(com.idvb.android.alignment.AutoMapOpenDetector::signature), sampleTime)
-            val decisionMs = (System.nanoTime() - decidedAt) / 1e6
+            val observation = detector.observeComparison(result.getOrNull()?.comparison, sampleTime)
+            val decisionMs = (result.getOrNull()?.decisionMs ?: 0.0) + (System.nanoTime() - decidedAt) / 1e6
             if (pixels != null) lastAutoFrameMs = sampleTime
+            lastAutoSampleId = sampleId
 
             autoDiagnostics.frame(reference, pixels, observation, sampleTime, (decidedAt - started) / 1e6,
-                startedAtMs, decisionMs, mapFrame != null, result.exceptionOrNull()?.toString())
+                startedAtMs, decisionMs, mapFrame != null, result.exceptionOrNull()?.toString(), sampleId,
+                observedFrameSequence.get().takeIf { it >= 0 },
+                observedFrameNanos.get().takeIf { observedFrameSequence.get() >= 0 })
 
-            val score = observation.comparison?.score ?: 0.0
-            val isOpenScore = score >= detector.config.openThreshold
-            val isCloseScore = score <= detector.config.closeThreshold
-            android.util.Log.i("IDVB-AutoMap", "sample: mode=$autoBurstMode score=${"%.3f".format(score)} isOpen=$isOpenScore isClose=$isCloseScore decisionMs=${"%.1f".format(decisionMs)}")
-
-            if (autoBurstMode == AutoMapBurstMode.CLOSE) {
-                if (observation.transition == com.idvb.android.alignment.AutoMapOpenTransition.CLOSED || isCloseScore) {
-                    android.util.Log.i("IDVB-AutoMap", "CLOSE burst matched (score=${"%.3f".format(score)}) -> closing guide")
-                    stopAutoMapGuide("closed")
-                    autoDiagnostics.event("closed", reference, sessionLogs.sessionId, lastAlignmentRequestId)
-                    autoBurstMode = AutoMapBurstMode.IDLE
-                }
-            } else if (autoBurstMode == AutoMapBurstMode.OPEN) {
-                if (observation.transition == com.idvb.android.alignment.AutoMapOpenTransition.OPENED || isOpenScore) {
-                    android.util.Log.i("IDVB-AutoMap", "OPEN burst matched (score=${"%.3f".format(score)}) -> opening guide")
-                    autoDiagnostics.event("opened", reference, sessionLogs.sessionId, lastAlignmentRequestId)
-                    autoBurstMode = AutoMapBurstMode.IDLE
-                } else {
-                    openBurstMissCount++
-                    if (openBurstMissCount >= 2 && score < 0.20) {
-                        android.util.Log.i("IDVB-AutoMap", "OPEN burst missed ($openBurstMissCount attempts, score=${"%.3f".format(score)}) -> cooldown 800ms")
-                        autoBurstMode = AutoMapBurstMode.IDLE
-                        lastOpenBurstFailureCooldownMs = android.os.SystemClock.uptimeMillis() + 800L
-                    }
-                }
+            val isOpenScore = observation.comparison?.score?.let { it >= detector.config.openThreshold } == true
+            if (observation.transition == com.idvb.android.alignment.AutoMapOpenTransition.OPENED) {
+                autoOpeningFrameNanos = observedFrameNanos.get()
+                autoPauseReason = ""
+                autoDiagnostics.event("opened", reference, sessionLogs.sessionId, lastAlignmentRequestId)
             }
 
             if (observation.transition == com.idvb.android.alignment.AutoMapOpenTransition.CLOSED) {
+                autoOpeningFrameNanos = 0L
                 stopAutoMapGuide("closed")
             }
 
-            if (pixels != null && currentMap != null && !aligning && (!guideVisible || autoGuideOwned) && detector.shouldAttemptAlignment(sampleTime)) {
+            if (observation.isOpen && currentMap == null && autoPauseReason != "map-not-selected") {
+                autoPauseReason = "map-not-selected"
+                autoDiagnostics.event(autoPauseReason, reference, sessionLogs.sessionId, lastAlignmentRequestId)
+                notifyOverlay("自动开图已识别，请先扫描或选择地图")
+            }
+
+            val wantsAlignment = pixels != null && currentMap != null && !aligning &&
+                (!guideVisible || autoGuideOwned) && detector.shouldAttemptAlignment(sampleTime)
+            val guideReady = wantsAlignment && guideBitmap?.isRecycled == false && guideBitmapKey == guideFloorPreparation()?.first
+            if (wantsAlignment && !guideReady) {
+                prewarmGuideFloor()
+                if (autoPauseReason != "guide-preparing") {
+                    autoPauseReason = "guide-preparing"
+                    autoDiagnostics.event("guide-preparing", reference, sessionLogs.sessionId, lastAlignmentRequestId)
+                }
+            }
+            if (wantsAlignment && guideReady) {
                 val cycle = detector.alignmentStarted(sampleTime)
                 if (cycle != null) {
                     autoPauseReason = ""
                     autoGuideOwned = true
                     alignedGuideBounds = null; alignedGuideViewport = null; guideView?.clearAlignment()
-                    val began = System.nanoTime()
+                    // A cold guide cache stays in the budget; waiting must not produce a false pass.
+                    val began = if (detector.attemptsInCycle == 1 && autoOpeningFrameNanos > 0L)
+                        autoOpeningFrameNanos else observedFrameNanos.get()
                     val preparedFrames = mutableListOf<com.idvb.android.alignment.PreparedMapFrame>()
                     if (mapFrame != null) {
-                        if (previous?.isFreshFor(mapFrame.bounds, sampleTime) == true) {
+                        if (previous?.isFreshFor(mapFrame.bounds, sampleTime) == true &&
+                            (mapFrame.frameSequence == null || previous.frameSequence != mapFrame.frameSequence)) {
                             preparedFrames.add(previous); previousTransferred = true
                         }
                         preparedFrames.add(mapFrame); mapFrame = null
@@ -2039,17 +2172,14 @@ class OverlayService : Service() {
             mapFrame?.recycle()
             if (!previousTransferred) previous?.recycle()
 
-            if (autoBurstMode != AutoMapBurstMode.IDLE && android.os.SystemClock.uptimeMillis() < autoBurstDeadlineMs) {
-                scheduleAutoMapOpen(com.idvb.android.alignment.AutoMapOpenTiming.delayAfterSample(startedAtMs, android.os.SystemClock.uptimeMillis()))
-            } else {
-                autoBurstMode = AutoMapBurstMode.IDLE
-            }
+            val nextAt = android.os.SystemClock.uptimeMillis()
+            if (method == ScreenCaptureMethod.ACCESSIBILITY || captureSession?.hasFreshAutoFrame() == true)
+                scheduleAutoMapOpen(com.idvb.android.alignment.AutoMapOpenTiming.delayAfterSample(startedAtMs, nextAt, interval))
         }
     }
 
     override fun onDestroy() {
-        com.idvb.android.recognize.AccessibilityScreenCaptureService.screenTapListener = null
-        autoBurstMode = AutoMapBurstMode.IDLE
+        AccessibilityScreenCaptureService.foregroundChangedListener = null
         autoPreviousMapFrame?.recycle(); autoPreviousMapFrame = null
         mainHandler.removeCallbacks(autoTick)
         autoCaptureGeneration++; abortAutoCapture?.invoke(); abortAutoCapture = null
@@ -2072,6 +2202,7 @@ class OverlayService : Service() {
         hideScanProgress()
         getSystemService(DisplayManager::class.java).unregisterDisplayListener(displayListener)
         accessibilityCaptureExecutor.shutdown()
+        guidePreparationExecutor.shutdown()
         recognitionExecutor.close()
         closeCandidates(recycleCapture = true)
         captureSession?.close(); captureSession = null
