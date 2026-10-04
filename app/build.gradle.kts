@@ -131,6 +131,8 @@ val generateAlignmentProvenance = tasks.register<GenerateAlignmentProvenance>("g
         .standardOutput.asText.map { it.trim() })
     sourceFiles.from(rootProject.fileTree("app/src") {
         include("**/*.kt", "**/*.java", "**/*.xml", "**/*.contract")
+        include("**/*.cpp", "**/*.h", "**/*.mk")
+        include("main/assets/FloorIndicators/*.png", "main/assets/FloorIndicators/*.json")
     }, rootProject.fileTree("tools") { include("**/*.ps1", "**/*.rules", "**/*.properties") },
         rootProject.file("app/build.gradle.kts"), rootProject.file("build.gradle.kts"),
         rootProject.file("settings.gradle.kts"), rootProject.file("gradle/libs.versions.toml"),
@@ -139,6 +141,13 @@ val generateAlignmentProvenance = tasks.register<GenerateAlignmentProvenance>("g
 
 android {
     namespace = "com.idvb.android"
+    ndkVersion = "27.3.13750724"
+    ndkPath = providers.gradleProperty("idvbNdkPath")
+        .orElse(providers.environmentVariable("ANDROID_NDK_HOME"))
+        .orElse(rootProject.file(".verify/toolchains/android-ndk-r27d").absolutePath).get()
+    externalNativeBuild {
+        ndkBuild { path = file("src/main/cpp/Android.mk") }
+    }
     compileSdk {
         version = release(36) {
             minorApiLevel = 1
@@ -219,7 +228,7 @@ androidComponents {
 val mediaStorageRules = rootProject.file("tools/media-storage-boundary.rules")
 val evidenceScriptPatterns = arrayOf("**/*.ps1", "**/*.py", "**/*.sh", "**/*.bat", "**/*.cmd", "**/*.js", "**/*.mjs", "**/*.gradle", "**/*.kts")
 val mediaStorageSources = files(
-    fileTree("src") { include("**/*.kt", "**/*.java", "**/*.xml") },
+    fileTree("src") { include("**/*.kt", "**/*.java", "**/*.cpp", "**/*.h", "**/*.mk", "**/*.xml") },
     rootProject.fileTree("tools") { include(*evidenceScriptPatterns) },
     rootProject.fileTree(".verify") {
         include(*evidenceScriptPatterns)

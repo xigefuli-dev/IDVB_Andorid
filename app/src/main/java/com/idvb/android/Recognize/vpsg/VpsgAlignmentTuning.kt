@@ -23,7 +23,7 @@ internal object VpsgAlignmentTuning {
     const val MIN_POSE_MARGIN = .09
     const val RIVAL_DISTANCE = 10.0
 
-    val thresholds get() = linkedMapOf(
+    val thresholds: Map<String, Double> = linkedMapOf(
         "minimumScale" to MIN_SCALE, "maximumScale" to MAX_SCALE,
         "minimumReferenceEdges" to MIN_REFERENCE_EDGES.toDouble(), "minimumPitch" to MIN_PITCH,
         "minimumPitchRatio" to MIN_PITCH_RATIO, "minimumLivePoints" to MIN_LIVE_POINTS.toDouble(),

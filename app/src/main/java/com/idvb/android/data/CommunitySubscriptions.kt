@@ -5,7 +5,6 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.AtomicFile
-import android.util.LruCache
 import com.idvb.android.AppServices
 import com.idvb.android.idvm.IdvmImporter
 import com.idvb.android.idvm.ImportResult
@@ -62,9 +61,6 @@ data class CommunityDownloadProgress(val phase: String, val fraction: Float? = n
 /** Official community protocol. Links contain a secret content key and stay in private app storage. */
 class CommunitySubscriptions(private val context: Context) {
     private val storeFile = File(context.filesDir, "idvb/subscriptions.json")
-    private val coverCache = object : LruCache<String, Bitmap>(8 * 1024) {
-        override fun sizeOf(key: String, value: Bitmap) = value.byteCount / 1024
-    }
 
     fun saved(): List<SavedSubscription> = runCatching {
         if (!storeFile.isFile) return emptyList()
@@ -140,14 +136,14 @@ class CommunitySubscriptions(private val context: Context) {
     fun cover(urlText: String): Bitmap? {
         val url = checkedUrl(urlText, COMMUNITY, "/api/maps/covers/")
         require(Regex("/api/maps/covers/[0-9a-fA-F-]{36}").matches(url.path)) { "封面地址无效" }
-        coverCache.get(url.toString())?.let { return it }
-        val bytes = fetch(url.toString(), 4L * 1024 * 1024)
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        require(bounds.outWidth in 1..8192 && bounds.outHeight in 1..8192) { "封面图片无效" }
-        val sample = generateSequence(1) { it * 2 }.first { bounds.outWidth / it <= 720 && bounds.outHeight / it <= 720 }
-        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
-            ?.also { coverCache.put(url.toString(), it) }
+        return com.idvb.android.resources.MapBitmapCaches.covers.load(url.toString()) {
+            val bytes = fetch(url.toString(), 4L * 1024 * 1024)
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            require(bounds.outWidth in 1..8192 && bounds.outHeight in 1..8192) { "封面图片无效" }
+            val sample = generateSequence(1) { it * 2 }.first { bounds.outWidth / it <= 720 && bounds.outHeight / it <= 720 }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
+        }
     }
 
     fun install(entry: CommunityEntry): String {

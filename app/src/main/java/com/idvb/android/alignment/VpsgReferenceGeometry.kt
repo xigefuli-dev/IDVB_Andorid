@@ -15,11 +15,16 @@ import java.io.File
 /** Repair semantic details omitted by the walkable contour profile using the immutable
  * reference source and the original prebuilt domain, never live observations or residuals. */
 internal object VpsgReferenceGeometry {
-    const val ALGORITHM_ID = "prepared-geometry-v4"
+    const val ALGORITHM_ID = "prepared-geometry-v11"
     private data class Prepared(val line: ResolvedPrebuiltStructureLine, val color: ByteArray,
         val original: ByteArray, val holes: List<Double>, val sourceHash: String, val colorArtifact: String,
-        val hatch: ReferenceHatchGeometry.Result, val partition: ReferencePartitionGeometry.Result)
+        val hatch: ReferenceHatchGeometry.Result, val partition: ReferencePartitionGeometry.Result,
+        val striped: ReferenceStripedFrameGeometry.Result, val proposalLine: ResolvedPrebuiltStructureLine)
     private val cache = LinkedHashMap<String, Prepared>(8, .75f, true)
+    val retainedEntries: Int get() = synchronized(this) { cache.size }
+    @Synchronized fun clear() { cache.clear() }
+    @Synchronized fun proposalLine(line: ResolvedPrebuiltStructureLine): ResolvedPrebuiltStructureLine =
+        cache.values.firstOrNull { it.line.file == line.file }?.proposalLine ?: line
 
     @Synchronized fun prepare(repository: MapRepository, map: MapRecord, floor: FloorRecord,
         line: ResolvedPrebuiltStructureLine, log: AlignmentLogSink): ResolvedPrebuiltStructureLine {
@@ -31,7 +36,7 @@ internal object VpsgReferenceGeometry {
         }
         val region = if (assets.recognitionImageFile == null) assets.recognitionRegion else null
         val crop = if (assets.recognitionImageFile == null) repository.loadFreeCropPoints(map.id, floor) else emptyList()
-        val key = "prepared-geometry-v4|${map.id}|${floor.key}|${source.canonicalPath}|${source.length()}|${source.lastModified()}|$region|$crop|${line.file.canonicalPath}|${line.file.length()}|${line.file.lastModified()}"
+        val key = "$ALGORITHM_ID|${map.id}|${floor.key}|${source.canonicalPath}|${source.length()}|${source.lastModified()}|$region|$crop|${line.file.canonicalPath}|${line.file.length()}|${line.file.lastModified()}"
         val prepared = cache[key]?.takeIf { it.line.file.isFile } ?: log.measure("vpsg.reference.prepare") {
             val bitmap = requireNotNull(decodeMapRegion(source, region, maxOf(line.width, line.height),
                 crop))
@@ -67,18 +72,30 @@ internal object VpsgReferenceGeometry {
                 val partitionMat = Mat(line.height, line.width, CvType.CV_8UC1)
                 try { partitionMat.put(0, 0, partition.edges); Core.bitwise_or(augmented, partitionMat, augmented) }
                 finally { partitionMat.release() }
-                val fingerprint = AlignmentDiagnosticsStore.sha256(original + color + "$ALGORITHM_ID|${map.id}|${floor.key}|$region|$crop|${line.width}x${line.height}".toByteArray())
-                val output = File(repository.alignmentReferenceCacheRoot, "$fingerprint-prepared-v4.png")
+                val fingerprint = AlignmentDiagnosticsStore.sha256(original + color +
+                    "$ALGORITHM_ID|${ReferenceStripedFrameGeometry.thresholds}|${map.id}|${floor.key}|$region|$crop|${line.width}x${line.height}".toByteArray())
+                val proposalFile = File(repository.alignmentReferenceCacheRoot, "$fingerprint-$ALGORITHM_ID-proposal.png")
+                if (!proposalFile.isFile) check(Imgcodecs.imwrite(proposalFile.path, augmented))
+                val striped = log.measure("vpsg.reference.striped-frames") { ReferenceStripedFrameGeometry.extract(bgr, gray) }
+                val stripedMat = Mat(line.height, line.width, CvType.CV_8UC1)
+                try { stripedMat.put(0, 0, striped.edges); Core.bitwise_or(augmented, stripedMat, augmented) }
+                finally { stripedMat.release() }
+                val output = File(repository.alignmentReferenceCacheRoot, "$fingerprint-$ALGORITHM_ID.png")
                 if (!output.isFile) check(Imgcodecs.imwrite(output.path, augmented))
-                Prepared(ResolvedPrebuiltStructureLine(output, line.width, line.height, line.algorithmId + "+prepared-geometry-v4"),
+                Prepared(ResolvedPrebuiltStructureLine(output, line.width, line.height, line.algorithmId + "+$ALGORITHM_ID"),
                     color, original, records, AlignmentDiagnosticsStore.sha256(color),
-                    if (assets.recognitionImageFile == null) "reference-source.png" else "reference-color.png", hatch, partition)
+                    if (assets.recognitionImageFile == null) "reference-source.png" else "reference-color.png", hatch, partition, striped,
+                    ResolvedPrebuiltStructureLine(proposalFile, line.width, line.height, line.algorithmId + "+$ALGORITHM_ID-proposal"))
             } finally { bgr.release(); gray.release(); filled.release(); hierarchy.release(); originalMat.release(); augmented.release(); contours.forEach(MatOfPoint::release) }
         }.also {
             if (cache.size >= 8) cache.remove(cache.keys.first())
             cache[key] = it
         }
         log.attach("reference-prebuilt.png") { prepared.original }
+        log.attach("reference-proposal.png") { prepared.proposalLine.file.readBytes() }
+        log.emit(AlignmentLogEvent("vpsg.reference.geometry-domains", "wall-proposals-and-full-feature-verification",
+            labels = mapOf("proposalArtifact" to "reference-proposal.png", "verificationArtifact" to "reference.png",
+                "policy" to "wall-void-hatch-partition-model-for-pose-search; source-proven-grates-retained-for-full-final-verification")))
         log.attach(prepared.colorArtifact) { prepared.color }
         log.emit(AlignmentLogEvent("vpsg.reference.voids", "enclosed-void-v1",
             thresholds = mapOf("darkThreshold" to 16.0, "minimumHoleArea" to 100.0, "minimumHoleWidth" to 8.0,
@@ -94,6 +111,15 @@ internal object VpsgReferenceGeometry {
             labels = mapOf("sourceSha256" to prepared.sourceHash, "artifact" to "reference-hatched-frames.gray8",
                 "policy" to "source-only-parallel-diagonal-texture-with-continuous-measured-rectangular-frame; prebuilt-walls-preserved")))
         log.attach("reference-partitions.gray8") { prepared.partition.edges }
+        log.attach("reference-striped-frames.gray8") { prepared.striped.edges }
+        log.emit(AlignmentLogEvent("vpsg.reference.striped-frames", "reference-room-framed-vertical-stripes-v5",
+            thresholds = ReferenceStripedFrameGeometry.thresholds,
+            series = ReferenceStripedFrameGeometry.colorRanges + mapOf(
+                "candidateLTRBLeftRightTopBottomSupportBandsDensityAccepted" to prepared.striped.candidates,
+                "componentXYWHAreaEligible" to prepared.striped.components,
+                "acceptedLTRB" to prepared.striped.rectangles),
+            labels = mapOf("sourceSha256" to prepared.sourceHash, "artifact" to "reference-striped-frames.gray8",
+                "policy" to "immutable-source-only-room-grates; corridor-stair-decoration-excluded; grouping-joins-measured-horizontal-and-vertical-borders; measured-four-borders-max-fixed-flank-or-directional-top-hat-continuity-and-four-stripe-bands; no-live-input-or-residual; original-walls-preserved")))
         log.emit(AlignmentLogEvent("vpsg.reference.partitions", "reference-anchored-partition-v1",
             thresholds = ReferencePartitionGeometry.thresholds,
             series = ReferencePartitionGeometry.colorRanges + mapOf("candidateVerticalXYWHDomainFlankMissingAnchorIncluded" to prepared.partition.candidates,

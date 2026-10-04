@@ -22,15 +22,16 @@ internal class RecognitionPreparation(
         Thread(task,"idvb-index-preparation").apply { isDaemon = true }
     }
     @Volatile private var closed = false
+    @Volatile private var paused = false
     @Volatile var status = Status(Phase.IDLE)
         private set
 
     @Synchronized fun request() {
-        if (closed) return
+        if (closed || paused) return
         val revision = generation.incrementAndGet()
         status = Status(Phase.PREPARING)
         worker.execute {
-            fun current() = !closed && generation.get() == revision
+            fun current() = !closed && !paused && generation.get() == revision
             if (!current()) return@execute
             val started = System.nanoTime()
             try {
@@ -55,9 +56,18 @@ internal class RecognitionPreparation(
 
     /** Worker/test barrier; never call from the UI thread. */
     fun awaitIdle(): Status {
-        worker.submit {}.get()
+        worker.submit {}.get(30, java.util.concurrent.TimeUnit.SECONDS)
         return status
     }
+
+    @Synchronized fun pauseForResourceRelease() {
+        paused = true
+        generation.incrementAndGet()
+        status = Status(Phase.IDLE)
+    }
+
+    /** Re-enable future preparation; do not immediately refill explicitly released caches. */
+    @Synchronized fun resume() { paused = false }
 
     @Synchronized override fun close() {
         closed = true

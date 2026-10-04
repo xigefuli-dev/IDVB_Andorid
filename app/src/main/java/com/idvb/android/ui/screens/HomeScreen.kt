@@ -56,9 +56,9 @@ fun HomeScreen(
         Spacer(Modifier.height(8.dp))
         Text(
             text = when {
-                !hasMaps -> "需先导入地图包并获得全部权限后才能运行。"
-                permissions.allGranted -> "准备就绪，可以启动服务。"
-                else -> "需获得全部权限后才能正常运行。"
+                !hasMaps -> "需先导入地图包并完成权限设置后才能运行。"
+                permissions.readyToStart -> "准备就绪，可以启动服务。"
+                else -> "请完成权限设置；无法获取电池优化白名单时可以跳过并运行。"
             },
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -91,10 +91,12 @@ fun HomeScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("运行所需权限", style = MaterialTheme.typography.titleLarge)
-                        Text("$grantedCount / ${items.size} 已获得", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("$grantedCount / ${items.size} 已获得" +
+                            if (permissions.batteryOptimizationSkipped && !permissions.batteryOptimization) " · 电池权限已跳过" else "",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    Box(Modifier.size(42.dp).background(if (permissions.allGranted) SignalGreenDeep else Color(0xFF34373B), RoundedCornerShape(2.dp)), contentAlignment = Alignment.Center) {
-                        Icon(if (permissions.allGranted) Icons.Rounded.Check else Icons.Rounded.Close, null, tint = if (permissions.allGranted) Color.White else SignalGreen)
+                    Box(Modifier.size(42.dp).background(if (permissions.readyToStart) SignalGreenDeep else Color(0xFF34373B), RoundedCornerShape(2.dp)), contentAlignment = Alignment.Center) {
+                        Icon(if (permissions.readyToStart) Icons.Rounded.Check else Icons.Rounded.Close, null, tint = if (permissions.readyToStart) Color.White else SignalGreen)
                     }
                 }
                 Spacer(Modifier.height(18.dp))

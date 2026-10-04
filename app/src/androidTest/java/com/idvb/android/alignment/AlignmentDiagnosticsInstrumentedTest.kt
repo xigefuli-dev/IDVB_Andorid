@@ -18,6 +18,45 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 class AlignmentDiagnosticsInstrumentedTest {
+    @Test fun asyncNumericRecordingDoesNotQueueAnUnusedFrameAndKeepsItsDimensions() {
+        val target = InstrumentationRegistry.getInstrumentation().targetContext
+        val root = File(target.cacheDir, "alignment-release-${UUID.randomUUID()}").apply { mkdirs() }
+        val context = object : ContextWrapper(target) {
+            override fun getApplicationContext(): Context = this
+            override fun getFilesDir(): File = root
+        }
+        val store = AlignmentDiagnosticsStore(context)
+        val writer = AlignmentDiagnosticsStore::class.java.getDeclaredField("writer")
+            .apply { isAccessible = true }.get(store) as java.util.concurrent.ExecutorService
+        val blocked = java.util.concurrent.CountDownLatch(1)
+        val proceed = java.util.concurrent.CountDownLatch(1)
+        val saved = java.util.concurrent.atomic.AtomicReference<Result<File>>()
+        val frame = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888)
+        try {
+            writer.execute { blocked.countDown(); check(proceed.await(5, java.util.concurrent.TimeUnit.SECONDS)) }
+            assertTrue(blocked.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val floor = FloorRecord("1f", "test", 1, "fixture", 100, 100)
+            val map = MapRecord("map", "class", "fixture", "test", 1, listOf(floor))
+            val input = AlignmentDiagnosticContext("vpsg", map, floor.key,
+                ScreenRect(0.0, 0.0, 100.0, 100.0), 100, 100, "test")
+            store.recordAsync(AlignmentTrace(captureArtifacts = false), input, frame,
+                AlignmentResult.Rejected("fixture", "fixture"), "rejected") { saved.set(it) }
+            assertTrue("Numeric diagnostics must not retain a frame behind a slow writer", frame.isRecycled)
+            proceed.countDown()
+            store.awaitIdle()
+            val file = saved.get().getOrThrow()
+            val json = Json.parseToJsonElement(store.diagnosticsJson(file).getOrThrow()).jsonObject
+            assertEquals(100, json.getValue("frameWidth").jsonPrimitive.int)
+            assertEquals(100, json.getValue("frameHeight").jsonPrimitive.int)
+            assertEquals("input-retention-disabled", json.getValue("replayUnavailableReason").jsonPrimitive.content)
+            ZipFile(file).use { assertNull(it.getEntry("captured.png")) }
+        } finally {
+            proceed.countDown(); writer.shutdown(); writer.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)
+            if (!frame.isRecycled) frame.recycle()
+            root.deleteRecursively()
+        }
+    }
+
     @Test fun incompleteInputsStayExplicitAndTamperedInputsFailIntegrityChecks() {
         val target = InstrumentationRegistry.getInstrumentation().targetContext
         val root = File(target.cacheDir, "alignment-diagnostics-${UUID.randomUUID()}").apply { mkdirs() }

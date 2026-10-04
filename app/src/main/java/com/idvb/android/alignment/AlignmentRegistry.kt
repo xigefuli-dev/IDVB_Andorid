@@ -13,6 +13,12 @@ class AlignmentRegistry(methods: List<AlignmentMethod>) {
 
     fun resolve(id: String): AlignmentMethod? = registered[id]
 
+    fun prepare(methodId: String, map: com.idvb.android.idvm.MapRecord,
+        floor: com.idvb.android.idvm.FloorRecord, cancellation: AlignmentCancellation,
+        log: AlignmentLogSink = AlignmentLogSink.NONE) = cancellation.run {
+        resolve(methodId)?.prepare(map, floor, log)
+    }
+
     fun align(methodId: String, request: AlignmentRequest,
         log: AlignmentLogSink = AlignmentLogSink.NONE): AlignmentResult {
         val started = System.nanoTime()
@@ -30,7 +36,13 @@ class AlignmentRegistry(methods: List<AlignmentMethod>) {
                     log.emit(AlignmentLogEvent("diagnostics.artifact-error", error.message.orEmpty()))
                 }
             }
+            override fun attachDirect(name: String, capture: () -> java.nio.ByteBuffer) {
+                try { log.attachDirect(name, capture) } catch (error: Exception) {
+                    log.emit(AlignmentLogEvent("diagnostics.artifact-error", error.message.orEmpty()))
+                }
+            }
         }
+        val scheduling = AlignmentScheduling.enter(safeLog)
         safeLog.emit(AlignmentLogEvent("start", "$methodId ${request.map.id}/${request.floor.key}"))
         try {
             val result = request.cancellation.run {
@@ -42,12 +54,18 @@ class AlignmentRegistry(methods: List<AlignmentMethod>) {
                 is AlignmentResult.Unavailable -> result.code
                 is AlignmentResult.Rejected -> result.code
             }
+            scheduling.restore(safeLog)
             val ended = System.nanoTime()
             safeLog.emit(AlignmentLogEvent("finish", detail,
                 mapOf("elapsedMs" to (ended - started) / 1_000_000.0),
+                thresholds = mapOf("maximumComputationWallMs" to AlignmentPerformanceBudget.COMPUTATION_MS),
+                gates = listOf(AlignmentGate("computation-wall-budget", (ended - started) / 1e6, "<=",
+                    AlignmentPerformanceBudget.COMPUTATION_MS, ended - started <= 50_000_000L)),
+                labels = mapOf("costScope" to "complete-alignment-call-including-synchronous-diagnostics; no-capture-or-render"),
                 timestampNanos = ended, durationNanos = ended - started))
             return result
         } catch (error: Exception) {
+            scheduling.restore(safeLog)
             val ended = System.nanoTime()
             if (request.cancellation.isCancelled) {
                 safeLog.emit(AlignmentLogEvent("cancelled", request.cancellation.reason,
@@ -59,7 +77,7 @@ class AlignmentRegistry(methods: List<AlignmentMethod>) {
             safeLog.emit(AlignmentLogEvent("error", error.message ?: error.javaClass.simpleName,
                 timestampNanos = ended, durationNanos = ended - started))
             throw error
-        }
+        } finally { scheduling.restore(safeLog) }
     }
 
     companion object {

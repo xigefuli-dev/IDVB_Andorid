@@ -31,6 +31,114 @@ import java.util.concurrent.atomic.AtomicInteger
  * Reliable results are constructed to isolate lifecycle consumption from recognition quality. */
 @RunWith(AndroidJUnit4::class)
 class OverlaySelectionScanLifecycleInstrumentedTest {
+    @Test fun resetWaitsForOldWorkerBeforeEvictingMapResourcesAndRejectsLateIdentity() {
+        Fixture().use { f ->
+            val cache = com.idvb.android.resources.MapBitmapCaches.previews
+            val bitmap = Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888)
+            val cancellation = AlignmentCancellation()
+            f.startPending()
+            f.main {
+                cache.load("resource-release-fixture") { bitmap }
+                f.set("scanCancellation", cancellation)
+                f.call("resetMapIdentity", false, java.lang.Boolean.TYPE)
+                assertTrue(cancellation.isCancelled)
+                assertTrue((f.get("mapResources") as com.idvb.android.resources.MapResourceRelease).pending)
+                assertTrue(cache.retainedBytes > 0)
+                assertNull(f.get("currentMap")); assertNull(AppServices.prefs.lastMapId)
+            }
+            f.releasePending()
+            f.awaitResourceRelease()
+            f.main {
+                assertEquals(0L, cache.retainedBytes)
+                assertNull(f.get("currentMap")); assertNull(AppServices.prefs.lastMapId)
+                assertFalse("Borrowed image must remain usable after cache release", bitmap.isRecycled)
+                bitmap.recycle()
+                f.assertCancelled()
+            }
+        }
+    }
+
+    @Test fun existingIdentityRescanReleasesResourcesBeforeOpeningManualPicker() {
+        Fixture().use { f ->
+            val cache = com.idvb.android.resources.MapBitmapCaches.previews
+            val bitmap = Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888)
+            f.main {
+                assertTrue(com.idvb.android.UsageConsent.accept(InstrumentationRegistry.getInstrumentation().targetContext))
+                AppServices.prefs.debugMode = true
+                AppServices.prefs.manualMapSelectionEnabled = true
+                f.set("scanning", false)
+                cache.load("resource-release-fixture") { bitmap }
+                f.call("runForegroundScan")
+                assertTrue((f.get("mapResources") as com.idvb.android.resources.MapResourceRelease).pending)
+                assertNull(f.get("candidateView"))
+                assertEquals(f.a, f.get("currentMap"))
+            }
+            f.awaitResourceRelease()
+            f.main {
+                assertEquals(0L, cache.retainedBytes)
+                assertNotNull(f.get("candidateView"))
+                assertEquals("Identity is kept until a new choice commits", f.a, f.get("currentMap"))
+                assertEquals(f.a.id, AppServices.prefs.lastMapId)
+                bitmap.recycle()
+            }
+        }
+    }
+    @Test fun scanWorkerAndEveryTerminalBranchRestoreControlsAfterVisibilityRefresh() {
+        for (outcome in listOf("failure", "no-result", "retained-candidates")) {
+            Fixture().use { f ->
+                f.main {
+                    f.set("scanCapturing", true)
+                    f.call("applyPracticeVisibility")
+                    assertEquals(View.INVISIBLE, f.balls.visibility)
+                    f.set("scanCapturing", false)
+                    f.call("applyPracticeVisibility")
+                    assertTrue(f.get("scanning") as Boolean)
+                    assertEquals("Worker computation must leave the controls visible", View.VISIBLE, f.balls.visibility)
+                    // Reproduce a late visibility writer before the main-thread result consumer.
+                    f.balls.visibility = View.INVISIBLE
+                    AppServices.prefs.showUnconfirmedCandidates = outcome == "retained-candidates"
+                    AppServices.prefs.backgroundScanEnabled = true
+                    f.complete(if (outcome == "failure") null else f.result.copy(candidates = emptyList()),
+                        if (outcome == "failure") IllegalStateException("controlled worker failure") else null)
+                    assertFalse(f.get("scanning") as Boolean)
+                    assertFalse(f.get("scanCapturing") as Boolean)
+                    assertEquals(View.VISIBLE, f.balls.visibility)
+                    assertEquals(f.a, f.get("currentMap"))
+                    assertEquals(outcome == "retained-candidates", f.get("candidateResult") != null)
+                    f.call("applyPracticeVisibility")
+                    assertEquals("Later auto polling must not hide completed scans", View.VISIBLE, f.balls.visibility)
+                }
+                f.assertControlsDraw()
+            }
+        }
+    }
+
+    @Test fun missingHiddenSurfaceReceiptTimesOutOnceAndControlsCanRecover() {
+        Fixture().use { f ->
+            val finished = CountDownLatch(1)
+            val calls = AtomicInteger()
+            var barrier: OverlayCaptureFrameBarrier? = null
+            try {
+                f.main {
+                    f.balls.visibility = View.INVISIBLE
+                    barrier = OverlayCaptureFrameBarrier(f.handler, listOf("controls" to f.balls),
+                        { true }, AlignmentLogSink.NONE, timeoutMs = 80L) { ready ->
+                        assertFalse(ready)
+                        calls.incrementAndGet()
+                        f.set("scanCapturing", false)
+                        f.set("scanning", false)
+                        f.call("applyPracticeVisibility")
+                        finished.countDown()
+                    }.also { it.start() }
+                }
+                assertTrue("An invisible root must not leave capture waiting indefinitely", finished.await(2, TimeUnit.SECONDS))
+                f.main { assertTrue(barrier!!.timedOut); assertEquals(View.VISIBLE, f.balls.visibility); barrier!!.cancel() }
+                f.assertControlsDraw()
+                f.main { assertEquals("Late draw callbacks cannot complete a timeout twice", 1, calls.get()) }
+            } finally { f.main { barrier?.cancel() } }
+        }
+    }
+
     @Test fun nextFloorCancelsPendingScanBeforeSelectionChanges() = selection("nextFloor", 0, 1, false)
     @Test fun previousFloorCancelsPendingScanBeforeSelectionChanges() = selection("previousFloor", 1, 0, false)
     @Test fun nextVariantCancelsPendingScanBeforeSelectionChanges() = selection("nextVariant", 0, 0, true)
@@ -100,6 +208,45 @@ class OverlaySelectionScanLifecycleInstrumentedTest {
         }
     }
 
+    @Test fun automaticCandidateDismissalRetainsChoiceAndManualCommitDisablesControls() {
+        Fixture().use { f ->
+            f.main {
+                AppServices.prefs.autoDetectMapOpenEnabled = true
+                f.balls.automaticMapOpen = true
+                f.set("candidateResult", f.result)
+                f.set("candidateManualSelection", true)
+                f.call("dismissCandidates")
+                assertNull(f.get("candidateView"))
+                assertEquals(f.result, f.get("candidateResult"))
+                assertFalse(f.result.capturedRegion.isRecycled)
+                assertTrue(f.balls.candidatesAvailable)
+                assertEquals(true, f.call("showPendingCandidates"))
+                assertNotNull(f.get("candidateView"))
+                assertEquals(true, f.get("candidateManualSelection"))
+                f.call("dismissCandidates")
+                assertEquals(true, f.call("showPendingCandidates"))
+                val manual = f.candidate().copy(disposition = CandidateDisposition.CATALOG_ONLY)
+                assertEquals(true, f.lock(manual))
+                assertNull(f.get("candidateResult"))
+                assertFalse(f.balls.candidatesAvailable)
+                assertFalse(OverlayControlPolicy(true, f.balls.mapLocked, false).eyeEnabled)
+                assertEquals(MapIdentitySource.MANUAL_UNVERIFIED, AppServices.prefs.lastMapIdentitySource)
+            }
+        }
+    }
+
+    @Test fun automaticFloorCommandsDoNotCancelOrChangeSelection() {
+        Fixture().use { f ->
+            f.main {
+                AppServices.prefs.autoDetectMapOpenEnabled = true
+                f.call("nextFloor"); f.call("previousFloor")
+                assertEquals(0, f.get("floorIndex"))
+                assertEquals("1f", AppServices.prefs.lastFloorKey)
+                assertEquals(41, f.get("scanGeneration"))
+            }
+        }
+    }
+
     @Test fun staleCandidateMapOrFloorCannotLockOrReportLocked() {
         Fixture().use { f ->
             f.main {
@@ -163,9 +310,13 @@ class OverlaySelectionScanLifecycleInstrumentedTest {
         private val base = instrumentation.targetContext
         private val prefs = base.getSharedPreferences("overlay", Context.MODE_PRIVATE)
         private val savedKeys = listOf("last_map_id", "last_floor_key", "last_map_identity_source",
-            "selected_map_class_id", "debug_mode", "manual_map_selection_enabled")
+            "selected_map_class_id", "debug_mode", "manual_map_selection_enabled", "show_unconfirmed_candidates", "background_scan_enabled",
+            "auto_detect_map_open_enabled")
         private val saved = savedKeys.associateWith { prefs.all[it] }
         private val originalCatalog = AppServices.repository.loadCatalog()
+        private val consentPrefs = base.getSharedPreferences("mandatory_usage_consent", Context.MODE_PRIVATE)
+        private val hadConsentRecord = consentPrefs.contains("accepted_revision")
+        private val originalConsentRevision = consentPrefs.getInt("accepted_revision", 0)
         private val originalState = OverlayState.state.value
         private val practiceField = OverlayService::class.java.getDeclaredField("practiceForeground").apply { isAccessible = true }
         private val originalPractice = practiceField.getBoolean(null)
@@ -208,10 +359,11 @@ class OverlaySelectionScanLifecycleInstrumentedTest {
                 AppServices.prefs.lastMapId = a.id
                 AppServices.prefs.lastFloorKey = if (initial == 0) "1f" else "2f"
                 AppServices.prefs.lastMapIdentitySource = MapIdentitySource.MANUAL_UNVERIFIED
+                AppServices.prefs.autoDetectMapOpenEnabled = false
                 ContextWrapper::class.java.getDeclaredMethod("attachBaseContext", Context::class.java)
                     .apply { isAccessible = true }.invoke(service, context)
                 set("overlayContext", context)
-                for (name in listOf("window", "guideWindow", "candidateWindow", "scanProgressWindow")) {
+                for (name in listOf("window", "guideWindow", "candidateWindow", "scanProgressWindow", "blueprintWindow")) {
                     val window = OverlayWindowManager(context)
                     set(name, window); windows.add(window)
                 }
@@ -245,6 +397,11 @@ class OverlaySelectionScanLifecycleInstrumentedTest {
             MapCatalogDocument::class.java, MapRecord::class.java, FloorRecord::class.java).apply { isAccessible = true }
             .invoke(service, catalog, a, floor1) as Boolean
 
+        fun complete(recognition: RecognitionResult?, failure: Throwable?) = OverlayService::class.java.getDeclaredMethod(
+            "completeCapturedScan", Bitmap::class.java, Integer.TYPE, MapCatalogDocument::class.java,
+            String::class.java, RecognitionResult::class.java, Throwable::class.java, Throwable::class.java)
+            .apply { isAccessible = true }.invoke(service, frame, 41, catalog, id, recognition, failure, null)
+
         fun startPending() {
             pending = true
             val executor = get("recognitionExecutor") as RecognitionExecutor
@@ -263,6 +420,13 @@ class OverlaySelectionScanLifecycleInstrumentedTest {
             assertTrue("Actual recognition worker did not start", started.await(5, TimeUnit.SECONDS))
         }
         fun releasePending() { release.countDown(); assertTrue("Actual main Handler completion did not run", delivered.await(5, TimeUnit.SECONDS)) }
+        fun awaitResourceRelease() {
+            val release = get("mapResources") as com.idvb.android.resources.MapResourceRelease
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+            while (release.pending && System.nanoTime() < deadline) Thread.sleep(10)
+            assertFalse("Actual map resource release did not finish", release.pending)
+            main { }
+        }
         fun assertCancelled() {
             assertTrue((get("scanGeneration") as Int) > 41)
             assertFalse(get("scanning") as Boolean)
@@ -284,6 +448,7 @@ class OverlaySelectionScanLifecycleInstrumentedTest {
         override fun close() {
             release.countDown()
             if (pending) delivered.await(5, TimeUnit.SECONDS)
+            awaitResourceRelease()
             main {
                 handler.removeCallbacksAndMessages(null)
                 call("closeCandidates", true, java.lang.Boolean.TYPE)
@@ -291,6 +456,8 @@ class OverlaySelectionScanLifecycleInstrumentedTest {
                 windows.forEach { it.remove() }
                 (get("recognitionExecutor") as RecognitionExecutor).close()
                 (get("accessibilityCaptureExecutor") as java.util.concurrent.ExecutorService).shutdown()
+                for (name in listOf("guidePreparationExecutor", "alignmentReadinessExecutor", "resourceReleaseExecutor"))
+                    (get(name) as java.util.concurrent.ExecutorService).shutdown()
                 val autoLogs = get("autoDiagnostics\u0024delegate") as Lazy<*>
                 if (autoLogs.isInitialized()) (autoLogs.value as com.idvb.android.alignment.AutoMapOpenDiagnostics).close()
                 val session = get("sessionLogs\u0024delegate") as Lazy<*>
@@ -303,6 +470,10 @@ class OverlaySelectionScanLifecycleInstrumentedTest {
                     is Boolean -> editor.putBoolean(key, value)
                 } }
                 assertTrue(editor.commit())
+                val consentEditor = consentPrefs.edit()
+                if (hadConsentRecord) consentEditor.putInt("accepted_revision", originalConsentRevision)
+                else consentEditor.remove("accepted_revision")
+                assertTrue(consentEditor.commit())
                 OverlayState.update { originalState }
                 practiceField.setBoolean(null, originalPractice)
                 if (!frame.isRecycled) frame.recycle()

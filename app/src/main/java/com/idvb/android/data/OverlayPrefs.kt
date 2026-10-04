@@ -12,6 +12,46 @@ enum class ScreenCaptureMethod { MEDIA_PROJECTION, ACCESSIBILITY }
  */
 class OverlayPrefs(context: Context) {
 
+    var skipBatteryOptimization: Boolean
+        get() = prefs.getBoolean("skip_battery_optimization", false)
+        set(value) = prefs.edit().putBoolean("skip_battery_optimization", value).apply()
+
+    var hideBatterySkipDialog: Boolean
+        get() = prefs.getBoolean("hide_battery_skip_dialog", false)
+        set(value) = prefs.edit().putBoolean("hide_battery_skip_dialog", value).apply()
+
+    fun saveBatterySkipOptions(permanent: Boolean, hideDialog: Boolean): Boolean = prefs.edit()
+        .putBoolean("skip_battery_optimization", permanent)
+        .putBoolean("hide_battery_skip_dialog", hideDialog)
+        .commit()
+
+    val completedFeatureGuides: Set<String>
+        get() = prefs.getStringSet("completed_feature_guides", emptySet()).orEmpty().toSet()
+
+    /** Save settings and acknowledgement in one transaction, only after an explicit choice. */
+    @Synchronized
+    fun completeFeatureGuide(guideId: String, choiceId: String): Boolean {
+        val guide = com.idvb.android.onboarding.FeatureGuideRegistry.entries.single { it.id == guideId }
+        val choice = guide.choices.single { it.id == choiceId }
+        require(choice.captureMethod != ScreenCaptureMethod.ACCESSIBILITY || Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            "Accessibility screen capture requires Android 11 or later"
+        }
+        val previous = completedFeatureGuides
+        val editor = prefs.edit()
+        choice.scanPreset?.let { preset ->
+            editor.putString("search_button_action", SearchButtonAction.SCAN_MAP.name)
+                .putString("eye_button_action", preset.eyeAction.name)
+                .putBoolean("auto_detect_map_open_enabled", preset.autoDetect)
+        }
+        choice.captureMethod?.let { method ->
+            editor.putString("screen_capture_method", method.name)
+        }
+        if (editor.putStringSet("completed_feature_guides", previous + guideId).commit()) return true
+        // A failed commit still changes the in-memory preferences; keep this guide pending.
+        prefs.edit().putStringSet("completed_feature_guides", previous).commit()
+        return false
+    }
+
     private val prefs = context.applicationContext
         .getSharedPreferences("overlay", Context.MODE_PRIVATE)
 
@@ -84,6 +124,11 @@ class OverlayPrefs(context: Context) {
     var autoDetectMapOpenEnabled: Boolean
         get() = prefs.getBoolean("auto_detect_map_open_enabled", DefaultSettings.AUTO_DETECT_MAP_OPEN)
         set(value) = prefs.edit().putBoolean("auto_detect_map_open_enabled", value).apply()
+
+    /** The indicator selects the floor before alignment, without another calibration. */
+    var autoFloorEnabled: Boolean
+        get() = prefs.getBoolean("auto_floor_enabled", DefaultSettings.AUTO_FLOOR)
+        set(value) = prefs.edit().putBoolean("auto_floor_enabled", value).apply()
 
     /** Stable registry ID, independent of the button action and open to new alignment methods. */
     var alignmentMethodId: String

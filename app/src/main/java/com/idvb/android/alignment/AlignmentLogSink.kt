@@ -25,6 +25,12 @@ fun interface AlignmentLogSink {
     fun attach(name: String, bytes: () -> ByteArray) = Unit
     /** Only for suppliers owning immutable managed data, never a live Mat or Bitmap. */
     fun attachOwned(name: String, bytes: () -> ByteArray) = attach(name, bytes)
+    /** Capture an owned immutable buffer during this call, while a borrowed input is alive.
+     * Consumers may stream the owned copy later; never defer capture of a Mat address. */
+    fun attachDirect(name: String, capture: () -> java.nio.ByteBuffer) = attach(name) {
+        val buffer = capture()
+        ByteArray(buffer.remaining()).also { buffer.duplicate().get(it) }
+    }
 
     companion object {
         val NONE = object : AlignmentLogSink {

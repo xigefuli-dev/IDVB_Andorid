@@ -92,9 +92,15 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
         set(value) {
             field = value
             updateEyePresentation()
-            floorButton.isEnabled = true
-            presentAlpha(floorButton, if (value) 1f else .32f)
+            updateFloorPresentation()
         }
+    var automaticMapOpen: Boolean = false
+        set(value) {
+            field = value
+            updateEyePresentation()
+            updateFloorPresentation()
+        }
+    private val controlPolicy get() = OverlayControlPolicy(automaticMapOpen, mapLocked, candidatesAvailable)
     var candidatesAvailable: Boolean = false
         set(value) {
             field = value
@@ -128,8 +134,8 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
             isMotionEventSplittingEnabled = true
         }
         row.addView(ball("search", "🔍", "扫描当前屏幕") { listener?.onSearch() })
-        eyeButton = ball("eye", "👁", "显示攻略地图") { if (mapLocked || candidatesAvailable) listener?.onToggleGuide() }; row.addView(eyeButton)
-        floorButton = ball("floor", "--", "切换楼层") { if (mapLocked) listener?.onNextFloor() }.apply {
+        eyeButton = ball("eye", "👁", "显示攻略地图") { if (controlPolicy.eyeEnabled) listener?.onToggleGuide() }; row.addView(eyeButton)
+        floorButton = ball("floor", "--", "切换楼层") { if (controlPolicy.floorEnabled) listener?.onNextFloor() }.apply {
             textSize = 12f; setTypeface(typeface, Typeface.BOLD)
         }; row.addView(floorButton)
         moreButton = ball("more", "···", "更多选项") {
@@ -153,20 +159,27 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
     }
 
     private fun updateEyePresentation() {
-        val enabled = mapLocked || candidatesAvailable
+        val enabled = controlPolicy.eyeEnabled
+        // Keep touch delivery for moving/editing the control even when its action is disabled.
         eyeButton.isEnabled = true
         presentAlpha(eyeButton, if (enabled) 1f else .32f)
-        eyeButton.contentDescription = if (candidatesAvailable) "查看候选地图" else "显示攻略地图"
+        eyeButton.contentDescription = when {
+            candidatesAvailable -> "查看候选地图"
+            automaticMapOpen -> "自动开图检测中，手动显示已禁用"
+            else -> "显示攻略地图"
+        }
     }
 
     private fun updateFloorPresentation() {
+        floorButton.isEnabled = true
+        presentAlpha(floorButton, if (controlPolicy.floorEnabled) 1f else .32f)
         val label = floorLabel.ifBlank { "--" }
         floorButton.text = when (identityVerified) {
             true -> "✓$label"
             false -> "?$label"
             null -> label
         }
-        floorButton.contentDescription = when (identityVerified) {
+        floorButton.contentDescription = if (automaticMapOpen) "自动小抄，手动切换楼层已禁用" else when (identityVerified) {
             true -> "结构已确认的地图，切换楼层"
             false -> "人工选择且结构未确认的地图，切换楼层"
             null -> "切换楼层"
@@ -210,13 +223,13 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
                     activePointerId = event.getPointerId(0)
                     // A control that was unavailable at press time cannot activate when a scan finishes mid-gesture.
                     clickAvailableAtDown = when (id) {
-                        "eye" -> mapLocked || candidatesAvailable
-                        "floor" -> mapLocked
+                        "eye" -> controlPolicy.eyeEnabled
+                        "floor" -> controlPolicy.floorEnabled
                         else -> true
                     }
                     // Latch the mode for this gesture, even if preferences change before release.
-                    holdGesture = id == "eye" && operationPrefs.holdToActivateEnabled && customLayout?.editing != true && listener?.useAssistTouchToggle() != true
-                    if (holdGesture && (mapLocked || candidatesAvailable)) {
+                    holdGesture = id == "eye" && !automaticMapOpen && operationPrefs.holdToActivateEnabled && customLayout?.editing != true && listener?.useAssistTouchToggle() != true
+                    if (holdGesture && controlPolicy.eyeEnabled) {
                         eyeHeld = true
                         listener?.onOpenGuide()
                     }
@@ -318,6 +331,7 @@ internal class OverlayCaptureFrameBarrier(
     private val views: List<Pair<String, View>>,
     private val current: () -> Boolean,
     private val log: com.idvb.android.alignment.AlignmentLogSink,
+    private val timeoutMs: Long = 500L,
     private val completed: (Boolean) -> Unit,
 ) {
     private class Pending(val root: View, val observer: android.view.ViewTreeObserver) {
@@ -332,9 +346,19 @@ internal class OverlayCaptureFrameBarrier(
     @Volatile private var active = true
     private var releaseFrame: android.view.Choreographer.FrameCallback? = null
     private val started = System.nanoTime()
+    var timedOut = false
+        private set
+    private val timeout = Runnable {
+        if (active) {
+            timedOut = true
+            finish(false)
+        }
+    }
 
     fun start() {
         check(android.os.Looper.myLooper() == handler.looper)
+        require(timeoutMs > 0L)
+        handler.postDelayed(timeout, timeoutMs)
         views.forEach { (id, view) ->
             val position = IntArray(2).also(view::getLocationOnScreen)
             record(com.idvb.android.alignment.AlignmentLogEvent("capture.overlay-hidden-control", id,
@@ -348,7 +372,8 @@ internal class OverlayCaptureFrameBarrier(
             pending += Pending(root, root.viewTreeObserver)
         }
         record(com.idvb.android.alignment.AlignmentLogEvent("capture.overlay-render-barrier", "waiting-for-each-root",
-            measurements = mapOf("roots" to pending.size.toDouble(), "controls" to views.size.toDouble())))
+            measurements = mapOf("roots" to pending.size.toDouble(), "controls" to views.size.toDouble()),
+            thresholds = mapOf("maximumWaitMs" to timeoutMs.toDouble())))
         if (pending.isEmpty()) { afterAllRoots(); return }
         pending.forEachIndexed { index, entry ->
             val root = entry.root
@@ -420,8 +445,12 @@ internal class OverlayCaptureFrameBarrier(
         active = false
         cleanup()
         record(com.idvb.android.alignment.AlignmentLogEvent("capture.overlay-render-complete",
-            if (success) "all-roots-rendered" else "invalidated-before-capture",
+            if (success) "all-roots-rendered" else if (timedOut) "render-timeout" else "invalidated-before-capture",
             measurements = mapOf("roots" to pending.size.toDouble(), "renderedRoots" to pending.count { it.done }.toDouble()),
+            thresholds = mapOf("maximumWaitMs" to timeoutMs.toDouble()),
+            labels = mapOf("pendingRoots" to pending.filter { !it.done }.joinToString(",") {
+                "${System.identityHashCode(it.root)}:visibility=${it.root.visibility}:attached=${it.root.isAttachedToWindow}"
+            }),
             durationNanos = System.nanoTime() - started))
         completed(success)
     }
@@ -435,6 +464,7 @@ internal class OverlayCaptureFrameBarrier(
     }
 
     private fun cleanup() {
+        handler.removeCallbacks(timeout)
         releaseFrame?.let { android.view.Choreographer.getInstance().removeFrameCallback(it) }
         releaseFrame = null
         pending.forEach(::remove)

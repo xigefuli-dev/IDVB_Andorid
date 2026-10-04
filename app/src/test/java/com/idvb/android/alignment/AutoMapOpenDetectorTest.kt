@@ -211,6 +211,26 @@ class AutoMapOpenDetectorTest {
         assertEquals(1, detector.attemptsInCycle)
     }
 
+    @Test fun failuresAndExhaustedRetriesNeverDisableDetectionInLaterOpenings() {
+        val detector = detector(AutoMapOpenConfig(openFrames = 1, closeFrames = 1, retryCooldownMs = 1_000L))
+        var now = 0L
+        repeat(8) { opening ->
+            assertEquals(AutoMapOpenTransition.OPENED, detector.observe(reference, now).transition)
+            assertEquals(opening + 1L, detector.openCycle)
+            assertEquals(0, detector.attemptsInCycle)
+            repeat(3) {
+                detector.observe(reference, now)
+                val cycle = requireNotNull(detector.alignmentStarted(now))
+                assertTrue(detector.alignmentFinished(false, now, cycle))
+                now += 1_000L
+            }
+            detector.observe(reference, now)
+            assertFalse(detector.shouldAttemptAlignment(now))
+            assertEquals(AutoMapOpenTransition.CLOSED, detector.observe(closed, ++now).transition)
+            now++
+        }
+    }
+
     @Test fun OldCompletionCannotAffectNextCycleOrManualClose() {
         val detector = detector()
         open(detector)

@@ -16,7 +16,8 @@ internal object VpsgPrecisionRefiner {
     fun interface DistanceSampler { fun at(x: Double, y: Double, scale: Double): Double }
     fun refine(points: List<VpsgFastSolver.Point>, seed: VpsgFastSolver.Pose,
         width: Int, height: Int, distance: DistanceSampler,
-        log: AlignmentLogSink = AlignmentLogSink.NONE): VpsgFastSolver.Pose? {
+        log: AlignmentLogSink = AlignmentLogSink.NONE, nativeDistance: java.nio.ByteBuffer? = null,
+        referenceWidth: Int = 0, referenceHeight: Int = 0): VpsgFastSolver.Pose? {
         val started = System.nanoTime()
         val deadline = started + 40_000_000L
         var scale = seed.scale; var dx = 0.0; var dy = 0.0
@@ -24,7 +25,11 @@ internal object VpsgPrecisionRefiner {
         var radius = 0.0; var rounds = 0
         var ds = seed.scale * .005; var dt = 1.0
         val counts = IntArray(4)
-        val probes = ArrayList<Double>()
+        val probes = DoubleArray(if (log.enabled) (12 * 26 + 2 * 25) * 4 else 0)
+        var probeValues = 0
+        fun remember(s: Double, x: Double, y: Double, value: Double) {
+            if (log.enabled) { probes[probeValues++] = s; probes[probeValues++] = x; probes[probeValues++] = y; probes[probeValues++] = value }
+        }
         fun finish(reason: String, result: VpsgFastSolver.Pose? = null): VpsgFastSolver.Pose? {
             if (log.enabled) log.emit(AlignmentLogEvent("vpsg.refine.precision.result", reason,
                 measurements = mapOf("seedScale" to seed.scale, "seedX" to seed.x, "seedY" to seed.y,
@@ -38,7 +43,7 @@ internal object VpsgPrecisionRefiner {
                     "maximumRelativeScaleChange" to .03, "maximumTranslationChange" to 4.0,
                     "translationConvergence" to .125, "farScaleConvergencePixels" to .25,
                     "improvementEpsilon" to 1e-9, "observabilityMargin" to 1e-4),
-                series = mapOf("partitionCounts" to counts.map(Int::toDouble), "probesScaleDxDyLoss" to probes),
+                series = mapOf("partitionCounts" to counts.map(Int::toDouble), "probesScaleDxDyLoss" to probes.asList().subList(0, probeValues)),
                 labels = mapOf("calibrated" to (result != null).toString()),
                 durationNanos = System.nanoTime() - started))
             return result
@@ -63,7 +68,12 @@ internal object VpsgPrecisionRefiner {
             }
             return (0..3).filter { counts[it] >= 15 }.map { sums[it] / counts[it] }.average()
         }
-        best = loss(scale, dx, dy)
+        val coordinates = IntArray(points.size * 2) { if (it and 1 == 0) points[it / 2].x else points[it / 2].y }
+        fun losses(poses: List<DoubleArray>): DoubleArray = if (nativeDistance != null && VpsgNativeKernel.available)
+            VpsgNativeKernel.precisionLosses(coordinates, DoubleArray(poses.size * 3) { poses[it / 3][it % 3] },
+                nativeDistance, referenceWidth, referenceHeight, cx, cy, rcx, rcy)
+            else DoubleArray(poses.size) { loss(poses[it][0], poses[it][1], poses[it][2]) }
+        best = losses(listOf(doubleArrayOf(scale, dx, dy)))[0]
         initialLoss = best
         if (!best.isFinite() || best >= 5) return finish("out-of-reference")
         var converged = false
@@ -73,13 +83,20 @@ internal object VpsgPrecisionRefiner {
             if (roundStarted >= deadline) return finish("budget")
             if (dt <= .125 && ds / seed.scale * radius <= .25) { converged = true; break }
             var nextS = scale; var nextX = dx; var nextY = dy
+            val poses = mutableListOf<DoubleArray>()
             for (si in -1..1) for (xi in -1..1) for (yi in -1..1) {
                 if (System.nanoTime() >= deadline) return finish("budget")
                 if (si == 0 && xi == 0 && yi == 0) continue
                 val s = scale + si * ds; val x = dx + xi * dt; val y = dy + yi * dt
                 if (abs(s / seed.scale - 1) > .030000001 || max(abs(x), abs(y)) > 4.0000001) continue
-                val value = loss(s, x, y)
-                if (log.enabled) probes.addAll(listOf(s, x, y, value))
+                poses += doubleArrayOf(s, x, y)
+            }
+            val values = losses(poses)
+            for ((i, pose) in poses.withIndex()) {
+                if (System.nanoTime() >= deadline) return finish("budget")
+                val (s, x, y) = pose
+                val value = values[i]
+                remember(s, x, y, value)
                 if (value < best - 1e-9) { best = value; nextS = s; nextX = x; nextY = y }
             }
             if (nextS == scale && nextX == dx && nextY == dy) { ds /= 2; dt /= 2 }
@@ -94,11 +111,18 @@ internal object VpsgPrecisionRefiner {
         // Reject scale ambiguity after allowing translation to compensate for a one-pixel scale change.
         for (sign in listOf(-1, 1)) {
             var competitor = Double.POSITIVE_INFINITY
+            val poses = mutableListOf<DoubleArray>()
             for (xi in -2..2) for (yi in -2..2) {
                 if (System.nanoTime() >= deadline) return finish("budget")
                 val s = scale + sign * scale / radius; val x = dx + xi * .5; val y = dy + yi * .5
-                val value = loss(s, x, y)
-                if (log.enabled) probes.addAll(listOf(s, x, y, value))
+                poses += doubleArrayOf(s, x, y)
+            }
+            val values = losses(poses)
+            for ((i, pose) in poses.withIndex()) {
+                if (System.nanoTime() >= deadline) return finish("budget")
+                val (s, x, y) = pose
+                val value = values[i]
+                remember(s, x, y, value)
                 competitor = min(competitor, value)
             }
             log.emit(AlignmentLogEvent("vpsg.refine.precision.observability", measurements = mapOf(

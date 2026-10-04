@@ -50,6 +50,7 @@ fun OperationSettingsScreen(onBack: () -> Unit) {
     var searchAction by remember { mutableStateOf(AppServices.prefs.searchButtonAction) }
     var eyeAction by remember { mutableStateOf(AppServices.prefs.eyeButtonAction) }
     var autoDetectMapOpen by remember { mutableStateOf(AppServices.prefs.autoDetectMapOpenEnabled) }
+    var autoFloor by remember { mutableStateOf(AppServices.prefs.autoFloorEnabled) }
     Column(Modifier.fillMaxSize().padding(horizontal = 24.dp)) {
         Row(Modifier.fillMaxWidth().height(76.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回") }
@@ -95,6 +96,26 @@ fun OperationSettingsScreen(onBack: () -> Unit) {
                 Text("有待确认的扫描结果时，👁 会先打开候选列表供选择。",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 4.dp))
+            }
+            Spacer(Modifier.height(10.dp))
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(2.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .55f),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            ) {
+                Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f).padding(end = 10.dp)) {
+                        Text("自动楼层切换", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+                        Text("自动贴合前，根据楼层指示器选择楼层。支持困难和噩梦地图，无需额外校准。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Switch(autoFloor, onCheckedChange = {
+                        autoFloor = it
+                        AppServices.prefs.autoFloorEnabled = it
+                    })
+                }
             }
             Spacer(Modifier.height(10.dp))
             AutoMapOpenSettings(autoDetectMapOpen) { enabled ->

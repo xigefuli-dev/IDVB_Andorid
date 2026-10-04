@@ -69,6 +69,8 @@ class OverlayWindowManager(private val context: Context) {
     var x = 0
     var y = 0
 
+    var gravity: Int = Gravity.TOP or Gravity.START
+
     /** 窗口尺寸（像素） */
     var width = 0
     var height = 0
@@ -96,7 +98,7 @@ class OverlayWindowManager(private val context: Context) {
             flags,
             PixelFormat.TRANSLUCENT,
         ).apply {
-            gravity = Gravity.TOP or Gravity.START
+            gravity = this@OverlayWindowManager.gravity
             this.x = this@OverlayWindowManager.x
             this.y = this@OverlayWindowManager.y
             alpha = opacity
@@ -142,6 +144,7 @@ class OverlayWindowManager(private val context: Context) {
         val p = v.layoutParams as? WindowManager.LayoutParams ?: return
         p.x = x
         p.y = y
+        p.gravity = gravity
         p.width = width
         p.height = height
         if (locked != null) {

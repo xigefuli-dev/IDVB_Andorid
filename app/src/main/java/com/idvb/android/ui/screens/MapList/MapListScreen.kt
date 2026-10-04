@@ -1,7 +1,6 @@
 package com.idvb.android.ui.screens.maplist
 
 import android.widget.Toast
-import android.util.LruCache
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.*
@@ -50,7 +49,7 @@ fun MapListScreen(
     onOpenMap: (MapRecord) -> Unit = {},
 ) {
     val context = LocalContext.current
-    var catalog by remember { mutableStateOf<MapCatalogDocument?>(null) }
+    val catalog by AppServices.repository.catalogState.collectAsState()
     var classId by remember { mutableStateOf(AppServices.prefs.selectedMapClassId) }
     var deleteMode by remember { mutableStateOf(false) }
     var classMenuOpen by remember { mutableStateOf(false) }
@@ -66,7 +65,7 @@ fun MapListScreen(
         preferences.registerOnSharedPreferenceChangeListener(listener)
         onDispose { preferences.unregisterOnSharedPreferenceChangeListener(listener) }
     }
-    LaunchedEffect(refreshTick) { catalog = withContext(Dispatchers.IO) { AppServices.repository.loadCatalog() } }
+    LaunchedEffect(refreshTick) { withContext(Dispatchers.IO) { AppServices.repository.loadCatalog() } }
     LaunchedEffect(catalog) {
         val doc = catalog ?: return@LaunchedEffect
         if (classId !in doc.classes.map { it.id }) classId = doc.classes.firstOrNull()?.id
@@ -192,7 +191,6 @@ fun MapListScreen(
                         val created = ClassRecord("class-${UUID.randomUUID()}", trimmedName)
                         val updated = current.copy(classes = current.classes + created)
                         AppServices.repository.saveCatalog(updated)
-                        catalog = updated
                         classId = created.id
                         AppServices.prefs.selectedMapClassId = created.id
                         onCatalogChanged()
@@ -208,7 +206,6 @@ fun MapListScreen(
         text = { Text("将删除“${currentClass?.name}”关卡下的 ${maps.size} 张地图及其本地图片，此操作无法撤销。") },
         confirmButton = { TextButton(onClick = {
             classId?.let(AppServices.repository::deleteClass)
-            catalog = AppServices.repository.loadCatalog()
             onCatalogChanged()
             deleteMode = false
         }) { Text("确认删除", color = MaterialTheme.colorScheme.error) } },
@@ -257,10 +254,6 @@ private sealed interface PreviewState {
     data class Ready(val bitmap: android.graphics.Bitmap) : PreviewState
 }
 
-private val previewCache = object : LruCache<String, android.graphics.Bitmap>(12 * 1024) {
-    override fun sizeOf(key: String, value: android.graphics.Bitmap): Int = value.byteCount / 1024
-}
-
 /**
  * 解码 Desktop 保存的 recognitionRegion，并按 freeCropPoints 裁出透明多边形。
  * 这同时避免高分辨率地图在列表页因内存压力而显示为空白。
@@ -269,10 +262,10 @@ private fun decodePreviewCrop(mapId: String, floor: FloorRecord): android.graphi
     val region = AppServices.repository.loadPreviewRegion(mapId, floor)
     val points = AppServices.repository.loadFreeCropPoints(mapId, floor)
     val cacheKey = "$mapId:${floor.imagePath}:$region:$points"
-    previewCache.get(cacheKey)?.let { return it }
     val image = AppServices.repository.floorImageFile(mapId, floor.imagePath)
-    return com.idvb.android.graphics.decodeMapRegion(image, region, 720, points)
-        ?.also { previewCache.put(cacheKey, it) }
+    return com.idvb.android.resources.MapBitmapCaches.previews.load(cacheKey) {
+        com.idvb.android.graphics.decodeMapRegion(image, region, 720, points)
+    }
 }
 @Composable
 private fun SkeletonGrid() {

@@ -2,7 +2,6 @@ package com.idvb.android.ui.screens
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -11,13 +10,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.ScreenShare
+import androidx.compose.material.icons.outlined.AccessibilityNew
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -27,12 +27,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.LayoutDirection
 import com.idvb.android.AppServices
 import com.idvb.android.data.ScreenCaptureMethod
-import com.idvb.android.ui.openAccessibilityServiceSettings
+import com.idvb.android.onboarding.CaptureMethodDescriptions
 import com.idvb.android.ui.theme.SignalGreenDeep
+import com.idvb.android.ui.components.SettingsChoiceCard
 
 @Composable
 fun VisionSettingsScreen(onBack: () -> Unit) {
-    val context = LocalContext.current
     var captureMethod by remember { mutableStateOf(AppServices.prefs.screenCaptureMethod) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp)) {
         Row(Modifier.fillMaxWidth().height(76.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -41,24 +41,21 @@ fun VisionSettingsScreen(onBack: () -> Unit) {
         }
         Spacer(Modifier.height(10.dp))
         Text("屏幕捕获方式", style = MaterialTheme.typography.labelLarge, color = SignalGreenDeep)
-        Column(Modifier.selectableGroup().padding(vertical = 10.dp)) {
-            CaptureSourceOption("屏幕捕获", "使用实时屏幕帧，自动开图响应更快；启动服务时确认系统屏幕授权。",
-                captureMethod == ScreenCaptureMethod.MEDIA_PROJECTION) {
+        Column(Modifier.selectableGroup().padding(vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            SettingsChoiceCard("屏幕捕获", CaptureMethodDescriptions.MEDIA_PROJECTION,
+                Icons.AutoMirrored.Outlined.ScreenShare, captureMethod == ScreenCaptureMethod.MEDIA_PROJECTION) {
                 captureMethod = ScreenCaptureMethod.MEDIA_PROJECTION
                 AppServices.prefs.screenCaptureMethod = captureMethod
             }
-            CaptureSourceOption("无障碍", "通过 IDVB 无障碍服务截图。系统限制约 333ms 一次；需要 Android 11 或更高版本。",
-                captureMethod == ScreenCaptureMethod.ACCESSIBILITY,
+            SettingsChoiceCard("无障碍", CaptureMethodDescriptions.ACCESSIBILITY,
+                Icons.Outlined.AccessibilityNew, captureMethod == ScreenCaptureMethod.ACCESSIBILITY,
                 enabled = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
                 captureMethod = ScreenCaptureMethod.ACCESSIBILITY
                 AppServices.prefs.screenCaptureMethod = captureMethod
             }
         }
-        if (captureMethod == ScreenCaptureMethod.ACCESSIBILITY) {
-            TextButton(onClick = { openAccessibilityServiceSettings(context) }, modifier = Modifier.align(Alignment.End)) {
-                Text("打开 IDVB 无障碍设置")
-            }
-        }
+        Text("正式启动悬浮窗时再进行授权。", style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(8.dp))
         Text("攻略地图显示", style = MaterialTheme.typography.labelLarge, color = SignalGreenDeep)
         Spacer(Modifier.height(10.dp))
@@ -96,20 +93,6 @@ fun VisionSettingsScreen(onBack: () -> Unit) {
                 AppServices.prefs.removeGuideBackground = it
             },
         )
-    }
-}
-
-@Composable
-private fun CaptureSourceOption(title: String, description: String, selected: Boolean, enabled: Boolean = true, onSelect: () -> Unit) {
-    Row(Modifier.fillMaxWidth().selectable(selected, onClick = onSelect,
-        enabled = enabled, role = androidx.compose.ui.semantics.Role.RadioButton).padding(vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically) {
-        RadioButton(selected, onClick = null, enabled = enabled)
-        Column(Modifier.padding(start = 12.dp)) {
-            Text(title, fontWeight = FontWeight.Medium)
-            Text(description, style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
     }
 }
 

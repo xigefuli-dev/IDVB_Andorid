@@ -24,6 +24,7 @@ class AutoMapOpenFrameSampler(
     fun sampleWithFrame(bounds: Rect, captureBounds: Rect, mapBounds: Rect?,
         isCurrent: () -> Boolean, isOccluded: () -> Boolean, isMapOccluded: () -> Boolean,
         log: AlignmentLogSink = AlignmentLogSink.NONE,
+        indicatorBounds: Rect? = null, isIndicatorOccluded: () -> Boolean = { true },
         callback: (Result<AutoMapOpenSample>) -> Unit): () -> Unit {
         val done = AtomicBoolean(false)
         var abort: (() -> Unit)? = null
@@ -36,6 +37,7 @@ class AutoMapOpenFrameSampler(
             finish(Result.failure(IllegalStateException("auto-detection-occluded-or-paused")))
         } else {
             val mapWasClean = mapBounds != null && !isMapOccluded()
+            val indicatorWasClean = indicatorBounds != null && !isIndicatorOccluded()
             abort = captureFrame(Rect(captureBounds)) { captured ->
                 val receivedAtMs = SystemClock.uptimeMillis()
                 handler.post {
@@ -48,6 +50,7 @@ class AutoMapOpenFrameSampler(
                     else {
                         val queued = System.nanoTime()
                         val retainMap = mapWasClean && !isMapOccluded()
+                        val retainIndicator = indicatorWasClean && !isIndicatorOccluded()
                         try { executor.execute {
                             log.emit(AlignmentLogEvent("sample.worker-queue", durationNanos = System.nanoTime() - queued))
                             var retained: PreparedMapFrame? = null
@@ -63,12 +66,24 @@ class AutoMapOpenFrameSampler(
                                 val decidedAt = System.nanoTime()
                                 val comparison = compare?.invoke(pixels)
                                 val decisionMs = (System.nanoTime() - decidedAt) / 1e6
+                                log.emit(AlignmentLogEvent("sample.spatial-comparison", durationNanos = (decisionMs * 1e6).toLong(),
+                                    labels = mapOf("backend" to AutoMapOpenNativeKernel.backend,
+                                        "search" to "unchanged-all-windows-all-nine-probes", "score" to "unchanged-double-precision")))
                                 if (retainMap && (comparison == null || comparison.score >= .85) && captureBounds.contains(requireNotNull(mapBounds))) {
                                     val copiedAt = System.nanoTime()
                                     val cropped = Bitmap.createBitmap(bitmap, mapBounds.left - captureBounds.left,
                                         mapBounds.top - captureBounds.top, mapBounds.width(), mapBounds.height())
                                     val owned = if (cropped === bitmap) requireNotNull(bitmap.copy(Bitmap.Config.ARGB_8888, false)) else cropped
-                                    retained = PreparedMapFrame(owned, Rect(mapBounds), startedAtMs, receivedAtMs, captureMethod, frameSequence())
+                                    val indicator = indicatorBounds?.takeIf { retainIndicator && captureBounds.contains(it) }?.let { area ->
+                                        val crop = Bitmap.createBitmap(bitmap, area.left - captureBounds.left,
+                                            area.top - captureBounds.top, area.width(), area.height())
+                                        if (crop === bitmap) requireNotNull(bitmap.copy(Bitmap.Config.ARGB_8888, false)) else crop
+                                    }
+                                    retained = PreparedMapFrame(owned, Rect(mapBounds), startedAtMs, receivedAtMs,
+                                        captureMethod, frameSequence(), indicator, indicatorBounds?.let(::Rect))
+                                    log.emit(AlignmentLogEvent("sample.floor-indicator", if (indicator == null) "not-retained" else "clean-same-capture",
+                                        measurements = indicatorBounds?.let { mapOf("left" to it.left.toDouble(), "top" to it.top.toDouble(),
+                                            "width" to it.width().toDouble(), "height" to it.height().toDouble()) }.orEmpty()))
                                     log.emit(AlignmentLogEvent("sample.clean-viewport", durationNanos = System.nanoTime() - copiedAt,
                                         measurements = mapOf("captureStartedAtMs" to startedAtMs.toDouble(), "captureReceivedAtMs" to receivedAtMs.toDouble(),
                                             "left" to mapBounds.left.toDouble(), "top" to mapBounds.top.toDouble(),
@@ -85,7 +100,10 @@ class AutoMapOpenFrameSampler(
                                 } else if (isMapOccluded()) {
                                     sampled.getOrNull()?.mapFrame?.recycle()
                                     finish(sampled.map { it.copy(mapFrame = null) })
-                                } else finish(sampled)
+                                } else {
+                                    if (isIndicatorOccluded()) sampled.getOrNull()?.mapFrame?.discardIndicator()
+                                    finish(sampled)
+                                }
                             }
                         } } catch (error: java.util.concurrent.RejectedExecutionException) {
                             bitmap.recycle(); finish(Result.failure(error))

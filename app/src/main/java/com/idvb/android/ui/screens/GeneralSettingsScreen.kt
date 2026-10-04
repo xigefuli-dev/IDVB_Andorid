@@ -38,7 +38,7 @@ import java.util.Date
 
 /** 通用设置子页，视觉语言与设置主页保持一致。 */
 @Composable
-fun GeneralSettingsScreen(onBack: () -> Unit) {
+fun GeneralSettingsScreen(onBack: () -> Unit, onOpenPermissions: () -> Unit = {}) {
     val context = LocalContext.current
     var backgroundScanEnabled by remember { mutableStateOf(AppServices.prefs.backgroundScanEnabled) }
     var manualMapSelectionEnabled by remember { mutableStateOf(AppServices.prefs.manualMapSelectionEnabled) }
@@ -70,6 +70,11 @@ fun GeneralSettingsScreen(onBack: () -> Unit) {
         Row(Modifier.fillMaxWidth().height(76.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回") }
             Text("通用", style = MaterialTheme.typography.headlineSmall)
+        }
+        OutlinedButton(onClick = onOpenPermissions, modifier = Modifier.fillMaxWidth()) {
+            Text("权限管理")
+            Spacer(Modifier.weight(1f))
+            Text("→")
         }
         Spacer(Modifier.height(10.dp))
         Text("扫描", style = MaterialTheme.typography.labelLarge, color = SignalGreenDeep)

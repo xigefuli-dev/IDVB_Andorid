@@ -27,6 +27,8 @@ class AlignmentPackageReplay private constructor(
     val supplementedReferences: List<String> = emptyList(),
 ) : AutoCloseable {
     val sourceMatches: Boolean get() = recordedSourceFingerprint == runningSourceFingerprint
+    fun prepare(log: AlignmentLogSink = AlignmentLogSink.NONE) = registry.prepare(testCase.methodId,
+        testCase.request.map, testCase.request.floor, AlignmentCancellation(), log)
     fun run(log: AlignmentLogSink = AlignmentLogSink.NONE,
         expectedOutcome: AlignmentOutcome = testCase.expectedOutcome,
         expectedTransform: AlignmentTransform? = testCase.expectedTransform): AlignmentTestReport =
@@ -159,7 +161,8 @@ class AlignmentPackageReplay private constructor(
                     }
                     return AlignmentPackageReplay(root, frame!!, AlignmentRegistry.createDefault(repository),
                         AlignmentTestCase(manifest.getValue("methodId").jsonPrimitive.content,
-                            AlignmentRequest(frame!!, viewport, map, floor), expected,
+                            AlignmentRequest(frame!!, viewport, map, floor, floorSelectedByIndicator =
+                                manifest["floorSelectedByIndicator"]?.jsonPrimitive?.booleanOrNull ?: false), expected,
                             AlignmentOutcome.valueOf(recorded.getValue("outcome").jsonPrimitive.content)),
                         source.getValue("sourceFingerprint").jsonPrimitive.content,
                         running.getValue("sourceFingerprint").jsonPrimitive.content, supplemented)

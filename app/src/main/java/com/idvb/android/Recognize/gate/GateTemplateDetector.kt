@@ -170,6 +170,7 @@ class GateTemplateDetector private constructor(
             loop@ for (region in searchContext.predictedGateRegions) {
                 if (!region.isValid) continue
                 for (scale in scales) {
+                    com.idvb.android.alignment.AlignmentCancellation.checkpoint("scan.gate.predicted-scale")
                     if (budgetExpired()) {
                         budgetExceeded = true
                         stopReason = GateSearchStopReason.BUDGET_EXCEEDED
@@ -202,6 +203,7 @@ class GateTemplateDetector private constructor(
             val scales = scalesFor(searchContext, clientWidth)
             if (scales.isEmpty()) return emptyResult(searchContext.mode, GateSearchStopReason.NO_VALID_SCALE, elapsedMs())
             for (scale in scales) {
+                com.idvb.android.alignment.AlignmentCancellation.checkpoint("scan.gate.scale")
                 if (budgetExpired()) {
                     budgetExceeded = true
                     stopReason = GateSearchStopReason.BUDGET_EXCEEDED

@@ -10,6 +10,8 @@ import com.idvb.android.idvm.IdvmJson
 import com.idvb.android.idvm.MapCatalogDocument
 import com.idvb.android.idvm.MapRecord
 import kotlinx.serialization.json.Json
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
 import java.time.Instant
 import java.util.UUID
@@ -56,18 +58,27 @@ class MapRepository(context: Context) {
     val alignmentReferenceCacheRoot: File get() = File(appContext.cacheDir, "alignment-reference").apply { mkdirs() }
     private val catalogFile: File = File(mapsRoot, "maps.json")
     @Volatile private var cachedCatalog: MapCatalogDocument? = null
+    private val catalogUpdates = MutableStateFlow<MapCatalogDocument?>(null)
+    /** 列表和启动检查共用已加载/已提交的清单，不依赖页面刷新回调。 */
+    val catalogState = catalogUpdates.asStateFlow()
     internal var onCatalogChanged: (() -> Unit)? = null
 
     @Synchronized fun loadCatalog(): MapCatalogDocument {
         cachedCatalog?.let { return it }
         recoverInterruptedImports()
-        if (!catalogFile.exists()) return MapCatalogDocument().also { cachedCatalog = it }
+        if (!catalogFile.exists()) return MapCatalogDocument().also {
+            cachedCatalog = it
+            catalogUpdates.value = it
+        }
         return try {
             json.decodeFromString<MapCatalogDocument>(catalogFile.readText())
         } catch (e: Exception) {
             // 清单损坏按空仓库处理，不阻塞导入
             MapCatalogDocument()
-        }.also { cachedCatalog = it }
+        }.also {
+            cachedCatalog = it
+            catalogUpdates.value = it
+        }
     }
 
     @Synchronized fun saveCatalog(doc: MapCatalogDocument) {
@@ -80,6 +91,7 @@ class MapRepository(context: Context) {
             tmp.delete()
         }
         cachedCatalog = doc
+        catalogUpdates.value = doc
         onCatalogChanged?.invoke()
     }
 

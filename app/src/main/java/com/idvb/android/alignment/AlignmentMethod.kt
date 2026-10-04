@@ -12,12 +12,15 @@ data class AlignmentRequest(
     val map: MapRecord,
     val floor: FloorRecord,
     val cancellation: AlignmentCancellation = AlignmentCancellation(),
+    val floorSelectedByIndicator: Boolean = false,
 )
 
 /** Implementations borrow the frame and check request.cancellation in bounded loops and between
  * native calls. The caller owns the frame lifetime and commits accepted results. */
 interface AlignmentMethod {
     val id: String
+    /** Reference and runtime initialization may run after consent, before a fresh capture. */
+    fun prepare(map: MapRecord, floor: FloorRecord, log: AlignmentLogSink = AlignmentLogSink.NONE) = Unit
     fun align(request: AlignmentRequest, log: AlignmentLogSink = AlignmentLogSink.NONE): AlignmentResult
 }
 

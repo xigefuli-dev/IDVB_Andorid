@@ -17,6 +17,7 @@ internal object VpsgPreparedIndex {
     private const val MAX_BYTES = 32L * 1024 * 1024
     private val cache = LinkedHashMap<String, VpsgFastSolver.Index>(32, .75f, true)
     private var bytes = 0L
+    val retainedBytes: Long get() = synchronized(this) { bytes }
 
     @Synchronized fun clear() { cache.clear(); bytes = 0 }
 
@@ -77,11 +78,15 @@ internal object VpsgPreparedIndex {
                     Core.bitwise_not(binary, inverted)
                     AlignmentCancellation.checkpoint("vpsg.prepare-index.distance-transform")
                     Imgproc.distanceTransform(inverted, result, Imgproc.DIST_L2, Imgproc.DIST_MASK_PRECISE)
-                    FloatArray(width * height).also { result.get(0, 0, it) }
+                    if (VpsgNativeKernel.available) {
+                        val owned = java.nio.ByteBuffer.allocateDirect(width * height * 4).order(java.nio.ByteOrder.nativeOrder())
+                        owned.put(VpsgNativeKernel.borrowBuffer(result.dataAddr(), width * height * 4L)).rewind()
+                        null to owned
+                    } else FloatArray(width * height).also { result.get(0, 0, it) } to null
                 } finally { inverted.release(); result.release() }
             }
             val result = log.measure("vpsg.prepare-index.pack") {
-                VpsgFastSolver.Index(width, height, pack(k3), pack(k5), prior, edges.size, distance, edges)
+                VpsgFastSolver.Index(width, height, pack(k3), pack(k5), prior, edges.size, distance.first, edges, distance.second)
             }
             if (log.enabled) log.emit(AlignmentLogEvent("vpsg.prepare-index.result", measurements = mapOf(
                 "width" to width.toDouble(), "height" to height.toDouble(), "bytes" to result.bytes.toDouble(),

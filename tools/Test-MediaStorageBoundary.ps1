@@ -14,10 +14,10 @@ foreach ($scope in $scopes) {
     if (Test-Path -LiteralPath $directory -PathType Leaf) {
         $paths = @($directory)
     } elseif (Get-Command rg -ErrorAction SilentlyContinue) {
-        $paths = & rg --files --hidden --no-ignore $directory -g '*.kt' -g '*.java' -g '*.xml' -g '*.ps1' -g '*.py' -g '*.sh' -g '*.bat' -g '*.cmd' -g '*.js' -g '*.mjs' -g '*.gradle' -g '*.kts' -g '!**/build/**' -g '!**/gradle*/**' -g '!**/.gradle/**' -g '!**/node_modules/**'
+        $paths = & rg --files --hidden --no-ignore $directory -g '*.kt' -g '*.java' -g '*.cpp' -g '*.h' -g '*.mk' -g '*.xml' -g '*.ps1' -g '*.py' -g '*.sh' -g '*.bat' -g '*.cmd' -g '*.js' -g '*.mjs' -g '*.gradle' -g '*.kts' -g '!**/build/**' -g '!**/gradle*/**' -g '!**/.gradle/**' -g '!**/node_modules/**'
         if ($LASTEXITCODE -gt 1) { throw "Cannot inventory media storage scope: $scope" }
     } else {
-        $allowedExt = @('.kt', '.java', '.xml', '.ps1', '.py', '.sh', '.bat', '.cmd', '.js', '.mjs', '.gradle', '.kts')
+        $allowedExt = @('.kt', '.java', '.cpp', '.h', '.mk', '.xml', '.ps1', '.py', '.sh', '.bat', '.cmd', '.js', '.mjs', '.gradle', '.kts')
         $paths = @(Get-ChildItem -LiteralPath $directory -Recurse -File -Force -ErrorAction SilentlyContinue | Where-Object {
             $ext = $_.Extension.ToLowerInvariant()
             $full = $_.FullName.Replace('\', '/')

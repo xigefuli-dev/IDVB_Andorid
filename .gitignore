@@ -7,6 +7,9 @@
 # Kotlin / Java / Gradle source
 !*.kt
 !*.java
+!*.cpp
+!*.h
+!*.mk
 !*.gradle
 !*.gradle.kts
 !*.kts
@@ -141,3 +144,7 @@ desktop.ini
 !/AGENTS.md
 !/tools/media-storage-boundary.rules
 !/app/src/androidTest/assets/private-test-evidence.contract
+
+# Required content templates for automatic floor selection.
+!app/src/main/assets/FloorIndicators/*.png
+!app/src/main/assets/FloorIndicators/registry.json

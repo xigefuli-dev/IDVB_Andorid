@@ -172,6 +172,33 @@ class VpsgAlignmentInstrumentedTest {
         }
     }
 
+    @Test fun alignedRenderingExtendsBeyondCalibrationWithoutChangingPose() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.runOnMainSync {
+            val bitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888)
+            Canvas(bitmap).apply {
+                drawColor(Color.RED)
+                drawRect(50f, 0f, 100f, 100f, Paint().apply { color = Color.BLUE })
+            }
+            val output = Bitmap.createBitmap(200, 160, Bitmap.Config.ARGB_8888)
+            val view = GuideMapView(instrumentation.targetContext)
+            try {
+                view.layout(0, 0, 200, 160)
+                view.showBitmap(bitmap)
+                // Calibration is (20, 20)-(140, 130); the render viewport is the screen.
+                view.showAlignment(RectF(-40f, 10f, 160f, 110f), RectF(0f, 0f, 200f, 160f))
+                view.draw(Canvas(output))
+                assertEquals(Color.RED, output.getPixel(10, 50))
+                assertEquals(Color.RED, output.getPixel(40, 50))
+                assertEquals(Color.BLUE, output.getPixel(65, 50))
+                assertEquals(Color.BLUE, output.getPixel(150, 50))
+                assertEquals(Color.RED, output.getPixel(40, 15))
+                assertEquals(Color.TRANSPARENT, output.getPixel(170, 50))
+                assertEquals(Color.TRANSPARENT, output.getPixel(80, 120))
+            } finally { view.showBitmap(null); bitmap.recycle(); output.recycle() }
+        }
+    }
+
     @Test fun reverseVisibilityKeepsKnownEmptyRoomInteriorsButExcludesFog() {
         val frame = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888)
         Canvas(frame).apply {

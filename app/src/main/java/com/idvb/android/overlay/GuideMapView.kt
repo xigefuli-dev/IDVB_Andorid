@@ -13,10 +13,15 @@ class GuideMapView(context: Context) : ImageView(context) {
     private var bitmap: Bitmap? = null
     private var alignedBounds: RectF? = null
     private var alignedViewport: RectF? = null
+    private var excludedRegion: RectF? = null
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
     private var nextDraw: ((Long) -> Unit)? = null
 
     fun afterNextAlignedDraw(callback: ((Long) -> Unit)?) { nextDraw = callback }
+
+    fun visibleAlignedParts(): List<RectF>? = alignedBounds?.let {
+        com.idvb.android.alignment.AutoMapOpenOcclusion.visibleParts(it, alignedViewport, excludedRegion)
+    }
     init {
         setBackgroundColor(Color.TRANSPARENT)
         scaleType = ScaleType.FIT_CENTER
@@ -29,9 +34,10 @@ class GuideMapView(context: Context) : ImageView(context) {
     }
 
     /** Draw directly in screen pixels; clipping must never resize or shift an accepted pose. */
-    fun showAlignment(bounds: RectF, viewport: RectF) {
+    fun showAlignment(bounds: RectF, viewport: RectF, excluded: RectF? = null) {
         alignedBounds = RectF(bounds)
         alignedViewport = RectF(viewport)
+        excludedRegion = excluded?.let(::RectF)
         invalidate()
     }
 
@@ -39,6 +45,7 @@ class GuideMapView(context: Context) : ImageView(context) {
         nextDraw = null
         alignedBounds = null
         alignedViewport = null
+        excludedRegion = null
         invalidate()
     }
 
@@ -49,6 +56,7 @@ class GuideMapView(context: Context) : ImageView(context) {
         val image = bitmap?.takeUnless { it.isRecycled } ?: return
         val saved = canvas.save()
         alignedViewport?.let { canvas.clipRect(it) }
+        excludedRegion?.let { canvas.clipOutRect(it) }
         canvas.drawBitmap(image, null, bounds, paint)
         canvas.restoreToCount(saved)
         nextDraw?.let { callback -> nextDraw = null; callback(System.nanoTime() - started) }

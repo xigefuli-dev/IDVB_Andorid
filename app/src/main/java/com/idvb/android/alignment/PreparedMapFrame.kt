@@ -13,12 +13,32 @@ class PreparedMapFrame(
     val captureReceivedAtMs: Long,
     val captureMethod: String = "ACCESSIBILITY",
     val frameSequence: Long? = null,
+    private var indicatorBitmap: Bitmap? = null,
+    private val indicatorBounds: Rect? = null,
 ) {
     fun isFreshFor(region: Rect, nowMs: Long, maximumAgeMs: Long = AutoMapOpenConfig().maximumFrameAgeMs): Boolean = !bitmap.isRecycled && bounds == region &&
         bitmap.width == region.width() && bitmap.height == region.height() &&
         nowMs >= captureStartedAtMs && nowMs - captureStartedAtMs <= maximumAgeMs
 
-    fun recycle() { if (!bitmap.isRecycled) bitmap.recycle() }
+    /** Transfers the independently cropped floor UI from this exact detector capture. */
+    fun takeIndicatorFor(region: Rect, nowMs: Long, maximumAgeMs: Long): Bitmap? {
+        val input = indicatorBitmap ?: return null
+        if (input.isRecycled || indicatorBounds != region || input.width != region.width() ||
+            input.height != region.height() || nowMs < captureStartedAtMs ||
+            nowMs - captureStartedAtMs > maximumAgeMs) return null
+        indicatorBitmap = null
+        return input
+    }
+
+    fun recycle() {
+        if (!bitmap.isRecycled) bitmap.recycle()
+        discardIndicator()
+    }
+
+    fun discardIndicator() {
+        indicatorBitmap?.let { if (!it.isRecycled) it.recycle() }
+        indicatorBitmap = null
+    }
 }
 
 data class AutoMapOpenSample(val pixels: IntArray, val mapFrame: PreparedMapFrame?,

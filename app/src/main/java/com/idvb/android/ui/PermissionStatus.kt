@@ -19,6 +19,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -37,7 +38,15 @@ data class PermissionSnapshot(
     val mediaProjectionService: Boolean,
     val batteryOptimization: Boolean,
     val captureMethod: ScreenCaptureMethod,
+    val batteryOptimizationSkipped: Boolean = false,
 ) {
+    val batteryRequirementSatisfied: Boolean
+        get() = batteryOptimization || batteryOptimizationSkipped
+
+    val readyWithoutBattery: Boolean
+        get() = overlay && (screenCapture || captureMethod == ScreenCaptureMethod.MEDIA_PROJECTION) &&
+            notifications && foregroundService && mediaProjectionService
+
     val allGranted: Boolean
         get() = overlay && screenCapture && notifications && foregroundService &&
             mediaProjectionService && batteryOptimization
@@ -48,7 +57,7 @@ data class PermissionSnapshot(
 
     /** MediaProjection asks for a fresh grant on start; accessibility must already be enabled. */
     val readyToStart: Boolean
-        get() = allGranted || (captureMethod == ScreenCaptureMethod.MEDIA_PROJECTION && onlyScreenCaptureMissing)
+        get() = readyWithoutBattery && batteryRequirementSatisfied
 }
 
 data class PermissionController(
@@ -56,6 +65,8 @@ data class PermissionController(
     val refresh: () -> Unit,
     val requestNextMissing: () -> Unit,
     val requestScreenCapture: (onGranted: () -> Unit) -> Unit,
+    val skipBatteryForSession: () -> Unit,
+    val restoreBatteryRequirement: () -> Unit,
 )
 
 @Composable
@@ -63,6 +74,7 @@ fun rememberPermissionController(): PermissionController {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var refreshTick by remember { mutableStateOf(0) }
+    var batterySkippedForSession by rememberSaveable { mutableStateOf(false) }
     var onScreenCaptureGranted by remember { mutableStateOf<(() -> Unit)?>(null) }
 
     val notificationLauncher = rememberLauncherForActivityResult(
@@ -98,8 +110,10 @@ fun rememberPermissionController(): PermissionController {
 
     val screenCaptureAvailable = ScreenCaptureGrant.available
     val captureMethod = AppServices.prefs.screenCaptureMethod
-    val snapshot = remember(context, refreshTick, screenCaptureAvailable, captureMethod) {
-        permissionSnapshot(context, screenCaptureAvailable, captureMethod)
+    val snapshot = remember(context, refreshTick, screenCaptureAvailable, captureMethod, batterySkippedForSession) {
+        permissionSnapshot(context, screenCaptureAvailable, captureMethod).copy(
+            batteryOptimizationSkipped = batterySkippedForSession || AppServices.prefs.skipBatteryOptimization,
+        )
     }
     val requestNextMissing = {
         when {
@@ -115,14 +129,18 @@ fun rememberPermissionController(): PermissionController {
                 Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
                     .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
             )
-            !snapshot.batteryOptimization -> {
+            !snapshot.batteryRequirementSatisfied -> {
                 if (!BatteryOptimization.requestIgnoreBatteryOptimizations(context)) {
                     BatteryOptimization.openBatteryOptimizationSettings(context)
                 }
             }
         }
     }
-    return PermissionController(snapshot, { refreshTick++ }, requestNextMissing, requestScreenCapture)
+    return PermissionController(snapshot, { refreshTick++ }, requestNextMissing, requestScreenCapture,
+        { batterySkippedForSession = true }, {
+            batterySkippedForSession = false
+            refreshTick++
+        })
 }
 
 fun openAccessibilityServiceSettings(context: Context) {

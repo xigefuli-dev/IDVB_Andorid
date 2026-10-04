@@ -6,6 +6,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.Looper
 import android.view.View
+import android.view.Gravity
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -16,7 +17,11 @@ enum class NotificationTone {
 }
 
 /** A single passive window with newest-first cards; expiry owns a card, never the window. */
-class OverlayNotifications(private val context: Context, private val screenSize: () -> Pair<Int, Int>) {
+class OverlayNotifications(
+    private val context: Context,
+    private val alignmentStyle: Boolean = false,
+    private val screenSize: () -> Pair<Int, Int>,
+) {
     private val handler = Handler(Looper.getMainLooper())
     private val window = OverlayWindowManager(context)
     private val column = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
@@ -27,7 +32,8 @@ class OverlayNotifications(private val context: Context, private val screenSize:
     private var captureHidden = false
     internal val captureView: View get() = column
     private var closed = false
-    private fun dp(value: Int) = (value * context.resources.displayMetrics.density).toInt()
+    private val sizeScale = if (alignmentStyle) 0.75f else 1f
+    private fun dp(value: Int) = (value * sizeScale * context.resources.displayMetrics.density).toInt()
 
     private fun backgroundFor(tone: NotificationTone): GradientDrawable = GradientDrawable().apply {
         setColor(if (tone == NotificationTone.WARNING) Color.rgb(184, 112, 0) else Color.rgb(28, 35, 43))
@@ -42,7 +48,7 @@ class OverlayNotifications(private val context: Context, private val screenSize:
         check(Looper.myLooper() == Looper.getMainLooper())
         if (closed || !com.idvb.android.UsageConsent.isAccepted(context)) return -1
         val text = TextView(context).apply {
-            textSize = 13f; setTextColor(Color.WHITE)
+            textSize = 13f * sizeScale; setTextColor(Color.WHITE)
             setPadding(dp(14), dp(10), dp(14), dp(10))
             background = backgroundFor(tone)
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
@@ -105,8 +111,9 @@ class OverlayNotifications(private val context: Context, private val screenSize:
         val (width, height) = screenSize()
         window.width = minOf(dp(350), (width - dp(24)).coerceAtLeast(1))
         window.height = WindowManager.LayoutParams.WRAP_CONTENT
-        window.x = ((width - window.width) / 2).coerceAtLeast(0)
-        window.y = minOf(dp(64), height / 5)
+        window.gravity = if (alignmentStyle) Gravity.BOTTOM or Gravity.LEFT else Gravity.TOP or Gravity.START
+        window.x = if (alignmentStyle) dp(12) else ((width - window.width) / 2).coerceAtLeast(0)
+        window.y = if (alignmentStyle) dp(12) else minOf(dp(64), height / 5)
         window.update()
     }
 

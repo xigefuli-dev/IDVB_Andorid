@@ -42,7 +42,16 @@ class CandidateSelectionView(
     private var tagChipRects = emptyList<Pair<RectF, ManualTagGroup>>()
     private var openTagGroup: ManualTagGroup? = null
     private var tagOptionRects = emptyList<Pair<RectF, String>>()
-    private var previewsStarted = false
+    private val previewLock = Any()
+    private val previewHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var previewRevision = 0L
+    @Volatile private var previewDisposed = true
+    private var previewWanted = emptyList<Int>()
+    private var previewRetained = emptySet<Int>()
+    private val previewLoading = mutableSetOf<Int>()
+    private val previewFailed = mutableSetOf<Int>()
+    private var previewIdle = java.util.concurrent.CountDownLatch(0)
+    private var previewWorkerRunning = false
     private var tagMenuBounds: RectF? = null
     private var tagMenuScroll = 0f
     private var tagMenuMaxScroll = 0f
@@ -128,16 +137,21 @@ class CandidateSelectionView(
         drawBitmapFit(canvas, result.capturedRegion, livePreview)
 
         canvas.save(); canvas.clipRect(0f, listTop, width.toFloat(), contentBottom)
+        val wantedPreviews = mutableListOf<Int>()
         visibleIndices().forEachIndexed { visibleIndex, index ->
             val candidate = result.candidates[index]
             val row = visibleIndex / columnCount
             val column = visibleIndex % columnCount
             val left = gridLeft + column * (cardWidth + cardGap)
             val top = listTop + row * (cardHeight + cardGap) - scroll
+            // Visible cards plus one row of prefetch, independent of catalog size.
+            if (top + cardHeight >= listTop - cardHeight - cardGap && top <= height + cardHeight + cardGap)
+                wantedPreviews += index
             if (top + cardHeight < listTop || top > height) return@forEachIndexed
             drawCandidate(canvas, index, candidate, thumbnails[index], left, top)
         }
         canvas.restore()
+        prepareVisiblePreviews(wantedPreviews)
         drawTagDropdown(canvas)
     }
 
@@ -332,25 +346,68 @@ class CandidateSelectionView(
     }
 
     override fun onDetachedFromWindow() {
+        synchronized(previewLock) { previewDisposed = true; previewRevision++; previewWanted = emptyList() }
         thumbnails.filterNotNull().forEach { if (!it.isRecycled) it.recycle() }
+        thumbnails.fill(null)
+        previewRetained = emptySet()
+        previewFailed.clear()
         super.onDetachedFromWindow()
     }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        if (previewsStarted) return
-        previewsStarted = true
-        thread(name = "idvb-map-previews", isDaemon = true) {
-            result.candidates.forEachIndexed { index, candidate ->
-                val preview = createCandidatePreview(candidate)
-                post {
-                    if (isAttachedToWindow) {
-                        thumbnails[index] = preview
-                        invalidate()
-                    } else if (preview != null && !preview.isRecycled) preview.recycle()
+        synchronized(previewLock) { previewDisposed = false; previewRevision++ }
+        invalidate()
+    }
+
+    private fun prepareVisiblePreviews(indices: List<Int>) {
+        if (previewDisposed) return
+        previewRetained = indices.toSet()
+        thumbnails.forEachIndexed { index, bitmap ->
+            if (bitmap != null && index !in previewRetained) { bitmap.recycle(); thumbnails[index] = null }
+        }
+        synchronized(previewLock) {
+            previewWanted = indices.filter { thumbnails[it] == null && it !in previewLoading && it !in previewFailed }
+            if (previewWorkerRunning || previewWanted.isEmpty()) return
+            previewWorkerRunning = true
+            val revision = previewRevision
+            val finished = java.util.concurrent.CountDownLatch(1).also { previewIdle = it }
+            thread(name = "idvb-map-previews", isDaemon = true) {
+                try {
+                    while (true) {
+                        val index = synchronized(previewLock) {
+                            if (previewDisposed || revision != previewRevision) null
+                            else previewWanted.firstOrNull()?.also {
+                                previewWanted = previewWanted.drop(1); previewLoading += it
+                            }
+                        } ?: break
+                        val preview = runCatching { createCandidatePreview(result.candidates[index]) }.getOrNull()
+                        // Handler owns late completions; View.post can strand them in a detached view's RunQueue.
+                        previewHandler.post {
+                            synchronized(previewLock) { previewLoading -= index }
+                            if (!previewDisposed && revision == previewRevision && index in previewRetained) {
+                                thumbnails[index]?.takeUnless(Bitmap::isRecycled)?.recycle()
+                                thumbnails[index] = preview
+                                if (preview == null) previewFailed += index
+                                invalidate()
+                            } else preview?.takeUnless(Bitmap::isRecycled)?.recycle()
+                        }
+                    }
+                } finally {
+                    synchronized(previewLock) { previewWorkerRunning = false }
+                    finished.countDown()
+                    previewHandler.post {
+                        if (!previewDisposed) prepareVisiblePreviews(previewRetained.toList())
+                    }
                 }
             }
         }
+    }
+
+    /** Release worker only; main delivery is drained separately before shared caches are cleared. */
+    internal fun awaitPreviewIdle() {
+        val finished = synchronized(previewLock) { previewIdle }
+        check(finished.await(30, java.util.concurrent.TimeUnit.SECONDS)) { "Candidate preview worker did not exit" }
     }
 
     private fun drawBitmapFit(canvas: Canvas, bitmap: Bitmap, dst: RectF) {

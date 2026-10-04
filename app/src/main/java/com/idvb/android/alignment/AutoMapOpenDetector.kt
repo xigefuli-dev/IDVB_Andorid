@@ -227,6 +227,12 @@ class AutoMapOpenDetector(
         fun compareSidebar(reference: AutoMapOpenSignature, candidate: AutoMapOpenSignature,
             widthFraction: Double): AutoMapOpenComparison {
             require(widthFraction.isFinite() && widthFraction > 0.0 && widthFraction <= 1.0)
+            return if (AutoMapOpenNativeKernel.available) AutoMapOpenNativeKernel.compare(reference, candidate, widthFraction)
+                else compareSidebarManaged(reference, candidate, widthFraction)
+        }
+
+        internal fun compareSidebarManaged(reference: AutoMapOpenSignature, candidate: AutoMapOpenSignature,
+            widthFraction: Double): AutoMapOpenComparison {
             var best = compare(reference, candidate)
             for (scale in listOf(.85, 1.0, 1.15)) {
                 val width = (WIDTH * widthFraction * scale).coerceIn(4.0, WIDTH.toDouble())

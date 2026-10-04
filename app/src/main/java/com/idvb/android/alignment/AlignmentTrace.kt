@@ -12,7 +12,7 @@ class AlignmentTrace(
     val id: String = UUID.randomUUID().toString()
     val createdAtMillis: Long = System.currentTimeMillis()
     private val events = mutableListOf<AlignmentLogEvent>()
-    private val artifacts = linkedMapOf<String, ByteArray>()
+    private val artifacts = linkedMapOf<String, AlignmentArtifact>()
     private val deferredArtifacts = linkedMapOf<String, () -> ByteArray>()
     private var recordingNanos = 0L
     private val recordingIntervals = mutableListOf<Pair<Long, Long>>()
@@ -32,7 +32,7 @@ class AlignmentTrace(
         if (!captureArtifacts) return
         require(Regex("[a-zA-Z0-9_.-]+").matches(name))
         val content = measure("diagnostics.read-artifact") { bytes() }
-        synchronized(this) { artifacts[name] = content }
+        synchronized(this) { artifacts[name] = AlignmentArtifact.Bytes(content) }
     }
 
     /** The supplier must own immutable input, never a borrowed/recyclable capture. Encoding
@@ -44,6 +44,13 @@ class AlignmentTrace(
     }
 
     override fun attachOwned(name: String, bytes: () -> ByteArray) = attachDeferred(name, bytes)
+
+    override fun attachDirect(name: String, capture: () -> java.nio.ByteBuffer) {
+        if (!captureArtifacts) return
+        require(Regex("[a-zA-Z0-9_.-]+").matches(name))
+        val content = measure("diagnostics.copy-direct-artifact") { AlignmentArtifact.Direct(capture()) }
+        synchronized(this) { artifacts[name] = content }
+    }
 
     @Synchronized fun snapshot(): List<AlignmentLogEvent> = events.toList() + AlignmentLogEvent(
         "diagnostics.trace-recording", "Cumulative adapter and trace append cost, already included in enclosing spans; event construction excluded",
@@ -68,11 +75,17 @@ class AlignmentTrace(
         }
         return total
     }
-    @Synchronized fun artifactSnapshot(): Map<String, ByteArray> {
+    @Synchronized fun artifactDataSnapshot(): Map<String, AlignmentArtifact> {
         for ((name, encode) in deferredArtifacts) {
-            artifacts[name] = measure("diagnostics.encode-deferred-artifact") { encode() }
+            artifacts[name] = AlignmentArtifact.Bytes(measure("diagnostics.encode-deferred-artifact") { encode() })
         }
         deferredArtifacts.clear()
         return artifacts.toMap()
     }
+    /** Compatibility API for callers explicitly requesting heap bytes. The production
+     * writer uses artifactDataSnapshot and streams direct masks without this allocation. */
+    @Synchronized fun artifactSnapshot(): Map<String, ByteArray> = artifactDataSnapshot().mapValues { it.value.toByteArray() }
+
+    /** Async writer owns these suppliers/buffers; numeric cancellation and timing evidence remains. */
+    @Synchronized fun releaseWrittenArtifacts() { artifacts.clear(); deferredArtifacts.clear() }
 }

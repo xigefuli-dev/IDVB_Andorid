@@ -105,6 +105,7 @@ internal object SparseGateSearch {
     private val building = HashMap<Pair<Long,String>,FutureTask<Index>>()
     private var retained = 0L
     private var epoch = 0L
+    val retainedBytes: Long get() = synchronized(cache) { retained }
     fun clear() = synchronized(cache) { cache.clear(); retained = 0L; epoch++ }
     private fun key(file: File, generation: String) =
         "${file.canonicalPath}|$generation|${file.length()}|${file.lastModified()}"
@@ -293,11 +294,13 @@ internal object SparseGateSearch {
         val retained = ArrayList<Pose>()
         // Balanced includes the complete Fast search, preserving its basins.
         for ((step,fine,count) in listOf(Triple(.08,.02,1), Triple(.04,.01,2))) {
+            com.idvb.android.alignment.AlignmentCancellation.checkpoint("scan.side.search-pass")
             val scales = sortedSetOf(minimum,maximum,1.0.coerceIn(minimum,maximum))
             var scale = minimum
             while (scale <= maximum) { scales += scale; scale *= 1+step }
             val peaks = ArrayList<Pose>()
             for (s in scales) for (dx in -3..3 step 3) for (dy in -3..3 step 3) {
+                com.idvb.android.alignment.AlignmentCancellation.checkpoint("scan.side.search-pose")
                 val x = gx+dx-ax*s; val y = gy+dy-ay*s
                 val pose = Pose(s,x,y,index.score(points,s,x,y),gate)
                 val duplicate = peaks.indexOfFirst { abs(ln(it.scale/s)) < step*2 }
@@ -307,6 +310,7 @@ internal object SparseGateSearch {
                 if (peaks.size > count) peaks.removeAt(peaks.lastIndex)
             }
             for (seed in peaks) {
+                com.idvb.android.alignment.AlignmentCancellation.checkpoint("scan.side.refine-seed")
                 var best = seed
                 val n = ceil(step/fine).toInt()
                 for (i in -n..n) {
@@ -334,6 +338,7 @@ internal object SparseGateSearch {
         val proposals = ArrayList<Proposal>()
         val ordering = compareByDescending<Proposal> { it.hits }.thenBy { it.distance }
         for (step in -15..15) {
+            com.idvb.android.alignment.AlignmentCancellation.checkpoint("scan.side.refine-scale")
             val s = seed.scale*(1+step*.001); if (s !in minimum..maximum) continue
             val inverseScale = 1.0/s
             val scaleProposals = ArrayList<Proposal>()
@@ -379,6 +384,7 @@ internal object SparseGateSearch {
         var best = seed.copy(score=index.score(coarse,seed.scale,seed.x,seed.y))
         val extent = ceil(radius).toInt()
         for (step in -6..6) {
+            com.idvb.android.alignment.AlignmentCancellation.checkpoint("scan.side.verify-scale")
             val scale = seed.scale*(1+step*.005)
             if (scale !in minimum..maximum) continue
             for (dx in -extent..extent step 6) for (dy in -extent..extent step 6) {
@@ -391,6 +397,7 @@ internal object SparseGateSearch {
         val center = best
         best = best.copy(score=index.score(points,best.scale,best.x,best.y))
         for (step in -5..5) {
+            com.idvb.android.alignment.AlignmentCancellation.checkpoint("scan.side.final-scale")
             val scale = center.scale*(1+step*.001)
             if (scale !in minimum..maximum) continue
             // Preserve the anchor residual of this basin as the scale changes.

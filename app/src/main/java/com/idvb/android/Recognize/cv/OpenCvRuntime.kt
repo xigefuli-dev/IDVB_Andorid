@@ -11,6 +11,10 @@ import java.io.File
 
 /** OpenCV native runtime 的单一初始化与状态入口。 */
 object OpenCvRuntime {
+    // Establish the process-wide policy before publishing AVAILABLE. setNumThreads
+    // is not safe during concurrent OpenCV calls, so never toggle it per request.
+    // https://docs.opencv.org/4.x/db/de0/group__core__utils.html
+    const val THREAD_LIMIT = 2
     private enum class State { UNINITIALIZED, AVAILABLE, FAILED }
 
     @Volatile private var state = State.UNINITIALIZED
@@ -20,7 +24,9 @@ object OpenCvRuntime {
     fun initialize(): Boolean {
         if (state == State.AVAILABLE) return true
         if (state == State.FAILED) return false
-        val loaded = runCatching { OpenCVLoader.initLocal() }
+        val loaded = runCatching { OpenCVLoader.initLocal().also { initialized ->
+            if (initialized) Core.setNumThreads(THREAD_LIMIT)
+        } }
         if (loaded.getOrDefault(false)) {
             state = State.AVAILABLE
             return true

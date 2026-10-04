@@ -7,6 +7,18 @@ import java.util.concurrent.CancellationException
  * Never use Thread.stop: it can strand native allocations and corrupt the shared executor.
  */
 class AlignmentCancellation {
+    @field:androidx.annotation.Keep
+    private var nativeStopMemory: java.nio.ByteBuffer? = null
+    private var nativeStop = 0L
+    @androidx.annotation.Keep
+    @Synchronized fun nativeStopAddress(): Long {
+        if (nativeStop == 0L) {
+            val memory = java.nio.ByteBuffer.allocateDirect(64)
+            nativeStop = com.idvb.android.recognize.vpsg.VpsgNativeKernel.initializeStopFlag(memory, isCancelled)
+            nativeStopMemory = memory
+        }
+        return nativeStop
+    }
     @Volatile var requestedAtNanos: Long = 0L
         private set
     @Volatile var reason: String = ""
@@ -18,6 +30,7 @@ class AlignmentCancellation {
         if (isCancelled) return
         this.reason = reason
         requestedAtNanos = System.nanoTime()
+        if (nativeStop != 0L) com.idvb.android.recognize.vpsg.VpsgNativeKernel.signalStopFlag(nativeStop)
         worker?.interrupt()
     }
 
@@ -46,6 +59,7 @@ class AlignmentCancellation {
 
     companion object {
         private val active = ThreadLocal<AlignmentCancellation>()
+        internal fun current(): AlignmentCancellation? = active.get()
         /** Also available to future algorithms; outside an alignment request this is a no-op. */
         fun checkpoint(stage: String) { active.get()?.throwIfCancelled(stage) }
     }

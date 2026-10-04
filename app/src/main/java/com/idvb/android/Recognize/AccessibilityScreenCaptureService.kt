@@ -25,9 +25,13 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
-        // Overlay views are our UI above the game, not a change of the underlying app.
-        if (event.className?.toString()?.startsWith("com.idvb.android.overlay.") == true) return
         val updated = event.packageName?.toString()
+        val ignored = ForegroundWindowPolicy.ignoredWindowReason(updated, event.className?.toString())
+        if (ignored != null) {
+            android.util.Log.i("IDVB-Foreground", "stage=window-ignored reason=$ignored " +
+                "retained=$foregroundPackage package=$updated class=${event.className} window=${event.windowId}")
+            return
+        }
         if (updated != foregroundPackage) android.util.Log.i("IDVB-Foreground",
             "previous=$foregroundPackage package=$updated class=${event.className} window=${event.windowId}")
         if (updated != foregroundPackage) {

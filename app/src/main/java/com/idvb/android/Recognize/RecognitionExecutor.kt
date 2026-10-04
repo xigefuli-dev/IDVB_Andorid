@@ -30,4 +30,10 @@ class RecognitionExecutor : Closeable {
     override fun close() {
         if (closed.compareAndSet(false, true)) executor.shutdown()
     }
+
+    /** Resource-release worker only. Complete accepted tasks so their bitmap cleanup still runs. */
+    fun awaitIdle() {
+        if (executor.isShutdown) check(executor.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS))
+        else executor.submit {}.get(30, java.util.concurrent.TimeUnit.SECONDS)
+    }
 }

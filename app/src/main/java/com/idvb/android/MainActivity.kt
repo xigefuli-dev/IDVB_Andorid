@@ -13,6 +13,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -38,6 +39,7 @@ import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -53,7 +55,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -142,16 +143,27 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             IDVBTheme {
+                var featureGuidesPending by remember {
+                    mutableStateOf(com.idvb.android.onboarding.FeatureGuideRegistry.pending(AppServices.prefs.completedFeatureGuides).isNotEmpty())
+                }
+                if (featureGuidesPending) {
+                    com.idvb.android.onboarding.FeatureGuideScreen(
+                        onFinished = { featureGuidesPending = false; handleFileIntent(intent) },
+                        onExit = { finishAndRemoveTask() },
+                    )
+                    return@IDVBTheme
+                }
                 val context = LocalContext.current
                 val density = LocalDensity.current
                 val scope = rememberCoroutineScope()
                 var tab by rememberSaveable { mutableIntStateOf(0) }
                 var page by remember { mutableStateOf("main") }
+                var reselectPresets by rememberSaveable { mutableStateOf(false) }
                 var showExitConfirmation by rememberSaveable { mutableStateOf(false) }
                 var navigationBarHeightPx by remember { mutableIntStateOf(0) }
                 val navigationBarHeight = with(density) { navigationBarHeightPx.toDp() }
                 val navigationBarVisibility = remember { MutableTransitionState(false) }.apply {
-                    targetState = page == "main"
+                    targetState = page == "main" && !reselectPresets
                 }
                 var navigatingForward by remember { mutableStateOf(true) }
                 var creationClassId by remember { mutableStateOf<String?>(null) }
@@ -162,16 +174,42 @@ class MainActivity : ComponentActivity() {
                 var creationSideDoors by remember { mutableStateOf(emptyList<com.idvb.android.idvm.NormalizedRect>()) }
                 val navigateUp: () -> Unit = {
                     navigatingForward = false
+                    reselectPresets = false
                     page = when (page) {
                         "gate-marker" -> "map-images"
+                        "permission-management" -> "general-settings"
                         "map-images" -> if (creationMapId == null) "template-picker" else "main"
                         else -> "main"
                     }
                 }
-                BackHandler(enabled = !showExitConfirmation) {
+                BackHandler(enabled = !showExitConfirmation && !reselectPresets) {
                     if (page == "main") showExitConfirmation = true else navigateUp()
                 }
                 val permissions = rememberPermissionController()
+                var showBatterySkipDialog by rememberSaveable { mutableStateOf(false) }
+                var permanentBatterySkip by rememberSaveable { mutableStateOf(false) }
+                var hideBatterySkipDialog by rememberSaveable { mutableStateOf(false) }
+                val runWithBatterySkipped = {
+                    if (permissions.snapshot.readyWithoutBattery) {
+                        permissions.skipBatteryForSession()
+                        if (permissions.snapshot.captureMethod == ScreenCaptureMethod.MEDIA_PROJECTION) {
+                            permissions.requestScreenCapture { OverlayService.start(this@MainActivity) }
+                        } else OverlayService.start(this@MainActivity)
+                    }
+                }
+                if (showBatterySkipDialog) com.idvb.android.ui.screens.BatterySkipDialog(
+                    permanent = permanentBatterySkip,
+                    hideDialog = hideBatterySkipDialog,
+                    onPermanentChange = { permanentBatterySkip = it },
+                    onHideDialogChange = { hideBatterySkipDialog = it },
+                    onDismiss = { showBatterySkipDialog = false },
+                    onConfirm = {
+                        if (AppServices.prefs.saveBatterySkipOptions(permanentBatterySkip, hideBatterySkipDialog)) {
+                            showBatterySkipDialog = false
+                            runWithBatterySkipped()
+                        } else Toast.makeText(context, "保存失败，请重试", Toast.LENGTH_SHORT).show()
+                    },
+                )
                 val tutorialStore = remember { TutorialStore.get(context) }
                 val tutorial by tutorialStore.state.collectAsState()
                 val openPractice = {
@@ -195,8 +233,10 @@ class MainActivity : ComponentActivity() {
                     tab = tutorialTab
                 }
 
-                val hasMaps by produceState(initialValue = false, catalogTick) {
-                    value = withContext(Dispatchers.IO) { AppServices.repository.loadCatalog().maps.isNotEmpty() }
+                val catalog by AppServices.repository.catalogState.collectAsState()
+                val hasMaps = catalog?.maps?.isNotEmpty() == true
+                LaunchedEffect(Unit) {
+                    withContext(Dispatchers.IO) { AppServices.repository.loadCatalog() }
                 }
                 var showImportGuideDialog by remember { mutableStateOf(false) }
                 var showTutorialEntryDialog by rememberSaveable { mutableStateOf(false) }
@@ -238,30 +278,50 @@ class MainActivity : ComponentActivity() {
                 Scaffold(
                     containerColor = MaterialTheme.colorScheme.background,
                     floatingActionButton = {
-                        if (page == "main") Box(Modifier.padding(bottom = navigationBarHeight)) {
+                        if (page == "main" && !reselectPresets) Box(Modifier.padding(bottom = navigationBarHeight)) {
                             val permissionsReady = permissions.snapshot.readyToStart
                             val ready = hasMaps && permissionsReady
                             val description = if (!hasMaps) "导入地图" else if (ready) "启动服务" else "补全权限"
-                            if (page == "main" && (tab == 0 || tab == 1)) ServiceStatusFab(
+                            if (page == "main" && (tab == 0 || tab == 1)) Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                            if (hasMaps && permissions.snapshot.readyWithoutBattery &&
+                                !permissions.snapshot.batteryRequirementSatisfied) Button(onClick = {
+                                if (AppServices.prefs.hideBatterySkipDialog) runWithBatterySkipped()
+                                else {
+                                    permanentBatterySkip = AppServices.prefs.skipBatteryOptimization
+                                    hideBatterySkipDialog = AppServices.prefs.hideBatterySkipDialog
+                                    showBatterySkipDialog = true
+                                }
+                            }) { Text("跳过并运行") }
+                            ServiceStatusFab(
                                 ready = ready,
                                 description = description,
                                 onClick = {
-                                    if (!hasMaps) {
-                                        showImportGuideDialog = true
-                                    } else if (permissions.snapshot.captureMethod == ScreenCaptureMethod.MEDIA_PROJECTION &&
-                                        permissions.snapshot.overlay &&
-                                        permissions.snapshot.notifications &&
-                                        permissions.snapshot.foregroundService &&
-                                        permissions.snapshot.mediaProjectionService &&
-                                        permissions.snapshot.batteryOptimization) {
-                                        permissions.requestScreenCapture {
-                                            OverlayService.start(this@MainActivity)
+                                    scope.launch {
+                                        // 点击时读取当前仓库，避免首次加载或清单更新与重组之间误报缺图。
+                                        val currentHasMaps = withContext(Dispatchers.IO) {
+                                            AppServices.repository.loadCatalog().maps.isNotEmpty()
                                         }
-                                    } else if (permissions.snapshot.allGranted) {
-                                        OverlayService.start(this@MainActivity)
-                                    } else permissions.requestNextMissing()
+                                        if (!currentHasMaps) {
+                                            showImportGuideDialog = true
+                                        } else if (permissions.snapshot.captureMethod == ScreenCaptureMethod.MEDIA_PROJECTION &&
+                                            permissions.snapshot.overlay &&
+                                            permissions.snapshot.notifications &&
+                                            permissions.snapshot.foregroundService &&
+                                            permissions.snapshot.mediaProjectionService &&
+                                            permissions.snapshot.batteryRequirementSatisfied) {
+                                            permissions.requestScreenCapture {
+                                                OverlayService.start(this@MainActivity)
+                                            }
+                                        } else if (permissions.snapshot.readyToStart) {
+                                            OverlayService.start(this@MainActivity)
+                                        } else permissions.requestNextMissing()
+                                    }
                                 },
                             )
+                            }
                             if (page == "main" && tab == 2) SubscriptionDownloadFab(downloadJobs) {
                                 showDownloadQueue = true
                             }
@@ -272,7 +332,7 @@ class MainActivity : ComponentActivity() {
                     // 所有页面共用固定视口；导航栏空间只在主页内容内部预留。
                     Box(Modifier.fillMaxSize().padding(innerPadding).consumeWindowInsets(innerPadding)) {
                         AnimatedContent(
-                            targetState = page to tab,
+                            targetState = (if (reselectPresets) "presets" else page) to tab,
                             modifier = Modifier.fillMaxSize(),
                             contentAlignment = Alignment.TopStart,
                             transitionSpec = {
@@ -296,8 +356,19 @@ class MainActivity : ComponentActivity() {
                                 )
                                 Box(Modifier.weight(1f)) {
                                     when (currentPage) {
+                                        "presets" -> com.idvb.android.onboarding.FeatureGuideScreen(
+                                            replayAll = true,
+                                            onFinished = navigateUp,
+                                            onExit = navigateUp,
+                                        )
                                         "templates" -> TemplateManagerScreen(onBack = navigateUp)
-                                        "general-settings" -> GeneralSettingsScreen(onBack = navigateUp)
+                                        "general-settings" -> GeneralSettingsScreen(onBack = navigateUp,
+                                            onOpenPermissions = { navigatingForward = true; page = "permission-management" })
+                                        "permission-management" -> com.idvb.android.ui.screens.PermissionManagementScreen(
+                                            permissions = permissions.snapshot,
+                                            onBack = navigateUp,
+                                            onChanged = permissions.restoreBatteryRequirement,
+                                        )
                                         "vision-settings" -> VisionSettingsScreen(onBack = navigateUp)
                                         "operation-settings" -> OperationSettingsScreen(onBack = navigateUp)
                                         "template-picker" -> TemplatePickerScreen(onBack = navigateUp) {
@@ -406,6 +477,7 @@ class MainActivity : ComponentActivity() {
                                             )
                                             2 -> MapSubscriptionsScreen()
                                             else -> SettingsScreen(
+                                                onOpenPresets = { navigatingForward = true; reselectPresets = true },
                                                 onOpenGeneral = { navigatingForward = true; page = "general-settings" },
                                                 onOpenVision = { navigatingForward = true; page = "vision-settings" },
                                                 onOpenOperation = { navigatingForward = true; page = "operation-settings" },
@@ -524,6 +596,7 @@ class MainActivity : ComponentActivity() {
 
     private fun handleFileIntent(intent: Intent?) {
         if (!UsageConsent.isAccepted(this)) return
+        if (com.idvb.android.onboarding.FeatureGuideRegistry.pending(AppServices.prefs.completedFeatureGuides).isNotEmpty()) return
         val source = intent ?: return
         val uris = when (source.action) {
             Intent.ACTION_VIEW -> (listOfNotNull(source.data) + source.clipData.allUris()).distinct()

@@ -20,7 +20,7 @@ import java.util.zip.ZipOutputStream
 
 data class AlignmentDiagnosticContext(val methodId: String, val map: MapRecord, val floorKey: String,
     val viewport: ScreenRect, val screenWidth: Int, val screenHeight: Int, val captureSource: String,
-    val sessionId: String? = null)
+    val sessionId: String? = null, val floorSelectedByIndicator: Boolean = false)
 
 /** Local, bounded history. Numeric traces are always retained, including unavailable/cancelled attempts. */
 class AlignmentDiagnosticsStore(context: Context) {
@@ -59,22 +59,42 @@ class AlignmentDiagnosticsStore(context: Context) {
     private fun lifecycle(file: File, manifest: JsonObject): File = File(file.parentFile,
         "request-${manifest.getValue("requestId").jsonPrimitive.content}.lifecycle.jsonl")
 
-    /** Takes ownership of frame, releasing it after asynchronous encoding, independent of rendering. */
+    /** Owns the frame. Disabled replay inputs are released immediately; retained inputs after encoding. */
     fun recordAsync(trace: AlignmentTrace, context: AlignmentDiagnosticContext, frame: Bitmap?,
         result: AlignmentResult?, terminal: String, onWritten: (Result<File>) -> Unit = {}) {
         if (!trace.completed.compareAndSet(false, true)) return
+        val frameSize = frame?.let { it.width to it.height }
+        val retainedFrame = if (trace.captureArtifacts) frame else {
+            frame?.takeUnless(Bitmap::isRecycled)?.recycle()
+            null
+        }
         val queued = System.nanoTime()
         writer.execute {
-            trace.emit(AlignmentLogEvent("diagnostics.queue", durationNanos = System.nanoTime() - queued))
-            val written = try { record(trace, context, frame, result, terminal) }
-            finally { frame?.takeUnless(Bitmap::isRecycled)?.recycle() }
+            val written = try {
+                trace.emit(AlignmentLogEvent("diagnostics.queue", durationNanos = System.nanoTime() - queued))
+                AlignmentLogcat.write(trace, context.methodId, context.map.id, context.floorKey)
+                recordWithFrameSize(trace, context, retainedFrame, result, terminal, frameSize)
+            }
+            finally {
+                retainedFrame?.takeUnless(Bitmap::isRecycled)?.recycle()
+                trace.releaseWrittenArtifacts()
+            }
             onWritten(written)
         }
     }
 
+    /** Wait off the UI thread; never discard accepted replay inputs or delete their files. */
+    internal fun awaitIdle() { writer.submit {}.get(30, java.util.concurrent.TimeUnit.SECONDS) }
+    internal fun releaseCompletedBindings() { requestSessions.clear() }
+
     /** Synchronous test/export adapter; borrows the bitmap. ZIP is published atomically. */
     @Synchronized fun record(trace: AlignmentTrace, context: AlignmentDiagnosticContext, frame: Bitmap?,
-        result: AlignmentResult?, terminal: String): Result<File> = synchronized(com.idvb.android.diagnostics.DiagnosticHistory.lock) { runCatching {
+        result: AlignmentResult?, terminal: String): Result<File> =
+        recordWithFrameSize(trace, context, frame, result, terminal, frame?.let { it.width to it.height })
+
+    private fun recordWithFrameSize(trace: AlignmentTrace, context: AlignmentDiagnosticContext, frame: Bitmap?,
+        result: AlignmentResult?, terminal: String, frameSize: Pair<Int, Int>?): Result<File> =
+        synchronized(com.idvb.android.diagnostics.DiagnosticHistory.lock) { runCatching {
         val writeStarted = System.nanoTime()
         val directory = context.sessionId?.let { history.directoryFor(it, "alignment") }
             ?: history.directoryAt(trace.createdAtMillis, "alignment")
@@ -125,7 +145,21 @@ class AlignmentDiagnosticsStore(context: Context) {
                     }
                 }
                 trace.measure("diagnostics.write-intermediates") {
-                    trace.artifactSnapshot().forEach { (name, bytes) -> add(name, bytes) }
+                    val scratch = ByteArray(64 * 1024)
+                    trace.artifactDataSnapshot().forEach { (name, data) ->
+                        zip.putNextEntry(ZipEntry(name))
+                        val digest = MessageDigest.getInstance("SHA-256")
+                        var count = 0L
+                        data.writeTo(object : OutputStream() {
+                            override fun write(value: Int) { zip.write(value); digest.update(value.toByte()); count++ }
+                            override fun write(bytes: ByteArray, off: Int, len: Int) {
+                                zip.write(bytes, off, len); digest.update(bytes, off, len); count += len
+                            }
+                        }, scratch)
+                        check(count == data.size.toLong()) { "Incomplete artifact write: $name" }
+                        zip.closeEntry()
+                        artifacts[name] = count to digest.digest().joinToString("") { "%02x".format(it) }
+                    }
                 }
                 trace.measure("diagnostics.write-provenance") {
                     fun copyAssets(path: String) {
@@ -150,7 +184,7 @@ class AlignmentDiagnosticsStore(context: Context) {
                     }.onFailure { trace.emit(AlignmentLogEvent("diagnostics.provenance-unavailable", it.message.orEmpty())) }
                 }
                 val serializeStarted = System.nanoTime()
-                val manifest = manifest(trace, context, frame, result, terminal, artifacts, sourceComplete).toString().encodeToByteArray()
+                val manifest = manifest(trace, context, frameSize, result, terminal, artifacts, sourceComplete).toString().encodeToByteArray()
                 serializeMs = (System.nanoTime() - serializeStarted) / 1e6
                 val manifestStarted = System.nanoTime()
                 add("diagnostics.json", manifest)
@@ -225,7 +259,7 @@ class AlignmentDiagnosticsStore(context: Context) {
 
     private fun requireRecent(file: File) = require(recentPackages().any { it.canonicalFile == file.canonicalFile }) { "对齐诊断已不存在" }
 
-    private fun manifest(trace: AlignmentTrace, context: AlignmentDiagnosticContext, frame: Bitmap?,
+    private fun manifest(trace: AlignmentTrace, context: AlignmentDiagnosticContext, frameSize: Pair<Int, Int>?,
         result: AlignmentResult?, terminal: String, artifacts: Map<String, Pair<Long, String>>, sourceComplete: Boolean) = buildJsonObject {
         put("schemaVersion", 1); put("requestId", trace.id); put("createdAtMillis", trace.createdAtMillis)
         put("sessionId", context.sessionId?.let(::JsonPrimitive) ?: JsonNull)
@@ -242,9 +276,10 @@ class AlignmentDiagnosticsStore(context: Context) {
         })
         put("map", Json.parseToJsonElement(Json.encodeToString(context.map)))
         put("floorKey", context.floorKey); put("captureSource", context.captureSource)
+        put("floorSelectedByIndicator", context.floorSelectedByIndicator)
         put("screenWidth", context.screenWidth); put("screenHeight", context.screenHeight)
-        put("frameWidth", frame?.width?.let(::JsonPrimitive) ?: JsonNull)
-        put("frameHeight", frame?.height?.let(::JsonPrimitive) ?: JsonNull)
+        put("frameWidth", frameSize?.first?.let(::JsonPrimitive) ?: JsonNull)
+        put("frameHeight", frameSize?.second?.let(::JsonPrimitive) ?: JsonNull)
         put("viewport", buildJsonObject {
             put("x", context.viewport.x); put("y", context.viewport.y)
             put("width", context.viewport.width); put("height", context.viewport.height)
@@ -291,6 +326,19 @@ class AlignmentDiagnosticsStore(context: Context) {
             put("bytes", info.first); put("sha256", info.second)
         }) } })
         val inputsAvailable = "captured.png" in artifacts && "reference.png" in artifacts
+        val floorEvents = trace.snapshot().filter { it.stage == "floor-indicator.template-source" }
+        val floorSelected = trace.snapshot().any { it.stage == "floor-indicator.selected" }
+        val floorReplayReady = sourceComplete && floorSelected && "floor-indicator.png" in artifacts &&
+            floorEvents.size == 5 && floorEvents.all { "floor-template-${it.labels.getValue("template")}" in artifacts }
+        put("floorIndicatorFormat", FloorIndicatorPolicy.VERSION)
+        put("floorIndicatorReplayReady", floorReplayReady)
+        put("floorIndicatorReplayUnavailableReason", when {
+            floorReplayReady -> ""
+            !trace.captureArtifacts -> "input-retention-disabled"
+            !sourceComplete -> "source-provenance-unavailable"
+            !floorSelected -> "not-selected; see-floor-indicator-events-for-disabled-input-error-or-cancellation"
+            else -> "indicator-or-template-inputs-incomplete"
+        })
         val readinessFrames = trace.snapshot().filter { it.stage == "readiness.frame" }
         val readinessReplayReady = sourceComplete && readinessFrames.isNotEmpty() && readinessFrames.all {
             "readiness-${it.measurements.getValue("attempt").toInt()}.argb" in artifacts
@@ -304,7 +352,7 @@ class AlignmentDiagnosticsStore(context: Context) {
             else -> "no-complete-readiness-samples"
         })
         val sourceAvailable = sourceComplete
-        val dimensionsMatch = frame != null && frame.width.toDouble() == context.viewport.width && frame.height.toDouble() == context.viewport.height
+        val dimensionsMatch = frameSize != null && frameSize.first.toDouble() == context.viewport.width && frameSize.second.toDouble() == context.viewport.height
         val replayReady = inputsAvailable && sourceAvailable && result != null && dimensionsMatch
         put("replayReady", replayReady)
         put("replayUnavailableReason", when {

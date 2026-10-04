@@ -72,10 +72,10 @@ class AutoMapOpenDiagnostics(context: Context) {
             "sampleStartedAtMs=$startedAtMs cleanViewport=$cleanViewport failure=$failure")
     }
     @Synchronized fun event(detail: String, reference: AutoMapOpenReference?, sessionId: String?, requestId: String? = null,
-        state: Map<String, String> = emptyMap()) {
+        state: Map<String, String> = emptyMap(), forceSnapshot: Boolean = false) {
         Log.i("IDVB-AutoMap", "run=$runId stage=$detail alignmentRequest=$requestId state=$state")
         if (closed || sessionId == null) return
-        if (snapshots >= 64) {
+        if (snapshots >= 64 && !forceSnapshot) {
             if (!snapshotLimitReported) {
                 snapshotLimitReported = true
                 Log.w("IDVB-AutoMap", "run=$runId stage=diagnostics.snapshot-limit detail=64-snapshots-retained; later events have logs only and cannot be spatially replayed")
@@ -114,11 +114,15 @@ class AutoMapOpenDiagnostics(context: Context) {
                         .put("sidebarAspectRatio", it.sidebarAspectRatio ?: JSONObject.NULL)
                         .put("pixels", JSONArray(it.signaturePixels.toList())) } ?: JSONObject.NULL)
                     .put("configuration", JSONObject().put("openThreshold", config.openThreshold).put("closeThreshold", config.closeThreshold)
+                        .put("comparisonBackend", AutoMapOpenNativeKernel.backend)
                         .put("openFrames", config.openFrames).put("closeFrames", config.closeFrames)
                         .put("maximumAttempts", config.maximumAttempts).put("retryCooldownMs", config.retryCooldownMs)
                         .put("maximumFrameAgeMs", config.maximumFrameAgeMs).put("sidebarWidthFraction", config.sidebarWidthFraction ?: JSONObject.NULL)
                         .put("intervalMs", interval).put("captureMethod", source)
                         .put("watchStrategy", "continuous-current-frame-independent-of-touch")
+                        .put("pollRecoveryIntervalMs", 350L)
+                        .put("pollRecoveryPolicy", "retry-prerequisites-while-consented-visible-and-outside-host-or-practice; capture-completion-owns-inflight-successor")
+                        .put("foregroundPolicy", "own-overlay-and-system-volume-windows-retain-underlying-app")
                         .put("nonAlignmentBudgetMs", if (source == "MEDIA_PROJECTION") AutoMapOpenTiming.NON_ALIGNMENT_BUDGET_MS else JSONObject.NULL)
                         .put("windowSearchScales", JSONArray(listOf(.85, 1.0, 1.15))).put("windowSearchStepCells", .5)
                         .put("intervalOrigin", "sample-request-start").put("preparedViewport", "same-unoccluded-capture-readiness-still-required"))
@@ -130,5 +134,9 @@ class AutoMapOpenDiagnostics(context: Context) {
         } }
     }
     @Synchronized fun clearFrames() { frames.clear(); captureEvents.clear() }
+    internal fun awaitIdle() {
+        if (writer.isShutdown) check(writer.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS))
+        else writer.submit {}.get(30, java.util.concurrent.TimeUnit.SECONDS)
+    }
     @Synchronized fun close() { closed = true; writer.shutdown() }
 }

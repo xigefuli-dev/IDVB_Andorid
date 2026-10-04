@@ -24,6 +24,7 @@ import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.SettingsSuggest
 import androidx.compose.material.icons.outlined.SystemUpdate
 import androidx.compose.material.icons.outlined.ViewModule
+import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -70,14 +71,20 @@ private val productEntries = listOf(
 )
 
 private val featureEntries = listOf(
+    SettingEntry("预设", "重新进入引导，选择使用预设", Icons.Outlined.SettingsSuggest, Ink),
     SettingEntry("通用", "外观、后台运行与基础选项", Icons.Outlined.SettingsSuggest, Ink),
     SettingEntry("视觉", "识别、地图与悬浮层显示", Icons.Outlined.Palette, Ink),
     SettingEntry("操作", "快捷操作、按键与无障碍", Icons.Outlined.PanToolAlt, Ink),
     SettingEntry("模板", "管理创建地图时使用的楼层模板", Icons.Outlined.ViewModule, Ink),
 )
 
+private val otherEntries = listOf(
+    SettingEntry("清理缓存", "清理非必要日志与截图等临时数据", Icons.Outlined.CleaningServices, Ink),
+)
+
 @Composable
 fun SettingsScreen(
+    onOpenPresets: () -> Unit = {},
     onOpenGeneral: () -> Unit = {},
     onOpenVision: () -> Unit = {},
     onOpenOperation: () -> Unit = {},
@@ -86,8 +93,10 @@ fun SettingsScreen(
     val context = LocalContext.current
     var showFeedback by rememberSaveable { mutableStateOf(false) }
     var showSponsor by rememberSaveable { mutableStateOf(false) }
+    var showClearCache by rememberSaveable { mutableStateOf(false) }
     if (showFeedback) FeedbackDialog(onDismiss = { showFeedback = false })
     if (showSponsor) SponsorDialog(onDismiss = { showSponsor = false })
+    if (showClearCache) ClearCacheDialog(onDismiss = { showClearCache = false })
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -145,11 +154,19 @@ fun SettingsScreen(
         Spacer(Modifier.height(22.dp))
         SettingSection("功能设置", featureEntries) {
             when (it.title) {
+                "预设" -> onOpenPresets()
                 "通用" -> onOpenGeneral()
                 "视觉" -> onOpenVision()
                 "操作" -> onOpenOperation()
                 "模板" -> onOpenTemplates()
                 else -> Toast.makeText(context, it.title + "设置：暂未实现", Toast.LENGTH_SHORT).show()
+            }
+        }
+        Spacer(Modifier.height(22.dp))
+        SettingSection("其他", otherEntries) {
+            when (it.title) {
+                "清理缓存" -> showClearCache = true
+                else -> Toast.makeText(context, it.title + "：暂未实现", Toast.LENGTH_SHORT).show()
             }
         }
         Spacer(Modifier.height(28.dp))

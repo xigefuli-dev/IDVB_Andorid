@@ -18,9 +18,17 @@ internal object VpsgFastSolver {
     data class Peak(val pitch: Double, val ratio: Double)
     data class Index(val width: Int, val height: Int, val k3: LongArray, val k5: LongArray,
         val prior: Peak, val edgeCount: Int,
-        val distance: FloatArray? = null, val edgePositions: IntArray? = null) {
+        val distance: FloatArray? = null, val edgePositions: IntArray? = null,
+        private val nativeDistanceStorage: java.nio.ByteBuffer? = null) {
         val wordsPerRow = (width + 63) / 64
-        val bytes: Long get() = (k3.size + k5.size) * 8L + (distance?.size ?: 0) * 4L + (edgePositions?.size ?: 0) * 4L
+        val stride4: LongArray by lazy { VpsgNativeKernel.prepareStride4(k3, width, height) }
+        val nativeK3 by lazy { VpsgNativeKernel.direct(k3) }
+        val nativeK5 by lazy { VpsgNativeKernel.direct(k5) }
+        val nativeStride4 by lazy { VpsgNativeKernel.direct(stride4) }
+        val nativeEdges by lazy { VpsgNativeKernel.direct(requireNotNull(edgePositions)) }
+        val nativeDistance by lazy { nativeDistanceStorage ?: VpsgNativeKernel.direct(requireNotNull(distance)) }
+        val bytes: Long get() = (k3.size + k5.size) * 16L + 8L * ((width + 255) / 256) * height * 8L +
+            (distance?.size ?: 0) * 8L + (nativeDistanceStorage?.capacity() ?: 0) + (edgePositions?.size ?: 0) * 8L
         fun hit(words: LongArray, x: Int, y: Int): Boolean =
             x >= 0 && y >= 0 && x < width && y < height &&
                 (words[y * wordsPerRow + (x ushr 6)] ushr (x and 63) and 1L) != 0L
@@ -51,7 +59,7 @@ internal object VpsgFastSolver {
             if (log.enabled) log.emit(AlignmentLogEvent("vpsg.scale.autocorrelation",
                 measurements = mapOf("firstLag" to 12.0, "lagStep" to 1.0, "absoluteMedian" to median),
                 thresholds = mapOf("minimumPeakExclusive" to .05, "harmonicStrength" to .80,
-                    "harmonicIntegerTolerance" to .15), series = mapOf("correlationByLag" to raw.toList())))
+                    "harmonicIntegerTolerance" to .15), series = mapOf("correlationByLag" to raw.asList())))
         }
 
         fun peak(minPitch: Double = 12.0, maxPitch: Double = Double.POSITIVE_INFINITY,
@@ -97,7 +105,7 @@ internal object VpsgFastSolver {
     }
 
     fun scale(live: Correlation, reference: Index, log: AlignmentLogSink = AlignmentLogSink.NONE,
-        maximumScale: Double = VpsgAlignmentTuning.MAX_SCALE): Double? {
+        maximumScale: Double = VpsgAlignmentTuning.MAX_SCALE, preferFundamental: Boolean = false): Double? {
         val t = VpsgAlignmentTuning
         val referenceReady = reference.edgeCount >= t.MIN_REFERENCE_EDGES &&
             reference.prior.pitch > t.MIN_PITCH && reference.prior.ratio >= t.MIN_PITCH_RATIO
@@ -109,9 +117,22 @@ internal object VpsgFastSolver {
                 AlignmentGate("reference-pitch-ratio", reference.prior.ratio, ">=", t.MIN_PITCH_RATIO, reference.prior.ratio >= t.MIN_PITCH_RATIO))))
         if (!referenceReady) return null
         live.logEvidence(log)
-        val peak = log.measure("vpsg.scale.live-autocorrelation") {
+        val primary = log.measure("vpsg.scale.live-autocorrelation") {
             live.peak(reference.prior.pitch * t.MIN_SCALE, reference.prior.pitch * maximumScale, true)
         }
+        val fundamentals = if (preferFundamental) live.alternatives(reference.prior.pitch * t.MIN_SCALE,
+            reference.prior.pitch * maximumScale).filter {
+                val multiple = primary.pitch / it.pitch
+                val integer = round(multiple)
+                integer >= 2 && abs(multiple - integer) < .15 && it.ratio >= .80 * primary.ratio
+            } else emptyList()
+        val peak = fundamentals.minByOrNull { it.pitch } ?: primary
+        if (preferFundamental) log.emit(AlignmentLogEvent("vpsg.scale.fundamental-prior", measurements = mapOf(
+            "primaryPitch" to primary.pitch, "selectedPitch" to peak.pitch, "selectedRatio" to peak.ratio),
+            thresholds = mapOf("minimumModeRatio" to 2.0, "integerHarmonicTolerance" to .15,
+                "minimumRelativeFundamentalStrength" to .80),
+            series = mapOf("supportedFundamentalPitchRatio" to fundamentals.flatMap { listOf(it.pitch, it.ratio) }),
+            labels = mapOf("policy" to "strong-fundamental-before-harmonics-v2; weak-shorter-peaks-remain-fallback-proposals; full-pose-and-reverse-verification-required")))
         val scale = peak.pitch / reference.prior.pitch
         val gates = listOf(
             AlignmentGate("live-pitch", peak.pitch, ">", t.MIN_PITCH, peak.pitch > t.MIN_PITCH),
@@ -127,6 +148,18 @@ internal object VpsgFastSolver {
 
     /** Identical integer grid scores to scalar K3 membership; nine planes count up to 256 points. */
     fun scoreGrid(points: List<Point>, index: Index, minX: Int, maxX: Int,
+        minY: Int, maxY: Int, stride: Int = 4): IntArray {
+        require(points.size <= 256 && stride > 0)
+        if (maxX < minX || maxY < minY) return IntArray(0)
+        Math.multiplyExact((maxX - minX) / stride + 1, (maxY - minY) / stride + 1)
+        if (VpsgNativeKernel.available) {
+            require(index.k3.size == index.wordsPerRow * index.height)
+            return VpsgNativeKernel.scoreGrid(points, index, minX, maxX, minY, maxY, stride)
+        }
+        return scoreGridManaged(points, index, minX, maxX, minY, maxY, stride)
+    }
+
+    internal fun scoreGridManaged(points: List<Point>, index: Index, minX: Int, maxX: Int,
         minY: Int, maxY: Int, stride: Int = 4): IntArray {
         require(points.size <= 256 && stride > 0)
         if (maxX < minX || maxY < minY) return IntArray(0)
@@ -171,7 +204,7 @@ internal object VpsgFastSolver {
 
     private data class Vote(val x: Int, val y: Int, val hits: Int)
     fun translate(points: List<Point>, index: Index, scale: Double,
-        log: AlignmentLogSink = AlignmentLogSink.NONE): List<Pose> {
+        log: AlignmentLogSink = AlignmentLogSink.NONE, minimumRivalDistance: Double = 10.0): List<Pose> {
         if (points.isEmpty()) return emptyList()
         val scaled = points.take(150).map { Point(round(it.x / scale).toInt(), round(it.y / scale).toInt()) }
         val xs = scaled.map { it.x }.sorted(); val ys = scaled.map { it.y }.sorted()
@@ -184,7 +217,7 @@ internal object VpsgFastSolver {
             "maxX" to maxX.toDouble(), "minY" to minY.toDouble(), "maxY" to maxY.toDouble()),
             thresholds = mapOf("maximumVotes" to 150.0, "minimumConsensus" to .5, "gridStride" to 4.0,
                 "poolCapacity" to 32.0, "minimumPoolHits" to 5.0, "polishRadius" to 2.0,
-                "distinctRadius" to 2.0, "rivalDistance" to 10.0, "minimumRivalHits" to 3.0)))
+                "distinctRadius" to 2.0, "rivalDistance" to minimumRivalDistance, "minimumRivalHits" to 3.0)))
         val scores = log.measure("vpsg.translation.score-grid") { scoreGrid(scaled, index, minX, maxX, minY, maxY) }
         val columns = (maxX - minX) / 4 + 1
         log.attachOwned("translation-scores.i32le") {
@@ -196,6 +229,21 @@ internal object VpsgFastSolver {
             "columns" to columns.toDouble(), "rows" to ((maxY - minY) / 4 + 1).toDouble(),
             "originX" to minX.toDouble(), "originY" to minY.toDouble(), "stride" to 4.0),
             labels = mapOf("artifact" to "translation-scores.i32le", "encoding" to "row-major signed int32 little-endian")))
+        if (VpsgNativeKernel.available) {
+            val values = VpsgNativeKernel.translationCandidates(scaled, index, scores, minX, maxX, minY, maxY, scale, minimumRivalDistance)
+            val result = (1 until values.size step 3).map { Pose(scale, -values[it].toInt() * scale,
+                -values[it + 1].toInt() * scale, values[it + 2]) }
+            logTranslation(log, scores.size, values[0].toInt(), result)
+            return result
+        }
+        val (poolSize, result) = translationCandidatesManaged(scaled, index, scores, minX, maxX, minY, maxY, scale, minimumRivalDistance)
+        logTranslation(log, scores.size, poolSize, result)
+        return result
+    }
+
+    internal fun translationCandidatesManaged(scaled: List<Point>, index: Index, scores: IntArray,
+        minX: Int, maxX: Int, minY: Int, maxY: Int, scale: Double, minimumRivalDistance: Double = 10.0): Pair<Int, List<Pose>> {
+        val columns = (maxX - minX) / 4 + 1
         val pool = ArrayList<Vote>(32)
         for (i in scores.indices) {
             val hits = scores[i]
@@ -219,27 +267,31 @@ internal object VpsgFastSolver {
         val distinct = ArrayList<Vote>()
         for (v in pool.map(::polish).sortedByDescending { it.hits })
             if (distinct.none { abs(it.x - v.x) <= 2 && abs(it.y - v.y) <= 2 }) distinct += v
-        if (distinct.isEmpty()) return emptyList()
+        if (distinct.isEmpty()) return pool.size to emptyList()
         val best = distinct.first()
         // Keep a genuine distant rival even if all top-32 peaks occupy the same basin.
-        if (distinct.none { hypot((it.x - best.x) * scale, (it.y - best.y) * scale) >= 10 }) {
+        if (distinct.none { hypot((it.x - best.x) * scale, (it.y - best.y) * scale) >= minimumRivalDistance }) {
             var rival: Vote? = null
             for (i in scores.indices) {
                 val x = minX + i % columns * 4; val y = minY + i / columns * 4
-                if (hypot((x - best.x) * scale, (y - best.y) * scale) < 10) continue
+                val polishAllowance = if (minimumRivalDistance > 10) 2 * kotlin.math.sqrt(2.0) * scale else 0.0
+                if (hypot((x - best.x) * scale, (y - best.y) * scale) < minimumRivalDistance + polishAllowance) continue
                 if (scores[i] >= 3 && scores[i] > (rival?.hits ?: 0)) rival = Vote(x, y, scores[i])
             }
             rival?.let(::polish)?.let { v ->
-                if (hypot((v.x - best.x) * scale, (v.y - best.y) * scale) >= 10) distinct += v
+                if (hypot((v.x - best.x) * scale, (v.y - best.y) * scale) >= minimumRivalDistance) distinct += v
             }
         }
         val result = distinct.map { Pose(scale, -it.x * scale, -it.y * scale, it.hits.toDouble()) }
+        return pool.size to result
+    }
+
+    private fun logTranslation(log: AlignmentLogSink, positions: Int, poolSize: Int, result: List<Pose>) {
         if (log.enabled) log.emit(AlignmentLogEvent("vpsg.translation.candidates", measurements = mapOf(
-            "evaluatedGridPositions" to scores.size.toDouble(), "poolSize" to pool.size.toDouble(),
+            "evaluatedGridPositions" to positions.toDouble(), "poolSize" to poolSize.toDouble(),
             "candidateCount" to result.size.toDouble()), series = mapOf(
                 "scale" to result.map { it.scale }, "offsetX" to result.map { it.x },
                 "offsetY" to result.map { it.y }, "hits" to result.map { it.score })))
-        return result
     }
 
     fun score(points: List<Point>, index: Index, pose: Pose, incumbent: Double = -1.0): Double {
@@ -256,8 +308,20 @@ internal object VpsgFastSolver {
     }
 
     fun refine(points: List<Point>, index: Index, seed: Pose, width: Int, height: Int,
-        log: AlignmentLogSink = AlignmentLogSink.NONE, maximumScale: Double = 2.5): Pose {
-        val cx = width / 2.0; val cy = height / 2.0
+        log: AlignmentLogSink = AlignmentLogSink.NONE, maximumScale: Double = 2.5,
+        centerX: Double = width / 2.0, centerY: Double = height / 2.0): Pose {
+        if (!VpsgNativeKernel.available) return refineManaged(points, index, seed, width, height, log, maximumScale, centerX, centerY)
+        require(index.k3.size == index.wordsPerRow * index.height && index.k5.size == index.k3.size)
+        val values = VpsgNativeKernel.refine(points, index, seed, centerX, centerY, maximumScale, log.enabled)
+        val best = Pose(values[0], values[1], values[2], values[3])
+        logRefinement(log, seed, best, values[4].toInt(), values.asList().subList(5, values.size), maximumScale)
+        return best
+    }
+
+    internal fun refineManaged(points: List<Point>, index: Index, seed: Pose, width: Int, height: Int,
+        log: AlignmentLogSink = AlignmentLogSink.NONE, maximumScale: Double = 2.5,
+        centerX: Double = width / 2.0, centerY: Double = height / 2.0): Pose {
+        val cx = centerX; val cy = centerY
         var best = seed.copy(score = score(points, index, seed))
         // Keep the complete trace in primitive storage; boxing every probe on the
         // interaction thread creates thousands of short-lived lists per compact frame.
@@ -306,6 +370,12 @@ internal object VpsgFastSolver {
         val fine = best
         for (ds in doubleArrayOf(-.005, 0.0, .005)) for (dx in doubleArrayOf(-1.5, 0.0, 1.5))
             for (dy in doubleArrayOf(-1.5, 0.0, 1.5)) probe(fine, ds, dx, dy)
+        logRefinement(log, seed, best, evaluated, probes?.asList()?.subList(0, probeValues).orEmpty(), maximumScale)
+        return best
+    }
+
+    private fun logRefinement(log: AlignmentLogSink, seed: Pose, best: Pose, evaluated: Int,
+        probes: List<Double>, maximumScale: Double) {
         if (log.enabled) log.emit(AlignmentLogEvent("vpsg.refine.discrete", measurements = mapOf(
             "seedScale" to seed.scale, "seedX" to seed.x, "seedY" to seed.y,
             "scale" to best.scale, "offsetX" to best.x, "offsetY" to best.y,
@@ -315,9 +385,8 @@ internal object VpsgFastSolver {
                 "fineTranslationStep" to 1.5),
             series = mapOf("coarseScaleDeltas" to listOf(-.020, -.015, 0.0, .015, .020),
                 "axisScaleDeltas" to listOf(-.020, -.010, -.005, .005, .010, .020),
-                "fineScaleDeltas" to listOf(-.005, 0.0, .005), "probesScaleXYScore" to probes!!.asList().subList(0, probeValues)),
+                "fineScaleDeltas" to listOf(-.005, 0.0, .005), "probesScaleXYScore" to probes),
             labels = mapOf("scoreNegativeOne" to "pruned-by-incumbent-upper-bound")))
-        return best
     }
 
     private fun scoreCoordinates(xs: IntArray, ys: IntArray, index: Index, incumbent: Double): Double {

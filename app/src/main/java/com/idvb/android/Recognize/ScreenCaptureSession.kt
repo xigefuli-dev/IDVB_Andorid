@@ -190,6 +190,14 @@ class ScreenCaptureSession(private val context: Context) {
         pending.toList().forEach { it.finish(Result.failure(java.util.concurrent.CancellationException("截图请求已取消"))) }
     }
 
+    /** Drop map-owned scratch after cancelled consumers exit. Keep the one-use projection alive. */
+    @Synchronized fun releaseMapBuffers() {
+        cancelPending()
+        latest?.close(); latest = null
+        packedPixels = null
+        deliveredAutoSequence = -1L
+    }
+
     private fun resize(w: Int, h: Int) {
         if (w == width && h == height) return
         val current = display ?: return

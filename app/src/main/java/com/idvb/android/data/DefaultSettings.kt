@@ -8,6 +8,7 @@ object DefaultSettings {
     const val LOCKED = false
     const val HOLD_TO_ACTIVATE = false
     const val AUTO_DETECT_MAP_OPEN = false
+    const val AUTO_FLOOR = true
     const val ALIGNMENT_REPLAY_INPUTS = true
     const val AUTO_START_ON_BOOT = false
     const val DEBUG_MODE = false

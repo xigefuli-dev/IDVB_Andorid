@@ -72,13 +72,13 @@ class SideEntranceRecognizer(
         val scanFloorByClass = catalog.classes.associate { it.id to it.scanFloorKey }
         val inputs = buildInputs(modeMaps, profile, scanFloorByClass)
         val inputsAt = System.nanoTime()
-        progress?.invoke(.10)
-        val eligibleMapCount = modeMaps.count { map ->
-            scanFloor(map, scanFloorByClass[map.classId])?.let {
-                repository.loadSideDoors(map.id, it.key).isNotEmpty()
-            } == true
-        }
         try {
+            progress?.invoke(.10)
+            val eligibleMapCount = modeMaps.count { map ->
+                scanFloor(map, scanFloorByClass[map.classId])?.let {
+                    repository.loadSideDoors(map.id, it.key).isNotEmpty()
+                } == true
+            }
             val grayFrame = CvImages.bitmapToGray(frame)
             try {
                 GateTemplateDetector.fromAssets(appContext).use { gateDetector ->
@@ -165,7 +165,9 @@ class SideEntranceRecognizer(
         profile: SideEntranceScanConfig,
         scanFloorByClass: Map<String, String?>,
     ): List<SideEntranceScanInput> = buildList {
+        try {
         maps.forEach { map ->
+            com.idvb.android.alignment.AlignmentCancellation.checkpoint("scan.side.input-map")
             val floor = scanFloor(map, scanFloorByClass[map.classId]) ?: return@forEach
             val assets = repository.loadRecognitionAssets(map.id, floor)
             val gate = repository.loadSideDoors(map.id, floor.key).firstOrNull() ?: return@forEach
@@ -221,6 +223,10 @@ class SideEntranceRecognizer(
             } finally {
                 recognition.release()
             }
+        }
+        } catch (failure: Throwable) {
+            forEach { it.featureTemplate.release() }
+            throw failure
         }
     }
 
