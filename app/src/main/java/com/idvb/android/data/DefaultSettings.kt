@@ -16,7 +16,7 @@ object DefaultSettings {
     const val MANUAL_MAP_SELECTION = false
     const val SHOW_UNCONFIRMED_CANDIDATES = true
     const val RECOGNITION_DIAGNOSTICS = true
-    const val SHOW_ALIGNMENT_OUTPUT = false
+    const val SHOW_ALIGNMENT_OUTPUT = true
     const val CONSTRAIN_GUIDE_TO_SCREEN = false
     const val REMOVE_GUIDE_BACKGROUND = false
     const val SHOW_ROUTES = true

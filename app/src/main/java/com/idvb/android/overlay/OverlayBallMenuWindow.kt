@@ -7,6 +7,7 @@ import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.TextView
 import com.idvb.android.idvm.ClassRecord
 
@@ -24,6 +25,63 @@ class OverlayBallMenuWindow(
     internal val submenuPanel: View? get() = submenuView
 
     fun isSubmenuVisible(): Boolean = submenuWindow.isAdded()
+
+    /** Keep the aligned guide in its own window; this panel never edits its geometry. */
+    fun showOpacity(initialOpacity: Float, onChanged: (Float) -> Unit, onConfirmed: () -> Unit) {
+        hideSubmenu()
+        val items = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(12).toFloat()
+                setColor(Color.argb(242, 31, 35, 38))
+                setStroke(dp(1), Color.argb(160, 112, 226, 157))
+            }
+        }
+        fun label(value: String) = TextView(context).apply {
+            text = value
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setPadding(0, dp(8), 0, dp(8))
+        }
+        items.addView(label("小抄显示调整"))
+        items.addView(label("自动小抄模式仅支持调整透明度"))
+        val valueLabel = label("")
+        fun showValue(progress: Int) { valueLabel.text = "不透明度：$progress%" }
+        val slider = SeekBar(context).apply {
+            contentDescription = "小抄不透明度"
+            min = 10
+            max = 100
+            progress = (initialOpacity.coerceIn(.1f, 1f) * 100).toInt()
+            showValue(progress)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                    showValue(progress)
+                    if (fromUser) onChanged(progress / 100f)
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar) = Unit
+                override fun onStopTrackingTouch(seekBar: SeekBar) = Unit
+            })
+        }
+        items.addView(valueLabel)
+        items.addView(slider)
+        items.addView(label("重置透明度").apply {
+            minHeight = dp(48)
+            setOnClickListener {
+                val value = com.idvb.android.data.OverlayPrefs.DEFAULT_OPACITY
+                slider.progress = (value * 100).toInt()
+                onChanged(value)
+            }
+        })
+        items.addView(label("确认").apply {
+            minHeight = dp(48)
+            setOnClickListener { hideSubmenu(); onConfirmed() }
+        })
+        val scroll = ScrollView(context).apply { addView(items) }
+        submenuView = scroll
+        positionSubmenu(scroll)
+        submenuWindow.add(scroll, locked = false)
+    }
 
     fun toggleClasses(classes: List<ClassRecord>, selectedId: String?, onSelected: (ClassRecord) -> Unit) {
         if (isSubmenuVisible()) { hideSubmenu(); return }

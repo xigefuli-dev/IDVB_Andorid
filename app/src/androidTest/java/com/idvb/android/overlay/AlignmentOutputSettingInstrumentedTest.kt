@@ -20,7 +20,7 @@ import java.util.UUID
 class AlignmentOutputSettingInstrumentedTest {
 
     @Test
-    fun showAlignmentOutputDefaultsToFalseAndPersistsUserChoices() {
+    fun showAlignmentOutputDefaultsToTrueAndPersistsUserChoices() {
         val target = InstrumentationRegistry.getInstrumentation().targetContext
         val name = "alignment-output-setting-${UUID.randomUUID()}"
         val isolated = object : ContextWrapper(target) {
@@ -30,11 +30,18 @@ class AlignmentOutputSettingInstrumentedTest {
         }
         try {
             val prefs = OverlayPrefs(isolated)
-            assertFalse("Default must be false", prefs.showAlignmentOutput)
+            assertTrue("Default must be true", prefs.showAlignmentOutput)
             prefs.showAlignmentOutput = true
             assertTrue(OverlayPrefs(isolated).showAlignmentOutput)
             prefs.showAlignmentOutput = false
             assertFalse(OverlayPrefs(isolated).showAlignmentOutput)
+            assertTrue(prefs.completeFeatureGuide("scan-preset-v1", "automatic"))
+            assertTrue(OverlayPrefs(isolated).showAlignmentOutput)
+            prefs.showAlignmentOutput = false
+            assertTrue(prefs.completeFeatureGuide("scan-preset-v1", "traditional"))
+            assertFalse(OverlayPrefs(isolated).showAlignmentOutput)
+            assertTrue(prefs.completeFeatureGuide("scan-preset-v1", "automatic"))
+            assertTrue(OverlayPrefs(isolated).showAlignmentOutput)
         } finally {
             target.deleteSharedPreferences(name)
         }

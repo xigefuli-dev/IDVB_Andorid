@@ -42,6 +42,9 @@ class OverlayPrefs(context: Context) {
             editor.putString("search_button_action", SearchButtonAction.SCAN_MAP.name)
                 .putString("eye_button_action", preset.eyeAction.name)
                 .putBoolean("auto_detect_map_open_enabled", preset.autoDetect)
+            if (preset == com.idvb.android.onboarding.ScanPreset.AUTOMATIC) {
+                editor.putBoolean("show_alignment_output", true)
+            }
         }
         choice.captureMethod?.let { method ->
             editor.putString("screen_capture_method", method.name)

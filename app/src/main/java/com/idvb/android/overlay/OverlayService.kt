@@ -2149,6 +2149,32 @@ class OverlayService : Service() {
 
     private fun enterFreeAdjustMode() {
         if (adjustView != null || blueprintView != null || candidateView != null) return
+        if (AppServices.prefs.autoDetectMapOpenEnabled) {
+            val initialOpacity = AppServices.prefs.opacity
+            ballMenu?.showOpacity(initialOpacity, onChanged = { opacity ->
+                val previousOpacity = AppServices.prefs.opacity
+                AppServices.prefs.opacity = opacity
+                guideWindow.opacity = opacity
+                lastAlignmentRequestId?.let {
+                    AppServices.alignmentDiagnostics.recordLifecycle(it, "display.opacity-adjusted",
+                        "automatic-opacity-only; geometry-and-ownership-preserved",
+                        mapOf("previousOpacity" to previousOpacity.toDouble(), "opacity" to opacity.toDouble()),
+                        sessionLogs.sessionId)
+                }
+            }, onConfirmed = {
+                autoDiagnostics.event("guide-opacity-adjustment", autoReference, sessionLogs.sessionId,
+                    lastAlignmentRequestId, state = mapOf(
+                        "initialOpacity" to initialOpacity.toString(),
+                        "opacity" to AppServices.prefs.opacity.toString(),
+                        "autoGuideOwned" to autoGuideOwned.toString(),
+                        "manualSuppressed" to autoDetector?.manualSuppressed.toString(),
+                        "alignedBounds" to alignedGuideBounds?.toShortString().orEmpty(),
+                        "alignedViewport" to alignedGuideViewport?.toShortString().orEmpty()))
+                scheduleAutoMapOpen(0L)
+                notifyOverlay("小抄透明度已保存")
+            })
+            return
+        }
         cancelAlignment()
         if (currentMap == null) {
             notifyOverlay("请先锁定地图")
