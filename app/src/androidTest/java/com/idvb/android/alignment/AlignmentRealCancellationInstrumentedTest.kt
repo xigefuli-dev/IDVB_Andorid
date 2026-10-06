@@ -49,7 +49,9 @@ class AlignmentRealCancellationInstrumentedTest {
                 }
                 assertFalse(Thread.currentThread().isInterrupted)
                 AlignmentPackageReplay.open(context, archive, supplements).use { replay ->
-                    assertTrue("A new request must still complete", replay.run().passed)
+                    val completed = replay.run()
+                    assertEquals("A fresh request after actual cancellation must reach its expected outcome: ${completed.result}",
+                        replay.testCase.expectedOutcome, completed.result.outcome)
                 }
             }.get(15, TimeUnit.SECONDS)
         } finally { worker.shutdownNow() }

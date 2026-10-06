@@ -21,7 +21,7 @@ class Vpsg(private val repository: MapRepository) : AlignmentMethod {
         val prebuilt = repository.loadRecognitionAssets(map.id, floor).prebuiltStructureLine ?: return
         val lines = VpsgReferenceGeometry.prepare(repository, map, floor, prebuilt, log)
         val proposals = VpsgReferenceGeometry.proposalLine(lines)
-        val indices = listOf(lines, proposals).distinctBy { it.file }.map {
+        val indices = listOf(lines, proposals, VpsgReferenceGeometry.structuralLine(lines), VpsgReferenceGeometry.precisionLine(lines)).distinctBy { it.file }.map {
             VpsgPreparedIndex.load(it.file, "${map.mapVersion}|${floor.prebuiltStructureLine}", log)
         }
         for (index in indices) {
@@ -57,6 +57,8 @@ class Vpsg(private val repository: MapRepository) : AlignmentMethod {
         val selected = VpsgLineScanner(repository).alignSelected(
             request.frame, request.viewport, request.map, request.floor, lines, decisionLog,
             proposalLines = VpsgReferenceGeometry.proposalLine(lines),
+            structuralLines = VpsgReferenceGeometry.structuralLine(lines),
+            precisionLines = VpsgReferenceGeometry.precisionLine(lines),
         )
         if (selected != null && (request.floorSelectedByIndicator || request.map.floors.size == 1 ||
                 min(selected.evidence.visibleSupport ?: 0.0, selected.evidence.referenceSupport ?: 0.0) >= .90)) return selected
@@ -104,7 +106,9 @@ class Vpsg(private val repository: MapRepository) : AlignmentMethod {
             branch.attach("reference.png") { preparedReference.file.readBytes() }
             val fit = log.measure("vpsg.floor-diagnosis.total") {
                 VpsgLineScanner(repository).alignSelected(request.frame, request.viewport, request.map, floor, preparedReference, branch,
-                    proposalLines = VpsgReferenceGeometry.proposalLine(preparedReference))
+                    proposalLines = VpsgReferenceGeometry.proposalLine(preparedReference),
+                    structuralLines = VpsgReferenceGeometry.structuralLine(preparedReference),
+                    precisionLines = VpsgReferenceGeometry.precisionLine(preparedReference))
             }
             log.emit(AlignmentLogEvent("vpsg.floor-diagnosis.result", if (fit == null) "rejected" else "verified",
                 labels = mapOf("floorKey" to floor.key, "referenceArtifact" to "floor-$index-reference.png",

@@ -151,6 +151,8 @@ internal object VpsgLiveExtractor {
             if (visibilityScopedReverse) log.measure("vpsg.extract.marker-exclusion") {
                 excludeRedMarkers(hsv, exclusion, log, markerRed.takeUnless { it.empty() })
                 excludePlayerMarkers(hsv, exclusion, log, markerYellow.takeUnless { it.empty() })
+                excludeNavigationArrows(hsv, exclusion, log)
+                log.measure("vpsg.extract.compound-annotations") { excludeCompoundAnnotations(hsv, exclusion, log) }
             }
             Imgproc.dilate(exclusion, dilatedExclusion, k5)
             if (visibilityScopedReverse) VpsgMaskEvidence.attach(log, "occlusion-mask.gray8", dilatedExclusion)
@@ -333,6 +335,125 @@ internal object VpsgLiveExtractor {
                     "componentXYWHAreaExcluded" to components),
                 labels = mapOf("artifact" to "occlusion-mask.gray8", "policy" to "small-red-markers-are-occluded-not-structure")))
         } finally { if (prepared == null) low.release(); high.release(); labels.release(); stats.release(); centroids.release() }
+    }
+
+    /** A repeated chain of small yellow chevrons is live navigation, not a wall or door.
+     * Isolated diagonal door ticks remain evidence. Use spatial buckets so work is bounded
+     * by local neighbors, with cancellation between component and chain operations. */
+    private fun excludeNavigationArrows(hsv: Mat, exclusion: Mat, log: AlignmentLogSink) {
+        val seed = Mat(); val labels = Mat(); val stats = Mat(); val centers = Mat()
+        data class Arrow(val x: Int, val y: Int, val w: Int, val h: Int, val area: Int) {
+            val cx get() = x + w / 2; val cy get() = y + h / 2
+        }
+        try {
+            Core.inRange(hsv, Scalar(18.0, 40.0, 140.0), Scalar(38.0, 255.0, 255.0), seed)
+            AlignmentCancellation.checkpoint("vpsg.extract.navigation-components.before")
+            val count = Imgproc.connectedComponentsWithStats(seed, labels, stats, centers)
+            AlignmentCancellation.checkpoint("vpsg.extract.navigation-components.after")
+            val data = IntArray(count * Imgproc.CC_STAT_MAX).also { stats.get(0, 0, it) }
+            val arrows = ArrayList<Arrow>(); val records = ArrayList<Double>()
+            for (i in 1 until count) {
+                AlignmentCancellation.checkpoint("vpsg.extract.navigation-component")
+                val at = i * Imgproc.CC_STAT_MAX
+                val arrow = Arrow(data[at + Imgproc.CC_STAT_LEFT], data[at + Imgproc.CC_STAT_TOP],
+                    data[at + Imgproc.CC_STAT_WIDTH], data[at + Imgproc.CC_STAT_HEIGHT], data[at + Imgproc.CC_STAT_AREA])
+                val eligible = arrow.w in 3..14 && arrow.h in 3..14 && arrow.area in 3..90
+                records.addAll(listOf(arrow.x.toDouble(), arrow.y.toDouble(), arrow.w.toDouble(),
+                    arrow.h.toDouble(), arrow.area.toDouble(), if (eligible) 1.0 else 0.0))
+                if (eligible) arrows += arrow
+            }
+            val buckets = arrows.indices.groupBy { arrows[it].cx / 24 to arrows[it].cy / 24 }
+            val seen = BooleanArray(arrows.size); val chains = ArrayList<Double>()
+            for (start in arrows.indices) {
+                if (seen[start]) continue
+                val members = ArrayList<Int>(); val queue = java.util.ArrayDeque<Int>()
+                seen[start] = true; queue.add(start)
+                while (queue.isNotEmpty()) {
+                    AlignmentCancellation.checkpoint("vpsg.extract.navigation-chain")
+                    val current = queue.removeFirst(); members += current; val a = arrows[current]
+                    for (by in a.cy / 24 - 1..a.cy / 24 + 1) for (bx in a.cx / 24 - 1..a.cx / 24 + 1) {
+                        for (next in buckets[bx to by].orEmpty()) {
+                            AlignmentCancellation.checkpoint("vpsg.extract.navigation-neighbor")
+                            val b = arrows[next]; val dx = a.cx - b.cx; val dy = a.cy - b.cy
+                            if (!seen[next] && dx * dx + dy * dy <= 24 * 24) { seen[next] = true; queue.add(next) }
+                        }
+                    }
+                }
+                val left = members.minOf { arrows[it].x }; val top = members.minOf { arrows[it].y }
+                val right = members.maxOf { arrows[it].x + arrows[it].w }; val bottom = members.maxOf { arrows[it].y + arrows[it].h }
+                val navigation = members.size >= 4 && maxOf(right - left, bottom - top) >= 36
+                chains.addAll(listOf(left.toDouble(), top.toDouble(), (right - left).toDouble(),
+                    (bottom - top).toDouble(), members.size.toDouble(), if (navigation) 1.0 else 0.0))
+                if (navigation) for (member in members) {
+                    val a = arrows[member]
+                    Imgproc.rectangle(exclusion, Point((a.x - 2).toDouble(), (a.y - 2).toDouble()),
+                        Point((a.x + a.w + 1).toDouble(), (a.y + a.h + 1).toDouble()), Scalar.all(255.0), -1)
+                }
+            }
+            log.emit(AlignmentLogEvent("vpsg.extract.navigation-evidence", "yellow-chevron-chain-v1",
+                thresholds = mapOf("minimumWidth" to 3.0, "maximumWidth" to 14.0, "minimumHeight" to 3.0,
+                    "maximumHeight" to 14.0, "minimumArea" to 3.0, "maximumArea" to 90.0,
+                    "neighborDistancePixels" to 24.0, "minimumChainMembers" to 4.0, "minimumChainSpan" to 36.0, "padding" to 2.0),
+                series = mapOf("hsvMin" to listOf(18.0, 40.0, 140.0), "hsvMax" to listOf(38.0, 255.0, 255.0),
+                    "componentXYWHAreaEligible" to records, "chainXYWHCountExcluded" to chains),
+                labels = mapOf("artifact" to "occlusion-mask.gray8", "policy" to "measured-repeated-small-yellow-navigation-chain-is-occluded; isolated-door-ticks-preserved")))
+        } finally { seed.release(); labels.release(); stats.release(); centers.release() }
+    }
+
+    /** Filled compound map annotations (chests, numbers) are neither walls nor known floor.
+     * Normalize dimensions/area to the actual capture extent; sparse door ticks retain evidence. */
+    private fun excludeCompoundAnnotations(hsv: Mat, exclusion: Mat, log: AlignmentLogSink) {
+        val seed = Mat(); val labels = Mat(); val stats = Mat(); val centers = Mat()
+        val unit = minOf(hsv.cols(), hsv.rows()) / 875.0
+        val kernelSize = (3 * unit).toInt().coerceAtLeast(1).let { if (it % 2 == 0) it + 1 else it }
+        val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(kernelSize.toDouble(), kernelSize.toDouble()))
+        val records = ArrayList<Double>()
+        try {
+            Core.inRange(hsv, Scalar(18.0, 40.0, 140.0), Scalar(38.0, 255.0, 255.0), seed)
+            Imgproc.morphologyEx(seed, seed, Imgproc.MORPH_CLOSE, kernel)
+            AlignmentCancellation.checkpoint("vpsg.extract.annotation-components.before")
+            val count = Imgproc.connectedComponentsWithStats(seed, labels, stats, centers)
+            AlignmentCancellation.checkpoint("vpsg.extract.annotation-components.after")
+            val data = IntArray(count * Imgproc.CC_STAT_MAX).also { stats.get(0, 0, it) }
+            val holes = IntArray(count)
+            val contours = ArrayList<MatOfPoint>(); val hierarchy = Mat(); val contourInput = seed.clone()
+            try {
+                Imgproc.findContours(contourInput, contours, hierarchy, Imgproc.RETR_CCOMP, Imgproc.CHAIN_APPROX_SIMPLE)
+                for (index in contours.indices) {
+                    AlignmentCancellation.checkpoint("vpsg.extract.annotation-topology")
+                    val parent = hierarchy.get(0, index)[3].toInt()
+                    if (parent < 0 || Imgproc.contourArea(contours[index]) < maxOf(1.0, unit * unit)) continue
+                    val point = contours[parent].toArray().first()
+                    val component = labels.get(point.y.toInt(), point.x.toInt())[0].toInt()
+                    if (component in 1 until count) holes[component]++
+                }
+            } finally { contours.forEach(MatOfPoint::release); hierarchy.release(); contourInput.release() }
+            val padding = kotlin.math.ceil(3 * unit).toInt()
+            for (i in 1 until count) {
+                AlignmentCancellation.checkpoint("vpsg.extract.annotation-component")
+                val at = i * Imgproc.CC_STAT_MAX
+                val x = data[at + Imgproc.CC_STAT_LEFT]; val y = data[at + Imgproc.CC_STAT_TOP]
+                val w = data[at + Imgproc.CC_STAT_WIDTH]; val h = data[at + Imgproc.CC_STAT_HEIGHT]
+                val area = data[at + Imgproc.CC_STAT_AREA]
+                val density = area.toDouble() / (w * h)
+                val annotation = area >= 80 * unit * unit && area <= 900 * unit * unit &&
+                    w >= 4 * unit && h >= 4 * unit && w <= maxOf(40.0, 40 * unit) && h <= maxOf(40.0, 40 * unit) &&
+                    maxOf(w, h).toDouble() / minOf(w, h) <= 2.6 && density >= .20 && holes[i] >= 1
+                records.addAll(listOf(x.toDouble(), y.toDouble(), w.toDouble(), h.toDouble(), area.toDouble(),
+                    density, holes[i].toDouble(), if (annotation) 1.0 else 0.0))
+                if (annotation) Imgproc.rectangle(exclusion, Point((x - padding).toDouble(), (y - padding).toDouble()),
+                    Point((x + w + padding - 1).toDouble(), (y + h + padding - 1).toDouble()), Scalar.all(255.0), -1)
+            }
+            log.emit(AlignmentLogEvent("vpsg.extract.annotation-evidence", "compound-yellow-topology-v2",
+                measurements = mapOf("dimensionUnit" to unit, "captureMinimumDimension" to minOf(hsv.cols(), hsv.rows()).toDouble()),
+                thresholds = mapOf("normalizationDimension" to 875.0, "minimumArea" to 80 * unit * unit,
+                    "maximumArea" to 900 * unit * unit, "minimumDimension" to 4 * unit, "maximumDimension" to maxOf(40.0, 40 * unit),
+                    "minimumHoles" to 1.0, "minimumHoleArea" to maxOf(1.0, unit * unit),
+                    "maximumAspectRatio" to 2.6, "minimumDensity" to .20, "closingKernel" to kernelSize.toDouble(), "padding" to padding.toDouble()),
+                series = mapOf("componentXYWHAreaDensityHolesExcluded" to records, "hsvMin" to listOf(18.0, 40.0, 140.0),
+                    "hsvMax" to listOf(38.0, 255.0, 255.0)),
+                labels = mapOf("artifact" to "occlusion-mask.gray8", "policy" to "measured-closed-compound-annotation-topology-required; occluded-in-both-directions; open-door-ticks-and-large-semantic-floor-fields-preserved")))
+        } finally { seed.release(); labels.release(); stats.release(); centers.release(); kernel.release() }
     }
 
     private fun excludePlayerMarkers(hsv: Mat, exclusion: Mat, log: AlignmentLogSink, prepared: Mat? = null) {

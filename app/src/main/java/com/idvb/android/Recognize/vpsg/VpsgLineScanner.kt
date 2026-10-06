@@ -38,7 +38,8 @@ internal class VpsgLineScanner(private val repository: MapRepository,
     private val parallelism: Int = min(3, Runtime.getRuntime().availableProcessors()).coerceAtLeast(1)) {
     companion object { const val ROUTE = "vpsg3-bitset-lines-v2" }
     private data class Floor(val map: MapRecord, val record: FloorRecord, val file: java.io.File,
-        val proposalFile: java.io.File = file)
+        val proposalFile: java.io.File = file, val structuralFile: java.io.File = file,
+        val precisionFile: java.io.File = proposalFile)
     private data class Pose(val scale: Double, val offsetX: Double, val offsetY: Double,
         val coarse: Double)
     private data class Fit(val floor: Floor, val pose: Pose, val support: Double,
@@ -253,10 +254,12 @@ internal class VpsgLineScanner(private val repository: MapRepository,
     /** Selected-floor alignment deliberately bypasses class scan-floor and identity ranking. */
     fun alignSelected(frame: Bitmap, viewport: ScreenRect, map: MapRecord, floor: FloorRecord,
         lines: ResolvedPrebuiltStructureLine, log: AlignmentLogSink = AlignmentLogSink.NONE,
-        proposalLines: ResolvedPrebuiltStructureLine = lines): AlignmentResult.Aligned? {
+        proposalLines: ResolvedPrebuiltStructureLine = lines,
+        structuralLines: ResolvedPrebuiltStructureLine = lines,
+        precisionLines: ResolvedPrebuiltStructureLine = proposalLines): AlignmentResult.Aligned? {
         require(frame.width.toDouble() == viewport.width && frame.height.toDouble() == viewport.height)
         com.idvb.android.recognize.cv.OpenCvRuntime.requireAvailable()
-        log.emit(AlignmentLogEvent("vpsg.configuration", "$ROUTE-selected-v7", thresholds =
+        log.emit(AlignmentLogEvent("vpsg.configuration", "$ROUTE-selected-v10", thresholds =
             VpsgAlignmentTuning.thresholds.filterKeys { it != "minimumLiveWidth" && it != "minimumLiveHeight" } +
                 ("maximumScale" to VpsgAlignmentTuning.MAX_SELECTED_SCALE) +
                 ("opencvThreadLimit" to com.idvb.android.recognize.cv.OpenCvRuntime.THREAD_LIMIT.toDouble()),
@@ -324,7 +327,7 @@ internal class VpsgLineScanner(private val repository: MapRepository,
                     val profile = FloorProfile()
                     val liveIndex = log.measure("vpsg.observation.distance-index") { DistanceIndex(distance) }
                     val fit = log.measure("vpsg.solve.total") {
-                        matchFloor(Floor(map, floor, lines.file, proposalLines.file), live, pixels, votes, correlation,
+                        matchFloor(Floor(map, floor, lines.file, proposalLines.file, structuralLines.file, precisionLines.file), live, pixels, votes, correlation,
                             contours, liveIndex, viewport, profile, precision = true, log = log,
                             verifyAllSeeds = compact, secondaryCorrelation = vertical, precisionPixels = precisionPixels)
                     }
@@ -365,12 +368,36 @@ internal class VpsgLineScanner(private val repository: MapRepository,
         val prepared = log.measure("vpsg.prepare-index.total") { VpsgPreparedIndex.load(floor.proposalFile, generation, log) }
         val verificationPrepared = if (floor.file == floor.proposalFile) prepared else
             log.measure("vpsg.prepare-verification-index.total") { VpsgPreparedIndex.load(floor.file, generation, log) }
+        val structuralPrepared = when (floor.structuralFile) {
+            floor.file -> verificationPrepared
+            floor.proposalFile -> prepared
+            else -> log.measure("vpsg.prepare-structural-index.total") { VpsgPreparedIndex.load(floor.structuralFile, generation, log) }
+        }
         val evidenceCache = verificationCache?.takeIf { it.index === verificationPrepared }
             ?: PoseVerificationCache(verificationPrepared, livePixels, contours)
         val maximumScale = if (precision) VpsgAlignmentTuning.MAX_SELECTED_SCALE else VpsgAlignmentTuning.MAX_SCALE
         profile.prepare = System.nanoTime() - stageStarted
         val translationStarted = System.nanoTime()
-        val scale = forcedScale ?: log.measure("vpsg.scale.total") { VpsgFastSolver.scale(correlation, prepared, log, maximumScale, preferFundamental = precision) }
+        val scale = forcedScale ?: log.measure("vpsg.scale.total") {
+            VpsgFastSolver.scale(correlation, prepared, log, maximumScale, preferFundamental = precision)
+                ?: if (precision && secondaryCorrelation != null) {
+                    val projection = DoubleArray(prepared.height)
+                    for (position in requireNotNull(prepared.edgePositions)) {
+                        AlignmentCancellation.checkpoint("vpsg.scale.vertical-reference-projection")
+                        projection[position / prepared.width]++
+                    }
+                    val prior = VpsgFastSolver.Correlation(projection).peak()
+                    val branch = object : AlignmentLogSink {
+                        override val enabled get() = log.enabled
+                        override fun record(event: AlignmentLogEvent) = log.emit(event.copy(labels = event.labels + ("scaleAxis" to "vertical")))
+                    }
+                    log.emit(AlignmentLogEvent("vpsg.scale.axis-recovery", "horizontal-prior-unavailable; measure-vertical",
+                        series = mapOf("referenceVerticalProjection" to projection.asList()),
+                        measurements = mapOf("referenceVerticalPitch" to prior.pitch, "referenceVerticalRatio" to prior.ratio),
+                        labels = mapOf("policy" to "same-axis-live-and-reference-periods; candidate-only; unchanged-final-structural-and-unique-pose-gates")))
+                    VpsgFastSolver.scale(secondaryCorrelation, prepared.copy(prior = prior), branch, maximumScale, preferFundamental = true)
+                } else null
+        }
         if (scale == null) {
             profile.outcome = "SCALE_UNRESOLVED"
             return null
@@ -415,14 +442,26 @@ internal class VpsgLineScanner(private val repository: MapRepository,
         val verificationStarted = System.nanoTime()
                 val index = DistanceIndex(verificationPrepared.width, verificationPrepared.height, verificationPrepared.distance,
                     if (VpsgNativeKernel.available) verificationPrepared.nativeDistance else null)
-                val precisionIndex = if (verificationPrepared === prepared) index else
-                    DistanceIndex(prepared.width, prepared.height, prepared.distance,
-                        if (VpsgNativeKernel.available) prepared.nativeDistance else null)
-                val referenceEdges = ReferenceEdges(verificationPrepared.width, requireNotNull(verificationPrepared.edgePositions),
-                    if (VpsgNativeKernel.available) verificationPrepared.nativeEdges else null)
+                // Precision must not punish real interior boundaries omitted by proposal geometry.
+                // Search stays on the sparse wall model; refinement uses complete measured source evidence.
+                val precisionPrepared = when (floor.precisionFile) {
+                    floor.file -> verificationPrepared
+                    floor.proposalFile -> prepared
+                    else -> log.measure("vpsg.prepare-precision-index.total") { VpsgPreparedIndex.load(floor.precisionFile, generation, log) }
+                }
+                val precisionIndex = if (precisionPrepared === verificationPrepared) index else
+                    DistanceIndex(precisionPrepared.width, precisionPrepared.height, precisionPrepared.distance,
+                        if (VpsgNativeKernel.available) precisionPrepared.nativeDistance else null)
+                val referenceEdges = ReferenceEdges(structuralPrepared.width, requireNotNull(structuralPrepared.edgePositions),
+                    if (VpsgNativeKernel.available) structuralPrepared.nativeEdges else null)
                 log.emit(AlignmentLogEvent("vpsg.verify.reference-index", "shared-prepared-immutable-index",
-                    measurements = mapOf("edges" to referenceEdges.positions.size.toDouble(), "bytes" to verificationPrepared.bytes.toDouble()),
-                    labels = mapOf("verificationArtifact" to "reference.png", "proposalAndPrecisionArtifact" to "reference-proposal.png")))
+                    measurements = mapOf("edges" to referenceEdges.positions.size.toDouble(), "bytes" to structuralPrepared.bytes.toDouble(),
+                        "forwardEdges" to requireNotNull(verificationPrepared.edgePositions).size.toDouble(),
+                        "forwardBytes" to verificationPrepared.bytes.toDouble()),
+                    labels = mapOf("verificationArtifact" to "reference.png", "proposalArtifact" to "reference-proposal.png",
+                        "precisionArtifact" to if (floor.precisionFile == floor.proposalFile) "reference-proposal.png" else "reference-precision.png",
+                        "reverseArtifact" to if (floor.structuralFile == floor.file) "reference.png" else "reference-structural.png",
+                        "reversePolicy" to "required-walls-only; source-appearance-can-explain-live-edges-but-is-not-a-required-visible-wall")))
                 fun verifyPose(pose: VpsgFastSolver.Pose): Fit {
                     AlignmentCancellation.checkpoint("vpsg.verify.cached-pose")
                     val key = PoseKey(pose.scale, pose.x, pose.y)
@@ -486,6 +525,44 @@ internal class VpsgLineScanner(private val repository: MapRepository,
                     extraRefinement = profile.refinement - before
                     best = bestFit()
                 }
+                if (precision) {
+                    // Compare every structurally viable candidate at the same
+                    // photometric precision. Comparing a refined winner with an
+                    // unrefined candidate can turn scale quantization into a rival.
+                    val count = min(256, precisionPixels.size)
+                    val points = (0 until count).map {
+                        val pixel = precisionPixels[it * precisionPixels.size / count]
+                        VpsgFastSolver.Point(pixel.x, pixel.y)
+                    }
+                    log.measure("vpsg.refine.precision.candidates.total") {
+                        for (candidate in fits.indices) {
+                            AlignmentCancellation.checkpoint("vpsg.refine.precision.candidate")
+                            val original = fits[candidate]
+                            if (!original.copy(poseUnique = true).qualified) continue
+                            val branch = object : AlignmentLogSink {
+                                override val enabled get() = log.enabled
+                                override fun record(event: AlignmentLogEvent) = log.emit(event.copy(
+                                    labels = event.labels + ("precisionCandidate" to candidate.toString())))
+                            }
+                            val seed = VpsgFastSolver.Pose(original.pose.scale,
+                                original.pose.offsetX - viewport.x, original.pose.offsetY - viewport.y)
+                            branch.emit(AlignmentLogEvent("vpsg.refine.precision.seed", measurements = mapOf(
+                                "coarseScale" to seed.scale, "pitchScale" to scale, "scale" to seed.scale,
+                                "viewportX" to seed.x, "viewportY" to seed.y), labels = mapOf(
+                                "policy" to "verified-structural-candidate; pitch-is-proposal-only; uniqueness-after-equal-precision")))
+                            val pose = VpsgPrecisionRefiner.refine(points, seed, width, height, precisionIndex::at, branch,
+                                if (VpsgNativeKernel.available) precisionIndex.nativeBuffer else null,
+                                precisionIndex.width, precisionIndex.height) ?: continue
+                            val checked = verifyPose(pose)
+                            val committed = checked.copy(poseUnique = true).qualified
+                            if (committed) fits[candidate] = checked
+                            branch.emit(checked.event("vpsg.refine.precision-recheck").copy(labels = mapOf(
+                                "precisionCommitted" to committed.toString(),
+                                "commitPolicy" to "converged-observable-source-photometric-minimum; unchanged-structural-gates; uniqueness-deferred-until-all-candidates-compared")))
+                        }
+                    }
+                    best = bestFit()
+                }
                 val rawRivals = fits.filter { displacement(it) >= VpsgAlignmentTuning.RIVAL_DISTANCE }
                 // A forward-only tie is not ambiguity when the rival predicts walls in known
                 // empty floor. Keep unknown/unsampled rivals; only measured contradictions exclude one.
@@ -513,9 +590,6 @@ internal class VpsgLineScanner(private val repository: MapRepository,
                 val (coverage, tested) = if (best.referencePoints > 0) best.referenceCoverage to best.referencePoints
                     else log.measure("vpsg.verify.reverse") { referenceCoverage(referenceEdges, live, liveIndex, best.pose, viewport, log) }
                 var result = best.copy(referenceCoverage = coverage, referencePoints = tested, poseUnique = uniquePose)
-                if (precision && result.qualified) result = refinePrecision(
-                    result, scale, width, height, precisionIndex, precisionPixels, viewport, fits, livePixels, log, ::verifyPose
-                ) { fit -> referenceCoverage(referenceEdges, live, liveIndex, fit.pose, viewport, log) }
                 if (log.enabled) log.emit(result.event("vpsg.verify.final", final = true))
                 profile.verification = System.nanoTime() - verificationStarted - extraRefinement
                 profile.outcome = if (result.qualified) "VERIFIED" else "STRUCTURE_UNRESOLVED"
@@ -605,67 +679,6 @@ internal class VpsgLineScanner(private val repository: MapRepository,
             hypot((x - anchor.pose.offsetX) / anchor.pose.scale * other.pose.scale + other.pose.offsetX - x,
                 (y - anchor.pose.offsetY) / anchor.pose.scale * other.pose.scale + other.pose.offsetY - y)
         }
-
-    private fun refinePrecision(original: Fit, scale: Double, width: Int, height: Int,
-        index: DistanceIndex, livePixels: List<Pixel>, viewport: ScreenRect, fits: List<Fit>,
-        verificationPixels: List<Pixel>, log: AlignmentLogSink, verifyPose: (VpsgFastSolver.Pose) -> Fit,
-        reverseCoverage: (Fit) -> Pair<Double, Int>): Fit {
-        var result = original
-        val pivotX = width / 2.0; val pivotY = height / 2.0
-                    log.emit(AlignmentLogEvent("vpsg.refine.precision.precondition", labels = mapOf(
-                        "allStructuralGatesPassed" to "true", "seedPoseUnique" to original.poseUnique.toString(),
-                        "policy" to "refine-structurally-supported-winner-before-scale-retranslation; commit-still-requires-original-uniqueness-margin")))
-                    val count = min(256, livePixels.size)
-                    val points = (0 until count).map {
-                        val pixel = livePixels[it * livePixels.size / count]
-                        VpsgFastSolver.Point(pixel.x, pixel.y)
-                    }
-                    val coarseSeed = VpsgFastSolver.Pose(original.pose.scale, original.pose.offsetX - viewport.x,
-                        original.pose.offsetY - viewport.y)
-                    // The binary dilation score has broad scale plateaus. When coarse
-                    // refinement has moved far from the measured pitch, center the
-                    // bounded distance refinement on that original pitch instead of
-                    // pinning the true minimum against the search boundary.
-                    val usePitchSeed = kotlin.math.abs(coarseSeed.scale / scale - 1) > .01
-                    val seed = if (usePitchSeed) VpsgFastSolver.Pose(scale,
-                        pivotX - (pivotX - coarseSeed.x) / coarseSeed.scale * scale,
-                        pivotY - (pivotY - coarseSeed.y) / coarseSeed.scale * scale) else coarseSeed
-                    log.emit(AlignmentLogEvent("vpsg.refine.precision.seed", measurements = mapOf(
-                        "coarseScale" to coarseSeed.scale, "pitchScale" to scale, "scale" to seed.scale,
-                        "viewportX" to seed.x, "viewportY" to seed.y), thresholds = mapOf("coarseRelativeScaleDrift" to .01),
-                        labels = mapOf("policy" to if (usePitchSeed) "measured-pitch-recentered-at-viewport-pivot; precision-bounds-and-final-gates-unchanged" else "verified-coarse-pose")))
-                    log.measure("vpsg.refine.precision.total") { VpsgPrecisionRefiner.refine(points, seed, width, height, index::at, log,
-                        if (VpsgNativeKernel.available) index.nativeBuffer else null, index.width, index.height) }?.let { refinedPose ->
-                        val refinedFit = verifyPose(refinedPose)
-                        val (reverse, count) = if (refinedFit.referencePoints > 0) refinedFit.referenceCoverage to refinedFit.referencePoints
-                            else log.measure("vpsg.verify.precision-reverse") { reverseCoverage(refinedFit) }
-                        val refinedRivals = fits.filter { observedDisplacement(refinedFit, it, verificationPixels, viewport) >= VpsgAlignmentTuning.RIVAL_DISTANCE }
-                        val refinedViableRivals = refinedRivals.filterNot {
-                            it.spatialConflict || it.longestConflict >= VpsgAlignmentTuning.MAX_CONFLICT_LENGTH ||
-                                it.referencePoints >= VpsgAlignmentTuning.MIN_TESTED_POINTS && it.referenceCoverage < VpsgAlignmentTuning.MIN_REVERSE_SUPPORT
-                        }
-                        val refinedRunnerUp = refinedViableRivals.maxByOrNull(Fit::bidirectionalSupport)
-                        val refinedMargin = refinedRunnerUp?.let { min(refinedFit.support, reverse) - it.bidirectionalSupport }
-                        val checked = refinedFit.copy(referenceCoverage = reverse, referencePoints = count,
-                            poseUnique = refinedRivals.isNotEmpty() && (refinedMargin == null || refinedMargin >= VpsgAlignmentTuning.MIN_POSE_MARGIN))
-                        log.emit(AlignmentLogEvent("vpsg.refine.precision-uniqueness", measurements = mapOf(
-                            "distinctRivals" to refinedRivals.size.toDouble(), "viableRivals" to refinedViableRivals.size.toDouble(),
-                            "margin" to (refinedMargin ?: Double.NaN)), thresholds = mapOf(
-                                "distinctDistancePixels" to VpsgAlignmentTuning.RIVAL_DISTANCE,
-                                "minimumPoseMargin" to VpsgAlignmentTuning.MIN_POSE_MARGIN),
-                            labels = mapOf("policy" to "remeasure-distinctness-from-refined-pose-on-all-observed-points; unknown-rivals-preserved")))
-                        // Precision is optional; it must not weaken the accepted structural evidence.
-                        if (checked.qualified && checked.meanDistance <= result.meanDistance &&
-                            checked.bidirectionalSupport >= result.bidirectionalSupport &&
-                            checked.longestConflict <= result.longestConflict) {
-                            result = checked
-                        }
-                        if (log.enabled) log.emit(checked.event("vpsg.refine.precision-recheck", final = true).copy(
-                            labels = mapOf("precisionCommitted" to (result === checked).toString(),
-                                "commitPolicy" to "full-structural-and-refined-uniqueness-gates; mean-distance-bidirectional-support-and-continuous-conflict-must-not-worsen")))
-                    }
-        return result
-    }
 
     private fun verify(floor: Floor, pose: Pose, live: VpsgLiveExtractor.Observation,
         livePixels: List<Pixel>, contours: List<List<Pixel>>, index: DistanceIndex,

@@ -39,17 +39,38 @@ class AlignmentFailureCorpusInstrumentedTest {
             val override = overrides?.get(archive.name)?.jsonObject
             val expected = override?.get("outcome")?.jsonPrimitive?.content?.let(AlignmentOutcome::valueOf)
                 ?: args.getString("alignmentExpected")?.let(AlignmentOutcome::valueOf) ?: replay.testCase.expectedOutcome
+            val landmarks = override?.get("rawLandmarks")?.jsonObject
             val transform = override?.get("transform")?.jsonObject?.let { value ->
                 AlignmentTransform(value.getValue("scale").jsonPrimitive.double,
                     value.getValue("offsetX").jsonPrimitive.double, value.getValue("offsetY").jsonPrimitive.double,
                     value.getValue("referenceWidth").jsonPrimitive.int, value.getValue("referenceHeight").jsonPrimitive.int)
-            } ?: replay.testCase.expectedTransform
+            } ?: replay.testCase.expectedTransform.takeUnless { landmarks != null }
             val report = replay.run(trace, expected, transform)
             val expectedCode = override?.get("code")?.jsonPrimitive?.content
             val actualCode = (report.result as? AlignmentResult.Rejected)?.code
                 ?: (report.result as? AlignmentResult.Unavailable)?.code
             var passed = report.passed && (expectedCode == null || expectedCode == actualCode)
             val request = replay.testCase.request
+            // Partial views constrain the observed image, not an extrapolated hidden map corner.
+            // Coordinates must come from independent original-image measurements supplied by
+            // the reviewer, never from the current algorithm's accepted transform.
+            val observedCornerError = landmarks?.let { value ->
+                require(value.getValue("valid").jsonPrimitive.boolean)
+                val reference = value.getValue("referenceCorners").jsonArray
+                val captured = value.getValue("liveCorners").jsonArray
+                require(reference.size >= 8 && reference.size == captured.size)
+                val aligned = (report.result as? AlignmentResult.Aligned)?.transform
+                if (aligned == null) Double.POSITIVE_INFINITY else reference.indices.maxOf { index ->
+                    val p = reference[index].jsonArray; val q = captured[index].jsonArray
+                    require(p.size == 2 && q.size == 2)
+                    kotlin.math.hypot(p[0].jsonPrimitive.double * aligned.scale + aligned.offsetX -
+                        request.viewport.x - q[0].jsonPrimitive.double,
+                        p[1].jsonPrimitive.double * aligned.scale + aligned.offsetY -
+                        request.viewport.y - q[1].jsonPrimitive.double)
+                }
+            }
+            if (observedCornerError != null) passed = passed && observedCornerError.isFinite() &&
+                observedCornerError <= replay.testCase.maximumCornerErrorPixels
             // Isolated output directory and inputs; never mutate the active map catalog.
             val storeContext = object : android.content.ContextWrapper(context) {
                 override fun getApplicationContext() = this
@@ -82,6 +103,11 @@ class AlignmentFailureCorpusInstrumentedTest {
                 put("supplementalReferenceHashes", JsonArray(replay.supplementedReferences.map(::JsonPrimitive)))
                 override?.let { put("expectation", it) }
                 report.maximumCornerErrorPixels?.let { put("cornerErrorPixels", it) }
+                observedCornerError?.let {
+                    put("maximumObservedCornerErrorPixels", it)
+                    put("observedCornerErrorThresholdPixels", replay.testCase.maximumCornerErrorPixels)
+                    put("precisionDomain", "independently measured original-image corresponding corners")
+                }
                 report.relativeScaleError?.let { put("relativeScaleError", it) }
                 (report.result as? AlignmentResult.Aligned)?.transform?.let {
                     put("scale", it.scale); put("x", it.offsetX); put("y", it.offsetY)
