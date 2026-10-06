@@ -34,7 +34,16 @@ class TutorialPracticeActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             IDVBTheme {
+                val progress by store.state.collectAsState()
                 BackHandler { leave() }
+                if (progress.step == TutorialStep.DONE && progress.practiceFinished) {
+                    LaunchedEffect(Unit) { leave() }
+                    return@IDVBTheme
+                }
+                if (progress.step < TutorialStep.LOBBY) {
+                    LaunchedEffect(Unit) { leave() }
+                    return@IDVBTheme
+                }
                 BoxWithConstraints(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding()) {
                     val panelWidth = if (maxWidth < 700.dp) 260.dp else 300.dp
                     if (maxWidth > maxHeight) Row(Modifier.fillMaxSize()) {

@@ -24,7 +24,7 @@ class TutorialFeedbackInstrumentedTest {
     private val context = instrumentation.targetContext
     private val automation get() = instrumentation.uiAutomation
 
-    @Test fun startStepRequiresCurrentlyVisibleOverlayAndStaysInActivity() {
+    @Test fun startStepPracticesBlockedButtonWithoutOpeningOverlay() {
         assertTrue(context.packageName.endsWith(".verification"))
         val consent = context.getSharedPreferences("mandatory_usage_consent", Context.MODE_PRIVATE)
         val oldConsent = consent.getInt("accepted_revision", 0)
@@ -38,21 +38,23 @@ class TutorialFeedbackInstrumentedTest {
         try {
             ActivityScenario.launch(MainActivity::class.java).use { scenario ->
                 scenario.onActivity { activity ->
-                    activity.setContent { IDVBTheme { TutorialPanel(store) } }
+                    activity.setContent { IDVBTheme { TutorialPanel(store, permissionsReady = true) } }
                 }
                 waitUntil { label("检查") != null }
                 click("检查")
                 waitUntil { label(TutorialStep.START.hint) != null }
                 assertEquals(TutorialStep.START, store.state.value.step)
-                instrumentation.runOnMainSync { OverlayService.start(context) }
-                waitUntil { controlOverlayVisible() }
+                instrumentation.runOnMainSync {
+                    OverlayService.start(context)
+                    // The previous tutorial exception must also reject a direct service intent.
+                    context.startForegroundService(android.content.Intent(context, OverlayService::class.java)
+                        .putExtra("tutorial_start", true))
+                }
+                instrumentation.waitForIdleSync()
+                SystemClock.sleep(300)
+                assertFalse(controlOverlayVisible())
                 assertEquals(Lifecycle.State.RESUMED, scenario.state)
-                instrumentation.runOnMainSync { OverlayService.sendAction(context, OverlayService.ACTION_TOGGLE_VISIBLE) }
-                waitUntil { !controlOverlayVisible() }
-                click("检查")
-                assertEquals(TutorialStep.START, store.state.value.step)
-                instrumentation.runOnMainSync { OverlayService.sendAction(context, OverlayService.ACTION_TOGGLE_VISIBLE) }
-                waitUntil { controlOverlayVisible() }
+                instrumentation.runOnMainSync { store.update { it.copy(startButtonPracticed = true) } }
                 click("检查")
                 waitUntil { store.state.value.step == TutorialStep.LOBBY }
                 assertEquals(Lifecycle.State.RESUMED, scenario.state)

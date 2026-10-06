@@ -14,6 +14,7 @@ class AutoMapOpenFrameSampler(
     private val captureMethod: String = "ACCESSIBILITY",
     private val compare: ((IntArray) -> AutoMapOpenComparison)? = null,
     private val frameSequence: () -> Long? = { null },
+    private val frameReceivedNanos: () -> Long? = { null },
     private val captureFrame: (Rect, (Result<Bitmap>) -> Unit) -> (() -> Unit),
 ) {
     fun sample(bounds: Rect, isCurrent: () -> Boolean, isOccluded: () -> Boolean,
@@ -80,7 +81,7 @@ class AutoMapOpenFrameSampler(
                                         if (crop === bitmap) requireNotNull(bitmap.copy(Bitmap.Config.ARGB_8888, false)) else crop
                                     }
                                     retained = PreparedMapFrame(owned, Rect(mapBounds), startedAtMs, receivedAtMs,
-                                        captureMethod, frameSequence(), indicator, indicatorBounds?.let(::Rect))
+                                        captureMethod, frameSequence(), indicator, indicatorBounds?.let(::Rect), frameReceivedNanos())
                                     log.emit(AlignmentLogEvent("sample.floor-indicator", if (indicator == null) "not-retained" else "clean-same-capture",
                                         measurements = indicatorBounds?.let { mapOf("left" to it.left.toDouble(), "top" to it.top.toDouble(),
                                             "width" to it.width().toDouble(), "height" to it.height().toDouble()) }.orEmpty()))

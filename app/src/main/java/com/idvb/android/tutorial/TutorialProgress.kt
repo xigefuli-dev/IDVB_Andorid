@@ -10,7 +10,7 @@ enum class TutorialStep(val title: String, val instructions: String, val hint: S
         "还没找到已安装的地图。请在下方完成订阅安装，或先把下载的地图包导入 IDVB，再点“检查”。",
     ),
     PERMISSIONS("把运行权限打开", "请切换到“首页”，点右下角的箭头。手机会带你去打开一项权限，按提示允许后返回 IDVB，再点一次箭头。重复操作，直到按钮变成播放形状。", "还有权限没打开，请继续点首页右下角的箭头。"),
-    START("启动悬浮窗", "点首页右下角的启动按钮。请先启用 IDVB 无障碍服务。启动后会留在当前页面，屏幕上会出现 IDVB 的悬浮按钮。看到悬浮按钮后，点“检查”，我们一起练习游戏里的操作。", "还没有检测到悬浮窗。请点首页右下角的启动按钮，并完成手机弹出的授权，确认屏幕上出现 IDVB 悬浮按钮后再检查。"),
+    START("启动悬浮窗", "权限准备好后，点首页右下角的启动按钮。教程期间不会唤起真实悬浮窗，而是显示启动提示。读完提示后回到这里点“检查”，接下来用模拟场景练习。结束新手教程并通过问答后，同样点击启动按钮即可唤起悬浮窗。", "请先完成运行权限，再点首页右下角的启动按钮，阅读提示后回来检查。"),
     LOBBY("进入加页手记", "正式使用时，回到桌面后打开第五人格，再进入加页手记。这里先用模拟场景练一遍：点画面中的“进入加页手记”，看到对局大厅后点“检查”。", "请先点模拟画面中的“进入加页手记”。"),
     PACKAGE("选用地图包", "点悬浮按钮“…”→“选择地图包”，在旁边展开的列表里点本局要用的地图包。选中后子菜单会收起；切换地图包后请重新扫描。这里先选择“S0 厄运之女 · 困难（示例）”。", "请在“…”旁的子菜单里点“S0 厄运之女 · 困难（示例）”。"),
     CALIBRATE("首次使用先校准地图", "先点“打开游戏地图”。再点悬浮按钮“…”→“校准显示区域”。用手指从地图显示范围的左上角拖到右下角，把整块地图画布框住，不要框进左侧队友和右侧按钮。点“确认并保存”，再检查。", "请打开地图，在“…”里选择“校准显示区域”，框好地图的完整显示范围并保存。"),
@@ -58,11 +58,46 @@ data class TutorialProgress(
     val practiceOpen: Boolean = false,
     val downloaded: Boolean = false,
     val serviceStarted: Boolean = false,
+    val startButtonPracticed: Boolean = false,
     val passed: Set<TutorialStep> = emptySet(),
     val skipped: Set<TutorialStep> = emptySet(),
     val performed: Set<TutorialStep> = emptySet(),
     val practice: PracticeState = PracticeState(),
+    val quizAnswered: Int = 0,
+    val completionRevision: Int = 0,
+    val practiceFinished: Boolean = false,
 ) {
+    val stagesFinished: Boolean get() = TutorialStep.activeSteps
+        .filter { it != TutorialStep.DONE }.all { it in passed || it in skipped }
+    val completed: Boolean get() = completionRevision == TutorialQuiz.REVISION &&
+        stagesFinished &&
+        quizAnswered == TutorialQuiz.questions.size
+
+    fun requiredCheckpoint(): TutorialProgress {
+        if (completed) return this
+        val missing = TutorialStep.activeSteps.firstOrNull { it != TutorialStep.DONE && it !in passed && it !in skipped }
+        return copy(active = true, step = missing ?: TutorialStep.DONE,
+            quizAnswered = if (missing != null || completionRevision == 1) 0 else quizAnswered.coerceIn(0, TutorialQuiz.questions.size),
+            practiceFinished = missing == null && (practiceFinished || (completionRevision != 1 && quizAnswered > 0)),
+            completionRevision = 0)
+    }
+
+    fun finishPractice(): TutorialProgress {
+        if (step != TutorialStep.DONE || !stagesFinished) return this
+        return copy(practiceFinished = true, practiceOpen = false)
+    }
+
+    fun answerQuiz(option: Int): TutorialProgress {
+        if (!practiceFinished || step != TutorialStep.DONE || quizAnswered !in TutorialQuiz.questions.indices ||
+            !stagesFinished) return this
+        if (option !in TutorialQuiz.questions[quizAnswered].options.indices) return this
+        if (TutorialQuiz.questions[quizAnswered].correct != option) return TutorialProgress(active = true)
+        val answered = quizAnswered + 1
+        return copy(quizAnswered = answered,
+            completionRevision = if (answered == TutorialQuiz.questions.size) TutorialQuiz.REVISION else 0,
+            active = answered != TutorialQuiz.questions.size)
+    }
+
     fun advance(skip: Boolean = false): TutorialProgress {
         if (step == TutorialStep.DONE) return this
         val active = TutorialStep.activeSteps
@@ -91,11 +126,11 @@ data class TutorialProgress(
             skipped = if (skip) skipped + step else skipped)
     }
 
-    fun canPass(hasMaps: Boolean = false, permissionsReady: Boolean = false, overlayVisible: Boolean = false): Boolean = when (step) {
+    fun canPass(hasMaps: Boolean = false, permissionsReady: Boolean = false): Boolean = when (step) {
         TutorialStep.DOWNLOAD -> downloaded || hasMaps
         TutorialStep.IMPORT -> hasMaps
         TutorialStep.PERMISSIONS -> permissionsReady
-        TutorialStep.START -> overlayVisible
+        TutorialStep.START -> permissionsReady && startButtonPracticed
         TutorialStep.SHOW -> step in performed && practice.visible
         TutorialStep.ASSIST_TOUCH -> step in performed && isPracticeAssistTouchValid(practice.assistPoints)
         TutorialStep.DONE -> true

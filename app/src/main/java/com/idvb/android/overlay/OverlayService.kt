@@ -107,7 +107,11 @@ class OverlayService : Service() {
             }
         }
 
-        fun start(context: Context) = context.startForegroundService(Intent(context, OverlayService::class.java))
+        fun start(context: Context) {
+            if (!com.idvb.android.UsageConsent.isAccepted(context) ||
+                !com.idvb.android.tutorial.TutorialStore.get(context).state.value.completed) return
+            context.startForegroundService(Intent(context, OverlayService::class.java))
+        }
         fun stop(context: Context) = context.stopService(Intent(context, OverlayService::class.java))
         fun sendAction(context: Context, action: String, block: Intent.() -> Unit = {}) {
             runCatching { context.startService(Intent(context, OverlayService::class.java).setAction(action).apply(block)) }
@@ -119,6 +123,8 @@ class OverlayService : Service() {
     private lateinit var blueprintWindow: OverlayWindowManager
     private lateinit var candidateWindow: OverlayWindowManager
     private lateinit var guideWindow: OverlayWindowManager
+    private lateinit var calibrationBorderWindow: OverlayWindowManager
+    private var calibrationBorderView: CalibrationBorderView? = null
     private lateinit var scanProgressWindow: OverlayWindowManager
     private val mainHandler = Handler(Looper.getMainLooper())
     private var scanProgressView: ScanProgressView? = null
@@ -175,9 +181,9 @@ class OverlayService : Service() {
         post = { task, delay -> mainHandler.postDelayed(task, delay); Unit },
         remove = { task -> mainHandler.removeCallbacks(task) },
         canSchedule = { !destroyed && !mapResources.pending && !mapResourceReleaseFailed && AppServices.prefs.autoDetectMapOpenEnabled &&
-            com.idvb.android.UsageConsent.isAccepted(this) },
+            com.idvb.android.UsageConsent.isAccepted(this) && com.idvb.android.tutorial.TutorialStore.get(this).state.value.completed },
         canRecover = { !destroyed && !mapResources.pending && !mapResourceReleaseFailed && AppServices.prefs.autoDetectMapOpenEnabled &&
-            com.idvb.android.UsageConsent.isAccepted(this) && !hostForeground && !practiceForeground &&
+            com.idvb.android.UsageConsent.isAccepted(this) && com.idvb.android.tutorial.TutorialStore.get(this).state.value.completed && !hostForeground && !practiceForeground &&
             OverlayState.state.value.visible },
         sampleInFlight = { autoCaptureBusy },
         poll = { pollAutoMapOpen() },
@@ -238,7 +244,10 @@ class OverlayService : Service() {
         }
         if (key in setOf("eye_button_action", "alignment_method_id", "auto_floor_enabled") ||
             key?.startsWith("capture_") == true) mainHandler.post {
-            if (!destroyed) cancelAlignment()
+            if (!destroyed) {
+                cancelAlignment()
+                if (key?.startsWith("capture_") == true) refreshCalibrationBorder()
+            }
         }
     }
 
@@ -254,7 +263,7 @@ class OverlayService : Service() {
     }
 
     private fun synchronizeCaptureSession() {
-        if (!com.idvb.android.UsageConsent.isAccepted(this)) return
+        if (!com.idvb.android.UsageConsent.isAccepted(this) || !com.idvb.android.tutorial.TutorialStore.get(this).state.value.completed) return
         val method = AppServices.prefs.screenCaptureMethod
         val changed = captureMethod != method
         val renewed = captureSession?.let { it.grantRevision != ScreenCaptureGrant.revision } == true
@@ -329,6 +338,7 @@ class OverlayService : Service() {
         blueprintWindow = OverlayWindowManager(overlayContext)
         candidateWindow = OverlayWindowManager(overlayContext)
         guideWindow = OverlayWindowManager(overlayContext)
+        calibrationBorderWindow = OverlayWindowManager(overlayContext)
         scanProgressWindow = OverlayWindowManager(overlayContext)
         notifications = OverlayNotifications(overlayContext, screenSize = ::screenSize)
         alignmentNotifications = OverlayNotifications(overlayContext, alignmentStyle = true, screenSize = ::screenSize)
@@ -342,7 +352,12 @@ class OverlayService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        if (intent?.action != ACTION_CLOSE) synchronizeCaptureSession()
+        val tutorial = com.idvb.android.tutorial.TutorialStore.get(this).state.value
+        if (!tutorial.completed) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        if (tutorial.completed && intent?.action != ACTION_CLOSE) synchronizeCaptureSession()
         when (intent?.action) {
             ACTION_CONFIGURE_AUTO_MAP_REFERENCE -> {
                 ensureBalls()
@@ -385,7 +400,7 @@ class OverlayService : Service() {
         }
         applyPracticeVisibility()
         scheduleAutoMapOpen(0L)
-        return START_STICKY
+        return if (tutorial.completed) START_STICKY else START_NOT_STICKY
     }
 
     private fun applyPracticeVisibility() {
@@ -409,6 +424,11 @@ class OverlayService : Service() {
             val captureRoot = alignmentCapturing && view.isAttachedToWindow
             view.visibility = if (visible && guideVisible && (captureRoot || show)) android.view.View.VISIBLE else android.view.View.INVISIBLE
         }
+        calibrationBorderView?.let { view ->
+            view.alpha = if (alignmentCapturing) 0f else 1f
+            view.visibility = if (visible && !scanCapturing && blueprintView == null)
+                android.view.View.VISIBLE else android.view.View.INVISIBLE
+        }
         listOf(blueprintView, adjustView, candidateView, scanProgressView).forEach {
             it?.visibility = if (practiceForeground) android.view.View.INVISIBLE else android.view.View.VISIBLE
         }
@@ -416,6 +436,7 @@ class OverlayService : Service() {
         val presentation = "visible=$visible scanning=$scanning scanCapturing=$scanCapturing " +
             "alignmentCapturing=$alignmentCapturing guideVisible=$guideVisible displayReady=$alignmentDisplayReady " +
             "controlsVisibility=${balls?.visibility} guideVisibility=${guideView?.visibility} " +
+            "calibrationBorderVisibility=${calibrationBorderView?.visibility} calibrationBorderOpacity=${CalibrationBorderView.OPACITY} " +
             "controls=" + balls?.captureControls()?.joinToString(",") { (id, view) -> "$id:${view.visibility}:${view.alpha}:${view.isAttachedToWindow}" }
         if (presentation != lastOverlayPresentation) {
             lastOverlayPresentation = presentation
@@ -439,12 +460,12 @@ class OverlayService : Service() {
     }
 
     private fun showAlignmentNotice(message: String, durationMs: Long = 4_000L): Long {
-        if (destroyed || !AppServices.prefs.showAlignmentOutput) return -1L
+        if (destroyed) return -1L
         return alignmentNotifications?.show(message, durationMs) ?: -1L
     }
 
     private fun updateAlignmentNotice(id: Long, message: String, durationMs: Long = 4_000L) {
-        if (destroyed || !AppServices.prefs.showAlignmentOutput) return
+        if (destroyed) return
         alignmentNotifications?.update(id, message, durationMs)
     }
 
@@ -483,6 +504,7 @@ class OverlayService : Service() {
                 override fun useAssistTouchToggle() = false
                 override fun onAssistTouch() {}
                 override fun onToggleGuide() {
+                    if (!requireTutorialCompleted()) return
                     if (!showPendingCandidates() && !AppServices.prefs.autoDetectMapOpenEnabled) toggleGuide()
                 }
                 override fun onOpenGuide() = openGuide()
@@ -529,13 +551,21 @@ class OverlayService : Service() {
         guideWindow.x = 0; guideWindow.y = 0; guideWindow.width = 1; guideWindow.height = 1
         guideWindow.opacity = AppServices.prefs.opacity
         guideWindow.add(guideView!!, locked = true)
+        refreshCalibrationBorder()
         window.add(balls!!, locked = false)
         balls!!.post { if (!destroyed) buttonLayout = OverlayButtonLayout(overlayContext, balls!!, window, ::screenSize) }
         lastCaptureScreen = screen
         OverlayState.update { it.copy(running = true, visible = true, locked = false) }
     }
 
+    private fun requireTutorialCompleted(): Boolean {
+        if (com.idvb.android.tutorial.TutorialStore.get(this).state.value.completed) return true
+        notifyOverlay("请先回到 IDVB 完成新手教程和问答。")
+        return false
+    }
+
     private fun runForegroundScan() {
+        if (!requireTutorialCompleted()) return
         if (autoGuideOwned) { autoDetector?.manualClose(); stopAutoMapGuide("manual-scan") }
         if (candidateView != null || blueprintView != null || adjustView != null) return
         if (mapResources.pending) { notifyOverlay("正在准备地图，请稍候"); return }
@@ -553,6 +583,7 @@ class OverlayService : Service() {
     }
 
     private fun startForegroundScan() {
+        if (!requireTutorialCompleted()) return
         if (destroyed || !com.idvb.android.UsageConsent.isAccepted(this)) return
         val diagnosticSessionId = sessionLogs.sessionId
         if (AppServices.prefs.debugMode) {
@@ -608,6 +639,7 @@ class OverlayService : Service() {
     }
 
     private fun showManualMapSelection(reference: Bitmap? = null) {
+        if (!requireTutorialCompleted()) return
         val catalog = AppServices.repository.loadCatalog()
         val activeClassId = resolveActiveClassId(catalog)
         val maps = catalog.maps.filter { it.classId == activeClassId }
@@ -912,6 +944,7 @@ class OverlayService : Service() {
     }
 
     private fun toggleMapClassSubmenu() {
+        if (!requireTutorialCompleted()) return
         if (ballMenu?.isSubmenuVisible() == true) {
             ballMenu?.hideSubmenu()
             return
@@ -1167,6 +1200,7 @@ class OverlayService : Service() {
     }
 
     private fun toggleGuide() {
+        if (!requireTutorialCompleted()) return
         if (guideVisible) hideGuide() else openGuide()
     }
 
@@ -1260,6 +1294,7 @@ class OverlayService : Service() {
     }
 
     private fun openGuide() {
+        if (!requireTutorialCompleted()) return
         if (AppServices.prefs.autoDetectMapOpenEnabled) {
             showPendingCandidates()
             return
@@ -1574,16 +1609,21 @@ class OverlayService : Service() {
         // surface buffer can outlive the current INVISIBLE view flag.
         val hiddenControls = balls?.captureControls().orEmpty().filter { it.second.isShown } +
             listOfNotNull(guideView?.takeIf { it.isAttachedToWindow }?.let { "guide" to it },
+                calibrationBorderView?.takeIf { it.isAttachedToWindow }?.let { "calibration-border" to it },
                 notifications?.captureView?.takeIf { it.isShown }?.let { "notifications" to it },
                 alignmentNotifications?.captureView?.takeIf { it.isShown }?.let { "alignment-notifications" to it })
         hideScanProgress()
+        var projectionWatermark = session?.frameSequenceWatermark() ?: -1L
         trace.measure("capture.prepare") {
-            if (method == ScreenCaptureMethod.MEDIA_PROJECTION && needsNewCapture) session?.prepareCapture()
+            if (method == ScreenCaptureMethod.MEDIA_PROJECTION && needsNewCapture)
+                projectionWatermark = session?.prepareCapture() ?: -1L
             applyPracticeVisibility()
         }
         var captureStarted = 0L
         var floorCaptureStartedAtMs = 0L
         var floorCaptureReceivedAtMs = 0L
+        var floorFrameSequence: Long? = null
+        var floorFrameReceivedNanos: Long? = null
         fun queueAlignment(bitmap: Bitmap) {
             lastAlignmentTerminal = "queued"
             updateAlignmentNotice(notice, "正在自动贴合 · 等待计算", 0L)
@@ -1725,12 +1765,14 @@ class OverlayService : Service() {
                 updateAlignmentNotice(notice, "等待游戏地图画面 · 最多 3 秒", 0L)
                 val initial = ownedPreparedFrames.toMutableList().also { ownedPreparedFrames.clear() }
                 bitmap?.let { initial.add(com.idvb.android.alignment.PreparedMapFrame(it, Rect(bounds),
-                    floorCaptureStartedAtMs, floorCaptureReceivedAtMs, method.name)) }
+                    floorCaptureStartedAtMs, floorCaptureReceivedAtMs, method.name, floorFrameSequence,
+                    frameReceivedNanos = floorFrameReceivedNanos)) }
                 abortAlignmentCapture = com.idvb.android.alignment.MapOpenFrameCapture(
                     mainHandler, alignmentReadinessExecutor, cancellation, trace, reference,
                     callback = { result, signature -> readySignature = signature; callback(result) },
-                    captureFrame = if (method == ScreenCaptureMethod.MEDIA_PROJECTION)
-                        { rect, received -> requireNotNull(session).captureNext(rect, trace, received) } else null,
+                    captureProjectionFrame = if (method == ScreenCaptureMethod.MEDIA_PROJECTION)
+                        { rect, consumed, received -> requireNotNull(session).captureAfter(rect, consumed, trace, received) } else null,
+                    initialProjectionSequence = projectionWatermark,
                     intervalMs = if (method == ScreenCaptureMethod.MEDIA_PROJECTION) 0L else com.idvb.android.alignment.MapOpenReadiness.INTERVAL_MS,
                     maximumFrameAgeMs = requestDetector?.config?.maximumFrameAgeMs ?: 1_000L,
                 ).start(bounds, initial)
@@ -1854,16 +1896,22 @@ class OverlayService : Service() {
                     abortAlignmentCapture = AccessibilityScreenCaptureService.capture(captureBounds,
                         accessibilityCaptureExecutor, floorCaptured, trace)
                 } else {
-                    session!!.capture(captureBounds, floorCaptured)
-                    abortAlignmentCapture = { session.cancelPending() }
+                    abortAlignmentCapture = session!!.captureAfter(captureBounds, projectionWatermark, trace) { result ->
+                        result.getOrNull()?.let { frame ->
+                            floorFrameSequence = frame.sequence
+                            floorFrameReceivedNanos = frame.receivedNanos
+                        }
+                        floorCaptured(result.map { it.bitmap })
+                    }
                 }
             } else if (method == ScreenCaptureMethod.ACCESSIBILITY || autoCycle != null) {
                 updateAlignmentNotice(notice, "等待游戏地图画面 · 最多 3 秒", 0L)
                 abortAlignmentCapture = com.idvb.android.alignment.MapOpenFrameCapture(
                     mainHandler, alignmentReadinessExecutor, cancellation, trace, reference,
                     callback = { result, signature -> readySignature = signature; callback(result) },
-                    captureFrame = if (method == ScreenCaptureMethod.MEDIA_PROJECTION)
-                        { rect, received -> requireNotNull(session).captureNext(rect, trace, received) } else null,
+                    captureProjectionFrame = if (method == ScreenCaptureMethod.MEDIA_PROJECTION)
+                        { rect, consumed, received -> requireNotNull(session).captureAfter(rect, consumed, trace, received) } else null,
+                    initialProjectionSequence = projectionWatermark,
                     intervalMs = if (method == ScreenCaptureMethod.MEDIA_PROJECTION) 0L else com.idvb.android.alignment.MapOpenReadiness.INTERVAL_MS,
                     maximumFrameAgeMs = requestDetector?.config?.maximumFrameAgeMs ?: 1_000L,
                 ).start(bounds, ownedPreparedFrames.toList().also { ownedPreparedFrames.clear() })
@@ -1930,6 +1978,7 @@ class OverlayService : Service() {
     }
 
     private fun nextFloor() {
+        if (!requireTutorialCompleted()) return
         if (AppServices.prefs.autoDetectMapOpenEnabled) return
         val map = currentMap ?: return
         val floors = map.floors.sortedBy { it.sortOrder }
@@ -1956,6 +2005,7 @@ class OverlayService : Service() {
     }
 
     private fun nextVariant() {
+        if (!requireTutorialCompleted()) return
         val map = currentMap ?: return
         val catalog = AppServices.repository.loadCatalog()
         val variantGroup = catalog.findVariantGroup(map.id) ?: return
@@ -2148,6 +2198,7 @@ class OverlayService : Service() {
     }
 
     private fun enterFreeAdjustMode() {
+        if (!requireTutorialCompleted()) return
         if (adjustView != null || blueprintView != null || candidateView != null) return
         if (AppServices.prefs.autoDetectMapOpenEnabled) {
             val initialOpacity = AppServices.prefs.opacity
@@ -2237,6 +2288,7 @@ class OverlayService : Service() {
     }
 
     private fun enterBlueprintMode() {
+        if (!requireTutorialCompleted()) return
         if (blueprintView != null || adjustView != null || candidateView != null) return
         cancelAlignment()
         val screen = screenSize()
@@ -2268,11 +2320,40 @@ class OverlayService : Service() {
         }
         // 全屏可触摸窗口会吞掉全部事件，蓝图模式期间不会穿透到底层进程。
         blueprintWindow.add(blueprintView!!, locked = false)
+        applyPracticeVisibility()
     }
 
     private fun exitBlueprintMode() {
         blueprintWindow.remove()
         blueprintView = null
+        refreshCalibrationBorder()
+    }
+
+    private fun refreshCalibrationBorder() {
+        if (destroyed || balls == null) return
+        val screen = screenSize()
+        val region = captureRegionPixels(screen.first, screen.second)
+        if (region == null || region.width() <= 0f || region.height() <= 0f) {
+            calibrationBorderWindow.remove()
+            calibrationBorderView = null
+            return
+        }
+        val view = calibrationBorderView ?: CalibrationBorderView(overlayContext)
+        val edge = view.borderWidth
+        val left = kotlin.math.floor(region.left.toDouble()).toInt()
+        val top = kotlin.math.floor(region.top.toDouble()).toInt()
+        val right = kotlin.math.ceil(region.right.toDouble()).toInt()
+        val bottom = kotlin.math.ceil(region.bottom.toDouble()).toInt()
+        calibrationBorderWindow.x = left - edge
+        calibrationBorderWindow.y = top - edge
+        calibrationBorderWindow.width = right - left + edge * 2
+        calibrationBorderWindow.height = bottom - top + edge * 2
+        calibrationBorderWindow.opacity = CalibrationBorderView.OPACITY
+        if (calibrationBorderView == null) {
+            calibrationBorderView = view
+            calibrationBorderWindow.add(view, locked = true)
+        } else calibrationBorderWindow.update()
+        applyPracticeVisibility()
     }
 
     /** 将当前方向保存的比例坐标换算成屏幕捕获所需的真实像素区域。 */
@@ -2361,7 +2442,9 @@ class OverlayService : Service() {
     }
 
     private fun autoRegionOccluded(region: RectF): Boolean {
-        val overlays = OverlayWindowManager.visibleScreenBounds(setOf(guideWindow)).toMutableList()
+        // The calibration outline has no pixels inside the map viewport. Its root's
+        // rectangular bounds must not classify the entire transparent interior as covered.
+        val overlays = OverlayWindowManager.visibleScreenBounds(setOf(guideWindow, calibrationBorderWindow)).toMutableList()
         if (guideView?.isShown == true && guideView?.alpha != 0f) {
             val rendered = alignedGuideBounds?.let(::RectF) ?: RectF(guideWindow.x.toFloat(), guideWindow.y.toFloat(),
                 (guideWindow.x + guideWindow.width).toFloat(), (guideWindow.y + guideWindow.height).toFloat())
@@ -2391,6 +2474,11 @@ class OverlayService : Service() {
     }
 
     private fun pollAutoMapOpen() {
+        if (!com.idvb.android.tutorial.TutorialStore.get(this).state.value.completed) {
+            autoPollLoop.stop()
+            stopAutoMapGuide("tutorial-incomplete")
+            return
+        }
         if (destroyed || mapResources.pending || mapResourceReleaseFailed) return
         val now = android.os.SystemClock.uptimeMillis()
         if (!com.idvb.android.UsageConsent.isAccepted(this) || hostForeground || practiceForeground || !OverlayState.state.value.visible) {
@@ -2523,6 +2611,19 @@ class OverlayService : Service() {
             event.measurements["frameSequence"]?.let { observedFrameSequence.set(it.toLong()) }
             autoDiagnostics.captureEvent(event.copy(labels = event.labels + ("autoSampleId" to sampleId)))
         }
+        calibrationBorderView?.takeIf { it.isShown }?.let { border ->
+            captureLog.emit(AlignmentLogEvent("sample.calibration-border", "outside-map-viewport",
+                measurements = mapOf("left" to calibrationBorderWindow.x.toDouble(),
+                    "top" to calibrationBorderWindow.y.toDouble(),
+                    "width" to calibrationBorderWindow.width.toDouble(),
+                    "height" to calibrationBorderWindow.height.toDouble(),
+                    "borderWidth" to border.borderWidth.toDouble(),
+                    "requestedOpacity" to CalibrationBorderView.OPACITY.toDouble(),
+                    "opacity" to ((border.layoutParams as? WindowManager.LayoutParams)?.alpha ?: 0f).toDouble(),
+                    "viewAlpha" to border.alpha.toDouble()),
+                labels = mapOf("fill" to "none", "color" to "112,226,157",
+                    "capturePolicy" to "outline-retained-in-sidebar-and-indicator-inputs; map-interior-clear")))
+        }
         val sampler = com.idvb.android.alignment.AutoMapOpenFrameSampler(mainHandler, accessibilityCaptureExecutor,
             captureFrame = { rect, callback ->
                 if (method == ScreenCaptureMethod.MEDIA_PROJECTION) {
@@ -2532,7 +2633,8 @@ class OverlayService : Service() {
                 else AccessibilityScreenCaptureService.capture(rect, accessibilityCaptureExecutor, callback, captureLog)
             }, captureMethod = method.name,
             compare = { pixels -> detector.compareCandidate(com.idvb.android.alignment.AutoMapOpenDetector.signature(pixels)) },
-            frameSequence = { observedFrameSequence.get().takeIf { it >= 0 } })
+            frameSequence = { observedFrameSequence.get().takeIf { it >= 0 } },
+            frameReceivedNanos = { observedFrameNanos.get().takeIf { method == ScreenCaptureMethod.MEDIA_PROJECTION && it > 0 } })
 
         abortAutoCapture = sampler.sampleWithFrame(referenceRegion, captureBounds, mapRegion,
             isCurrent = { !destroyed && generation == autoCaptureGeneration && autoContext == context &&
@@ -2678,6 +2780,7 @@ class OverlayService : Service() {
         closeCandidates(recycleCapture = true)
         captureSession?.close(); captureSession = null
         guideWindow.remove(); guideView = null
+        calibrationBorderWindow.remove(); calibrationBorderView = null
         guideBitmap?.let { if (!it.isRecycled) it.recycle() }; guideBitmap = null
         blueprintWindow.remove(); blueprintView = null; adjustView = null
         ballMenu?.hide(); ballMenu = null
@@ -2751,6 +2854,7 @@ class OverlayService : Service() {
         window.update()
         ballMenu?.updatePosition()
         buttonLayout?.refresh()
+        refreshCalibrationBorder()
         applyPracticeVisibility()
         scheduleAutoMapOpen(0L)
     }

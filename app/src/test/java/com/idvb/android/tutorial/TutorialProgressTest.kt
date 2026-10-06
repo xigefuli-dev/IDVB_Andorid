@@ -6,6 +6,39 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class TutorialProgressTest {
+    @Test fun `battery exemption or skipping cannot finish tutorial or unlock start`() {
+        val base = com.idvb.android.ui.PermissionSnapshot(true, true, true, true, true, false,
+            com.idvb.android.data.ScreenCaptureMethod.ACCESSIBILITY)
+        for (snapshot in listOf(base.copy(batteryOptimization = true), base.copy(batteryOptimizationSkipped = true))) {
+            assertTrue(snapshot.readyToStart)
+            for (step in TutorialStep.activeSteps) {
+                val progress = TutorialProgress(step = step, serviceStarted = true)
+                assertFalse(progress.completed)
+                if (step == TutorialStep.START) {
+                    assertFalse(progress.canPass(permissionsReady = snapshot.readyToStart))
+                    val practiced = progress.copy(startButtonPracticed = true)
+                    assertTrue(practiced.canPass(permissionsReady = snapshot.readyToStart))
+                    assertFalse(practiced.completed)
+                }
+            }
+        }
+    }
+    @Test fun `nine questions retain the requested correct answers and replace single question completion`() {
+        assertEquals(9, TutorialQuiz.questions.size)
+        assertEquals(listOf("一楼大门", "一楼侧门", "等待队友的大厅（有镜子那个）",
+            "从一楼大门进入，探索一定程度然后打开地图点🔍按钮",
+            "扫描地图、选择与显示地图", "群文件和软件内订阅",
+            "点首页右下角的箭头按钮或者启动按钮", "不可以", "去 设置 - 预设 切换成传统小抄"),
+            TutorialQuiz.questions.map { it.options[it.correct] })
+        val old = TutorialProgress(step = TutorialStep.DONE, quizAnswered = 1, completionRevision = 1,
+            passed = TutorialStep.activeSteps.filter { it != TutorialStep.DONE }.toSet())
+        assertFalse(old.completed)
+        val restored = old.requiredCheckpoint()
+        assertEquals(TutorialStep.DONE, restored.step)
+        assertEquals(0, restored.quizAnswered)
+        assertTrue(restored.active)
+        assertEquals(old.passed, restored.passed)
+    }
     @Test fun `missing accessibility cannot be treated as a projection grant pending start`() {
         val p = com.idvb.android.ui.PermissionSnapshot(true, false, true, true, true, true,
             com.idvb.android.data.ScreenCaptureMethod.ACCESSIBILITY)
@@ -24,23 +57,86 @@ class TutorialProgressTest {
         assertTrue(TutorialProgress(step = TutorialStep.PERMISSIONS).canPass(permissionsReady = true))
         assertFalse(TutorialProgress(step = TutorialStep.START).canPass(permissionsReady = true))
         assertFalse(TutorialProgress(step = TutorialStep.START, serviceStarted = true).canPass())
-        assertTrue(TutorialProgress(step = TutorialStep.START).canPass(overlayVisible = true))
+        assertFalse(TutorialProgress(step = TutorialStep.START, startButtonPracticed = true).canPass())
+        assertTrue(TutorialProgress(step = TutorialStep.START, startButtonPracticed = true).canPass(permissionsReady = true))
     }
 
-    @Test fun `skipping supplies sample prerequisites but does not pass an exercise`() {
-        var p = TutorialProgress()
-        while (p.step != TutorialStep.DONE) {
-            val previous = p.step
-            p = p.advance(skip = true)
-            assertTrue(previous in p.skipped)
-            assertTrue(p.passed.isEmpty())
-            assertTrue(p.performed.isEmpty())
-            if (p.step != TutorialStep.DONE) assertFalse(p.canPass())
+    @Test fun `skipping stages preserves skip history and still requires the full quiz`() {
+        var progress = TutorialProgress(active = true)
+        while (progress.step != TutorialStep.DONE) {
+            val stage = progress.step
+            progress = progress.advance(skip = true)
+            assertTrue(stage in progress.skipped)
+            assertTrue(progress.passed.isEmpty())
+            assertTrue(progress.performed.isEmpty())
+            assertFalse(progress.completed)
+            assertEquals(progress, progress.requiredCheckpoint())
         }
-        assertEquals(TutorialStep.DONE, p.step)
-        assertEquals(p, p.advance())
+        assertTrue(progress.stagesFinished)
+        assertEquals(progress, progress.advance(skip = true))
+        assertEquals(progress, progress.answerQuiz(TutorialQuiz.questions.first().correct))
+        progress = progress.finishPractice()
+        assertFalse(progress.completed)
+        for (question in TutorialQuiz.questions) {
+            assertFalse(progress.completed)
+            progress = progress.answerQuiz(question.correct)
+        }
+        assertTrue(progress.completed)
+        assertEquals(progress, progress.requiredCheckpoint())
+        val wrong = progress.copy(quizAnswered = 0, completionRevision = 0, active = true).answerQuiz(0)
+        assertEquals(TutorialStep.DOWNLOAD, wrong.step)
+        assertTrue(wrong.skipped.isEmpty())
+        assertFalse(wrong.practiceFinished)
     }
 
+    @Test fun `legacy skipped stages are retained without bypassing quiz`() {
+        assertFalse(TutorialProgress(step = TutorialStep.DONE).completed)
+        val legacy = TutorialProgress(step = TutorialStep.DONE,
+            passed = TutorialStep.activeSteps.filter { it != TutorialStep.DONE && it != TutorialStep.CALIBRATE }.toSet(),
+            skipped = setOf(TutorialStep.CALIBRATE))
+        val restored = legacy.requiredCheckpoint()
+        assertEquals(TutorialStep.DONE, restored.step)
+        assertTrue(restored.active)
+        assertEquals(legacy.skipped, restored.skipped)
+        assertFalse(restored.completed)
+        assertFalse(restored.practiceFinished)
+        val unfinished = legacy.copy(passed = legacy.passed - TutorialStep.SWITCH).requiredCheckpoint()
+        assertEquals(TutorialStep.SWITCH, unfinished.step)
+        assertEquals(legacy.skipped, unfinished.skipped)
+    }
+    @Test fun `all quiz answers and exercises are required and wrong answer restarts everything`() {
+        val passed = TutorialStep.activeSteps.filter { it != TutorialStep.DONE }.toSet()
+        var progress = TutorialProgress(step = TutorialStep.DONE, active = true, passed = passed).finishPractice()
+        assertEquals(progress, progress.answerQuiz(-1))
+        for (question in TutorialQuiz.questions) {
+            assertFalse(progress.completed)
+            question.options.indices.firstOrNull { it != question.correct }?.let { wrong ->
+                val reset = progress.answerQuiz(wrong)
+                assertEquals(TutorialStep.DOWNLOAD, reset.step)
+                assertEquals(0, reset.quizAnswered)
+                assertTrue(reset.passed.isEmpty())
+                assertTrue(reset.active)
+            }
+            progress = progress.answerQuiz(question.correct)
+            assertEquals(progress, Json.decodeFromString<TutorialProgress>(Json.encodeToString(progress)))
+        }
+        assertTrue(progress.completed)
+        assertEquals(progress, progress.requiredCheckpoint())
+        assertFalse(progress.copy(passed = passed - TutorialStep.SCAN).completed)
+        assertEquals(TutorialProgress(step = TutorialStep.DONE), TutorialProgress(step = TutorialStep.DONE).answerQuiz(2))
+    }
+    @Test fun `quiz starts only after explicitly finishing every practice step`() {
+        val passed = TutorialStep.activeSteps.filter { it != TutorialStep.DONE }.toSet()
+        val ending = TutorialProgress(step = TutorialStep.DONE, passed = passed)
+        assertFalse(ending.practiceFinished)
+        assertEquals(ending, ending.answerQuiz(TutorialQuiz.questions.first().correct))
+        val finished = ending.finishPractice()
+        assertTrue(finished.practiceFinished)
+        assertEquals(1, finished.answerQuiz(TutorialQuiz.questions.first().correct).quizAnswered)
+        val unfinished = ending.copy(passed = passed - TutorialStep.SWITCH)
+        assertEquals(unfinished, unfinished.finishPractice())
+        assertFalse(finished.answerQuiz(0).practiceFinished)
+    }
     @Test fun `assist touch step is deregistered from active tutorial flow`() {
         assertFalse(TutorialStep.activeSteps.contains(TutorialStep.ASSIST_TOUCH))
         val calibrateProgress = TutorialProgress(step = TutorialStep.CALIBRATE)

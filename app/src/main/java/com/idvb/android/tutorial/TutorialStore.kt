@@ -12,16 +12,28 @@ class TutorialStore private constructor(context: Context) {
     private val mutable = MutableStateFlow(runCatching {
         json.decodeFromString<TutorialProgress>(prefs.getString("progress", null) ?: "{}")
     }.getOrDefault(TutorialProgress()).let {
-        if (it.step == TutorialStep.ASSIST_TOUCH) it.copy(step = TutorialStep.ENTER) else it
+        it.requiredCheckpoint()
     })
     val state = mutable.asStateFlow()
+    private val mutableDescriptionReminder = MutableStateFlow(0L)
+    val descriptionReminder = mutableDescriptionReminder.asStateFlow()
+
+    fun remindDescription() {
+        mutableDescriptionReminder.value = maxOf(android.os.SystemClock.uptimeMillis(), mutableDescriptionReminder.value + 1)
+    }
 
     @Synchronized fun update(transform: (TutorialProgress) -> TutorialProgress) {
         val next = transform(mutable.value)
         if (next == mutable.value) return
-        // Persist the entire checkpoint atomically, including practice gestures.
-        // apply updates memory immediately and Android flushes it on lifecycle changes.
-        prefs.edit().putString("progress", json.encodeToString(next)).apply()
+        val previous = mutable.value
+        val editor = prefs.edit().putString("progress", json.encodeToString(next))
+        // Step/quiz checkpoints must be durable. Keep practice drag updates asynchronous.
+        val checkpoint = next.step != previous.step || next.passed != previous.passed || next.skipped != previous.skipped ||
+            next.quizAnswered != previous.quizAnswered || next.completionRevision != previous.completionRevision ||
+            next.practiceFinished != previous.practiceFinished || next.startButtonPracticed != previous.startButtonPracticed
+        if (checkpoint) {
+            if (!editor.commit()) return
+        } else editor.apply()
         mutable.value = next
     }
 

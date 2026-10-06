@@ -91,6 +91,7 @@ captures/
 !app/src/main/res/drawable/sponsor_poster.png
 !app/src/main/res/drawable-nodpi/sponsor_poster.png
 !app/src/main/assets/recognition/map_open_sidebar.png
+!app/src/main/assets/recognition/Gate.png
 
 # Documentation and other non-code content
 *.md

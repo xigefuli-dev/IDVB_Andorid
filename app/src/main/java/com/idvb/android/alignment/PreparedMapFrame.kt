@@ -15,6 +15,7 @@ class PreparedMapFrame(
     val frameSequence: Long? = null,
     private var indicatorBitmap: Bitmap? = null,
     private val indicatorBounds: Rect? = null,
+    val frameReceivedNanos: Long? = null,
 ) {
     fun isFreshFor(region: Rect, nowMs: Long, maximumAgeMs: Long = AutoMapOpenConfig().maximumFrameAgeMs): Boolean = !bitmap.isRecycled && bounds == region &&
         bitmap.width == region.width() && bitmap.height == region.height() &&

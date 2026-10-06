@@ -14,8 +14,13 @@ object GateTemplateImages {
     const val ASSET_PATH = "recognition/Gate.png"
 
     fun loadAsset(context: Context): Mat {
-        OpenCvRuntime.requireAvailable()
         val bytes = context.assets.open(ASSET_PATH).use { it.readBytes() }
+        return decodeAsset(bytes)
+    }
+
+    internal fun decodeAsset(bytes: ByteArray): Mat {
+        OpenCvRuntime.requireAvailable()
+        require(bytes.isNotEmpty()) { "门图标资源为空：$ASSET_PATH" }
         val encoded = Mat(1, bytes.size, CvType.CV_8UC1)
         return try {
             encoded.put(0, 0, bytes)

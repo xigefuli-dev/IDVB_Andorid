@@ -41,11 +41,14 @@ class OverlayWindowManager(private val context: Context) {
 
         private fun refreshTouchOpacity() {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+            touchOpacityAssignments().forEach { (manager, alpha) -> manager.applyAlpha(alpha) }
+        }
+
+        private fun touchOpacityAssignments(): List<Pair<OverlayWindowManager, Float>> {
             val passive = attached.filter { it.isTouchThrough }
-            if (passive.isEmpty()) return
-            val maximum = passive.minOf { it.maximumTouchOpacity }
-            val cap = OverlayTouchOpacity.cap(maximum, passive.size)
-            passive.forEach { manager -> manager.applyAlpha(minOf(manager.opacity, cap)) }
+            if (passive.isEmpty()) return emptyList()
+            val alphas = OverlayTouchOpacity.distribute(passive.minOf { it.maximumTouchOpacity }, passive.map { it.opacity })
+            return passive.zip(alphas)
         }
     }
 
@@ -122,10 +125,8 @@ class OverlayWindowManager(private val context: Context) {
         // Lower existing layers before attaching the new layer.
         refreshTouchOpacity()
         val params = buildParams(locked, focusable).apply {
-            if (locked && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) alpha = minOf(opacity, OverlayTouchOpacity.cap(
-                attached.filter { it.isTouchThrough }.minOf { it.maximumTouchOpacity },
-                attached.count { it.isTouchThrough },
-            ))
+            if (locked && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+                alpha = touchOpacityAssignments().first { it.first === this@OverlayWindowManager }.second
         }
         try {
             wm.addView(v, params)

@@ -14,11 +14,14 @@ object ScreenCaptureGrant {
         private set
 
     @Synchronized
-    fun update(code: Int, intent: Intent?) {
+    fun update(code: Int, intent: Intent?): Boolean {
+        // A rejected replacement request does not revoke a running projection or reuse its token.
+        if (code != Activity.RESULT_OK || intent == null) return false
         revision++
         consumed = false
         resultCode = code
-        data = intent?.let(::Intent)
+        data = Intent(intent)
+        return true
     }
 
     val available: Boolean get() = resultCode == Activity.RESULT_OK && data != null

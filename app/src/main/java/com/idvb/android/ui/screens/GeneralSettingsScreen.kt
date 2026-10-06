@@ -43,7 +43,6 @@ fun GeneralSettingsScreen(onBack: () -> Unit, onOpenPermissions: () -> Unit = {}
     var backgroundScanEnabled by remember { mutableStateOf(AppServices.prefs.backgroundScanEnabled) }
     var manualMapSelectionEnabled by remember { mutableStateOf(AppServices.prefs.manualMapSelectionEnabled) }
     var showUnconfirmedCandidates by remember { mutableStateOf(AppServices.prefs.showUnconfirmedCandidates) }
-    var showAlignmentOutput by remember { mutableStateOf(AppServices.prefs.showAlignmentOutput) }
     var debugMode by remember { mutableStateOf(AppServices.prefs.debugMode) }
     var diagnosticsEnabled by remember { mutableStateOf(AppServices.prefs.recognitionDiagnosticsEnabled) }
     var recentDiagnostics by remember { mutableStateOf(AppServices.recognitionDiagnostics.recentPackages()) }
@@ -119,12 +118,10 @@ fun GeneralSettingsScreen(onBack: () -> Unit, onOpenPermissions: () -> Unit = {}
         SettingsToggleSection(
             icon = Icons.Outlined.FitScreen,
             title = "显示贴合输出",
-            description = "打开后才会显示贴合的状态通知信息",
-            checked = showAlignmentOutput,
-            onCheckedChange = {
-                showAlignmentOutput = it
-                AppServices.prefs.showAlignmentOutput = it
-            },
+            description = "始终显示贴合的状态通知信息，无法关闭",
+            checked = AppServices.prefs.showAlignmentOutput,
+            onCheckedChange = null,
+            enabled = false,
         )
 
         Spacer(Modifier.height(22.dp))
@@ -247,7 +244,8 @@ private fun SettingsToggleSection(
     title: String,
     description: String,
     checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
+    onCheckedChange: ((Boolean) -> Unit)?,
+    enabled: Boolean = true,
     footer: (@Composable ColumnScope.() -> Unit)? = null,
 ) {
     Surface(
@@ -270,7 +268,7 @@ private fun SettingsToggleSection(
                     Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
                     Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                Switch(checked = checked, onCheckedChange = onCheckedChange, colors = diagnosticSwitchColors())
+                Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled, colors = diagnosticSwitchColors())
             }
             footer?.invoke(this)
         }

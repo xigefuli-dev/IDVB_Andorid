@@ -5,6 +5,7 @@ import android.graphics.Rect
 import android.os.Handler
 import android.os.SystemClock
 import com.idvb.android.recognize.AccessibilityScreenCaptureService
+import com.idvb.android.recognize.ProjectionCaptureFrame
 import java.nio.ByteBuffer
 import java.util.concurrent.Executor
 
@@ -19,6 +20,8 @@ class MapOpenFrameCapture(
     private val captureFrame: ((Rect, (Result<Bitmap>) -> Unit) -> (() -> Unit))? = null,
     private val intervalMs: Long = MapOpenReadiness.INTERVAL_MS,
     private val maximumFrameAgeMs: Long = AutoMapOpenConfig().maximumFrameAgeMs,
+    private val captureProjectionFrame: ((Rect, Long, (Result<ProjectionCaptureFrame>) -> Unit) -> (() -> Unit))? = null,
+    private val initialProjectionSequence: Long = -1L,
 ) {
     private var stopped = false
     private var previous: MapFrameSignature? = null
@@ -27,6 +30,7 @@ class MapOpenFrameCapture(
     private var started = 0L
     private var processing = false
     private var timeout = false
+    private var lastConsumedSequence = initialProjectionSequence
     private val prepared = ArrayDeque<PreparedMapFrame>()
     private lateinit var bounds: Rect
     private val next = Runnable { capture() }
@@ -43,11 +47,15 @@ class MapOpenFrameCapture(
     fun start(region: Rect, initialFrames: List<PreparedMapFrame> = emptyList()): () -> Unit {
         bounds = Rect(region); started = SystemClock.elapsedRealtime()
         prepared.addAll(initialFrames)
+        // Prepared samples precede any frames that arrived while hiding overlays or evaluating signatures.
+        // Their identities, rather than the session's current arrival counter, define consumption.
+        initialFrames.mapNotNull { it.frameSequence }.minOrNull()?.let { lastConsumedSequence = it - 1L }
         trace.emit(AlignmentLogEvent("readiness.configuration", "desktop-standard-map-gate-v1",
             thresholds = mapOf("timeoutMs" to MapOpenReadiness.TIMEOUT_MS.toDouble(), "intervalMs" to intervalMs.toDouble(),
                 "color" to MapOpenReadiness.COLOR_THRESHOLD, "brightnessDelta" to MapOpenReadiness.BRIGHTNESS_LIMIT),
             labels = mapOf("sample" to "160x100 nearest-neighbor ARGB32 big-endian", "reference" to if (reference == null) "missing" else "accepted-alignment",
-                "replay" to if (trace.captureArtifacts) "sample-inputs-recorded" else "not-replayable-input-recording-disabled")))
+                "replay" to if (trace.captureArtifacts) "sample-inputs-recorded" else "not-replayable-input-recording-disabled",
+                "projectionWatermark" to "last-consumed-frame", "initialProjectionSequence" to lastConsumedSequence.toString())))
         reference?.let { trace.emit(AlignmentLogEvent("readiness.reference", measurements = mapOf("blueGray" to it.blueGrayFraction, "meanValue" to it.meanValue), series = mapOf("histogram" to it.histogram))) }
         handler.postDelayed(deadline, MapOpenReadiness.TIMEOUT_MS)
         capture()
@@ -67,9 +75,12 @@ class MapOpenFrameCapture(
         attempt++
         val number = attempt
         val began = System.nanoTime()
-        val captured: (Result<Bitmap>) -> Unit = { result ->
+        fun captured(result: Result<Bitmap>, frameSequence: Long? = null, receivedNanos: Long? = null) {
             handler.post {
-                trace.emit(AlignmentLogEvent("readiness.capture", "attempt-$number", durationNanos = System.nanoTime() - began))
+                trace.emit(AlignmentLogEvent("readiness.capture", "attempt-$number", durationNanos = System.nanoTime() - began,
+                    measurements = mapOf("lastConsumedSequence" to lastConsumedSequence.toDouble(),
+                        "frameSequence" to (frameSequence?.toDouble() ?: -1.0),
+                        "frameReceivedNanos" to (receivedNanos?.toDouble() ?: -1.0))))
                 abortCapture = null
                 val bitmap = result.getOrNull()
                 if (stopped) { bitmap?.recycle(); return@post }
@@ -80,6 +91,16 @@ class MapOpenFrameCapture(
                     return@post
                 }
                 if (bitmap == null) { finish(result); return@post }
+                if (captureProjectionFrame != null && frameSequence != null) {
+                    if (frameSequence <= lastConsumedSequence) {
+                        bitmap.recycle()
+                        trace.emit(AlignmentLogEvent("readiness.duplicate-frame", "already-consumed",
+                            measurements = mapOf("frameSequence" to frameSequence.toDouble(), "lastConsumedSequence" to lastConsumedSequence.toDouble())))
+                        handler.post(next)
+                        return@post
+                    }
+                    lastConsumedSequence = frameSequence
+                }
                 processing = true
                 val queued = System.nanoTime()
                 try { executor.execute {
@@ -109,7 +130,8 @@ class MapOpenFrameCapture(
                             }
                             trace.attach("readiness-$number.argb") { ByteBuffer.allocate(pixels.size * 4).apply { pixels.forEach(::putInt) }.array() }
                             trace.emit(AlignmentLogEvent("readiness.frame", decision.mode,
-                                measurements = mapOf("attempt" to number.toDouble(), "score" to decision.score, "blueGray" to signature.blueGrayFraction,
+                                measurements = mapOf("attempt" to number.toDouble(), "frameSequence" to (frameSequence?.toDouble() ?: -1.0),
+                                    "frameReceivedNanos" to (receivedNanos?.toDouble() ?: -1.0), "score" to decision.score, "blueGray" to signature.blueGrayFraction,
                                     "meanValue" to signature.meanValue, "brightnessDelta" to (decision.brightnessDelta ?: -1.0)),
                                 thresholds = mapOf("color" to MapOpenReadiness.COLOR_THRESHOLD, "brightnessDelta" to MapOpenReadiness.BRIGHTNESS_LIMIT),
                                 labels = mapOf("decision" to if (decision.ready) "ready" else "wait", "reason" to when {
@@ -152,14 +174,22 @@ class MapOpenFrameCapture(
             val valid = candidate.isFreshFor(bounds, now, maximumFrameAgeMs)
             trace.emit(AlignmentLogEvent("readiness.prepared-frame", if (valid) "reused-clean-detector-capture" else "discarded-stale-or-region-changed",
                 measurements = mapOf("attempt" to number.toDouble(), "captureStartedAtMs" to candidate.captureStartedAtMs.toDouble(),
-                    "captureReceivedAtMs" to candidate.captureReceivedAtMs.toDouble(), "ageMs" to (now - candidate.captureStartedAtMs).toDouble()),
+                    "captureReceivedAtMs" to candidate.captureReceivedAtMs.toDouble(), "ageMs" to (now - candidate.captureStartedAtMs).toDouble(),
+                    "frameSequence" to (candidate.frameSequence?.toDouble() ?: -1.0),
+                    "frameReceivedNanos" to (candidate.frameReceivedNanos?.toDouble() ?: -1.0)),
                 thresholds = mapOf("maximumFrameAgeMs" to maximumFrameAgeMs.toDouble()),
                 labels = mapOf("ownership" to "unoccluded-map-viewport", "ageOrigin" to "capture-request-start-including-queue")))
-            if (valid) reused = candidate else candidate.recycle()
+            if (valid) reused = candidate else {
+                candidate.frameSequence?.let { lastConsumedSequence = maxOf(lastConsumedSequence, it) }
+                candidate.recycle()
+            }
         }
-        if (reused != null) captured(Result.success(reused.bitmap))
-        else abortCapture = captureFrame?.invoke(bounds, captured)
-            ?: AccessibilityScreenCaptureService.capture(bounds, executor, captured, trace)
+        if (reused != null) captured(Result.success(reused.bitmap), reused.frameSequence, reused.frameReceivedNanos)
+        else abortCapture = captureProjectionFrame?.invoke(bounds, lastConsumedSequence) { result ->
+            val frame = result.getOrNull()
+            captured(result.map { it.bitmap }, frame?.sequence, frame?.receivedNanos)
+        } ?: captureFrame?.invoke(bounds) { captured(it) }
+            ?: AccessibilityScreenCaptureService.capture(bounds, executor, { captured(it) }, trace)
     }
 
     private fun finish(result: Result<Bitmap>, signature: MapFrameSignature? = null) {

@@ -59,7 +59,7 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
 
         fun click(x: Float, y: Float, callback: (Boolean) -> Unit) {
             val service = instance
-            if (service == null || !com.idvb.android.UsageConsent.isAccepted(service) || !x.isFinite() || !y.isFinite() || x < 0 || y < 0) {
+            if (service == null || (!com.idvb.android.UsageConsent.isAccepted(service) || !com.idvb.android.tutorial.TutorialStore.get(service).state.value.completed) || !x.isFinite() || !y.isFinite() || x < 0 || y < 0) {
                 callback(false); return
             }
             val path = android.graphics.Path().apply { moveTo(x, y) }
@@ -86,8 +86,8 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
                 callback(Result.failure(IllegalStateException("无障碍截图服务未启用")))
                 return {}
             }
-            if (!com.idvb.android.UsageConsent.isAccepted(service)) {
-                callback(Result.failure(IllegalStateException("请先打开 IDVB 并确认使用责任声明")))
+            if ((!com.idvb.android.UsageConsent.isAccepted(service) || !com.idvb.android.tutorial.TutorialStore.get(service).state.value.completed)) {
+                callback(Result.failure(IllegalStateException("请先打开 IDVB，确认使用责任声明并完成新手教程")))
                 return {}
             }
             val completed = AtomicBoolean(false)
@@ -198,7 +198,7 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
                     attemptStartUptimeMs = now
                     attemptStarted = System.nanoTime(); attemptNumber++
                     runCatching {
-                        if (!com.idvb.android.UsageConsent.isAccepted(service)) error("请先打开 IDVB 并确认使用责任声明")
+                        if ((!com.idvb.android.UsageConsent.isAccepted(service) || !com.idvb.android.tutorial.TutorialStore.get(service).state.value.completed)) error("请先打开 IDVB，确认使用责任声明并完成新手教程")
                         service.takeScreenshot(Display.DEFAULT_DISPLAY, executor, screenshotCallback)
                     }.onFailure { finish(Result.failure(it)) }
                     }

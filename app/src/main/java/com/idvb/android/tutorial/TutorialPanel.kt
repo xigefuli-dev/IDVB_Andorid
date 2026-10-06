@@ -1,6 +1,8 @@
 package com.idvb.android.tutorial
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.keyframes
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -11,6 +13,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -30,7 +34,26 @@ fun TutorialPanel(
     modifier: Modifier = Modifier,
 ) {
     val progress by store.state.collectAsState()
-    var confirmSkip by remember { mutableStateOf(false) }
+    val descriptionReminder by store.descriptionReminder.collectAsState()
+    val descriptionOffset = remember { Animatable(0f) }
+    val density = LocalDensity.current
+    LaunchedEffect(descriptionReminder) {
+        if (descriptionReminder > 0 && android.os.SystemClock.uptimeMillis() - descriptionReminder <= 500L) {
+            descriptionOffset.snapTo(0f)
+            descriptionOffset.animateTo(0f, keyframes {
+                durationMillis = 360
+                0f at 0
+                6f at 45
+                -6f at 90
+                4f at 135
+                -4f at 180
+                2f at 225
+                -2f at 270
+                0f at 360
+            })
+        }
+    }
+    var confirmSkip by remember(progress.step) { mutableStateOf(false) }
     var confirmRestart by remember { mutableStateOf(false) }
     var feedback by remember(progress.step) { mutableStateOf("") }
     var failedCheckRevision by remember(progress.step) { mutableIntStateOf(0) }
@@ -87,14 +110,15 @@ fun TutorialPanel(
                 Text(if (inPractice) "模拟实战 · $currentDisplayStep/$totalSteps" else "新手教程 · $currentDisplayStep/$totalSteps",
                     style = MaterialTheme.typography.labelLarge)
                 TextButton(onClick = onPause, contentPadding = PaddingValues(0.dp), modifier = Modifier.height(24.dp)) {
-                    Text(if (inPractice) "返回首页" else "稍后继续")
+                    Text(if (inPractice) "返回教程" else "退出，下次继续")
                 }
             }
             LinearProgressIndicator(progress = { activeIndex.toFloat() / totalSteps }, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp))
             Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
                 Text(step.title, style = MaterialTheme.typography.titleLarge)
                 Spacer(Modifier.height(8.dp))
-                Text(step.instructions, style = MaterialTheme.typography.bodyMedium)
+                Text(step.instructions, style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.graphicsLayer { translationX = with(density) { descriptionOffset.value.dp.toPx() } })
                 if (step == TutorialStep.DOWNLOAD) {
                     Row {
                         Checkbox(progress.downloaded, onCheckedChange = { checked -> store.update { it.copy(downloaded = checked) } })
@@ -107,7 +131,7 @@ fun TutorialPanel(
                     Text("先在这里练习，再去游戏里照着做。", style = MaterialTheme.typography.bodySmall)
                 }
                 if (step == TutorialStep.DONE) {
-                    Text("已检查 ${progress.passed.size} 段 · 已跳过 ${progress.skipped.size} 段", modifier = Modifier.padding(top = 10.dp))
+                    Text("练习结束后还需通过问答，才能完成新手教程。", modifier = Modifier.padding(top = 10.dp))
                     if (progress.skipped.isNotEmpty()) Text(
                         "跳过的内容没有算作学会，可以重新练习补上。",
                         style = MaterialTheme.typography.bodySmall,
@@ -124,8 +148,7 @@ fun TutorialPanel(
                     val checkEnabled = cooldownRemaining == 0
                     Button(
                         onClick = {
-                            if (progress.canPass(hasMaps, permissionsReady,
-                                    overlayVisible = com.idvb.android.overlay.OverlayService.isControlOverlayVisible())) {
+                            if (progress.canPass(hasMaps, permissionsReady)) {
                                 if (step == TutorialStep.CALIBRATE) {
                                     showCalibratePassedDialog = true
                                     calibrateCountdown = 10
@@ -135,6 +158,7 @@ fun TutorialPanel(
                                     store.update { it.advance() }
                                 }
                             } else {
+                                store.remindDescription()
                                 feedback = step.hint
                                 failedCheckRevision++
                             }
@@ -159,11 +183,17 @@ fun TutorialPanel(
                         Text("从头再练一次", maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     Button(
-                        onClick = onPause,
+                        onClick = {
+                            if (progress.completed) onPause()
+                            else {
+                                store.update { it.finishPractice() }
+                                if (inPractice && store.state.value.practiceFinished) onPause()
+                            }
+                        },
                         modifier = Modifier.weight(1f),
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
                     ) {
-                        Text("完成", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(if (progress.completed) "完成" else "完成教程", maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
             }
@@ -226,7 +256,7 @@ fun TutorialPanel(
     if (confirmSkip) AlertDialog(
         onDismissRequest = { confirmSkip = false },
         title = { Text("跳过“${step.title}”？") },
-        text = { Text("这一段会记为“已跳过”，不会帮你完成操作。正式使用时，地图包、权限和校准仍然需要准备好。") },
+        text = { Text("这一段会记为“已跳过”，不会帮你完成操作。正式使用时，地图包、权限和校准仍然需要准备好。教程结束后的问答不能跳过。") },
         dismissButton = { TextButton(onClick = { confirmSkip = false }) { Text("继续学习") } },
         confirmButton = { TextButton(onClick = { confirmSkip = false; store.update { it.advance(skip = true) } }) { Text("确认跳过") } },
     )
@@ -238,7 +268,7 @@ fun TutorialPanel(
         confirmButton = { TextButton(onClick = {
             confirmRestart = false
             enterDialogConfirmedStep = null
-            store.update { TutorialProgress() }
+            store.update { TutorialProgress(active = true) }
             if (inPractice) onPause()
         }) { Text("重新开始") } },
     )

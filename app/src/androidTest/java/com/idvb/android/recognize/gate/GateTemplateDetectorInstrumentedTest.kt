@@ -16,6 +16,28 @@ import org.opencv.imgproc.Imgproc
 
 @RunWith(AndroidJUnit4::class)
 class GateTemplateDetectorInstrumentedTest {
+    @Test fun requiredAssetLoadsAndBlankFrameContainsNoGate() {
+        assertTrue(OpenCvRuntime.initialize())
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val frame = Mat(200, 320, CvType.CV_8UC1, Scalar(40.0))
+        try {
+            GateTemplateDetector.fromAssets(context).use { detector ->
+                val result = detector.detect(frame, ScreenRect(0.0, 0.0, 320.0, 200.0))
+                assertTrue("No gates is a valid observation with a healthy template", result.gates.isEmpty())
+            }
+        } finally { frame.release() }
+    }
+
+    @Test fun corruptOrEmptyTemplateIsAnAssetErrorRatherThanNoGates() {
+        assertTrue(OpenCvRuntime.initialize())
+        for (bytes in listOf(byteArrayOf(), "not a PNG".toByteArray())) {
+            val result = runCatching { GateTemplateImages.decodeAsset(bytes) }
+            result.getOrNull()?.release()
+            assertTrue("Damaged templates must fail explicitly", result.isFailure)
+            assertTrue(checkNotNull(result.exceptionOrNull()?.message).contains(GateTemplateImages.ASSET_PATH))
+        }
+    }
+
     @Test
     fun desktopAssetFindsTwoDimmedCopiesAtColdStartScale() {
         assertTrue(OpenCvRuntime.initialize())

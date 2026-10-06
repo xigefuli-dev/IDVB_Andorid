@@ -132,6 +132,7 @@ class MainActivity : ComponentActivity() {
 
     private var catalogTick by mutableIntStateOf(0)
     private var openHomeRequest by mutableIntStateOf(0)
+    private var tutorialEntryConfirmed by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -143,6 +144,21 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             IDVBTheme {
+                val context = LocalContext.current
+                val tutorialStore = remember { TutorialStore.get(context) }
+                val tutorial by tutorialStore.state.collectAsState()
+                LaunchedEffect(tutorial.step) {
+                    if (tutorial.step == TutorialStep.DOWNLOAD && tutorial.passed.isEmpty()) tutorialEntryConfirmed = false
+                }
+                if (!tutorial.completed && !tutorial.practiceFinished && !tutorialEntryConfirmed) {
+                    Box(Modifier.fillMaxSize()) {
+                        com.idvb.android.tutorial.TutorialEntryDialog(onEnter = {
+                            tutorialEntryConfirmed = true
+                            handleFileIntent(intent)
+                        })
+                    }
+                    return@IDVBTheme
+                }
                 var featureGuidesPending by remember {
                     mutableStateOf(com.idvb.android.onboarding.FeatureGuideRegistry.pending(AppServices.prefs.completedFeatureGuides).isNotEmpty())
                 }
@@ -153,7 +169,15 @@ class MainActivity : ComponentActivity() {
                     )
                     return@IDVBTheme
                 }
-                val context = LocalContext.current
+                if (!tutorial.completed && tutorial.step == TutorialStep.DONE && tutorial.practiceFinished) {
+                    BackHandler { finishAndRemoveTask() }
+                    com.idvb.android.tutorial.TutorialQuizScreen(tutorialStore,
+                        onFinished = {
+                            if (!tutorialStore.state.value.practiceFinished) tutorialEntryConfirmed = false
+                            handleFileIntent(intent)
+                        })
+                    return@IDVBTheme
+                }
                 val density = LocalDensity.current
                 val scope = rememberCoroutineScope()
                 var tab by rememberSaveable { mutableIntStateOf(0) }
@@ -186,15 +210,39 @@ class MainActivity : ComponentActivity() {
                     if (page == "main") showExitConfirmation = true else navigateUp()
                 }
                 val permissions = rememberPermissionController()
+                var showTutorialStartNotice by remember { mutableStateOf(false) }
+                val tutorialBlocksStart = {
+                    val current = tutorialStore.state.value
+                    !current.completed
+                }
+                val showBlockedTutorialStart = {
+                    showTutorialStartNotice = true
+                    if (tutorialStore.state.value.step == TutorialStep.START) {
+                        tutorialStore.update { it.copy(startButtonPracticed = true) }
+                    }
+                }
+                val startOverlay: () -> Unit = {
+                    if (tutorialBlocksStart()) showBlockedTutorialStart()
+                    else OverlayService.start(this@MainActivity)
+                }
+                if (showTutorialStartNotice) AlertDialog(
+                    onDismissRequest = { showTutorialStartNotice = false },
+                    title = { Text("请继续新手教程") },
+                    text = { Text("结束新手教程后，同样点击本按钮即可唤起悬浮窗，现在请继续完成新手教程。") },
+                    confirmButton = { TextButton(onClick = { showTutorialStartNotice = false }) { Text("继续教程") } },
+                )
                 var showBatterySkipDialog by rememberSaveable { mutableStateOf(false) }
                 var permanentBatterySkip by rememberSaveable { mutableStateOf(false) }
                 var hideBatterySkipDialog by rememberSaveable { mutableStateOf(false) }
                 val runWithBatterySkipped = {
                     if (permissions.snapshot.readyWithoutBattery) {
                         permissions.skipBatteryForSession()
-                        if (permissions.snapshot.captureMethod == ScreenCaptureMethod.MEDIA_PROJECTION) {
-                            permissions.requestScreenCapture { OverlayService.start(this@MainActivity) }
-                        } else OverlayService.start(this@MainActivity)
+                        if (tutorialBlocksStart()) showBlockedTutorialStart()
+                        else {
+                            if (permissions.snapshot.captureMethod == ScreenCaptureMethod.MEDIA_PROJECTION) {
+                                permissions.requestScreenCapture(startOverlay)
+                            } else startOverlay()
+                        }
                     }
                 }
                 if (showBatterySkipDialog) com.idvb.android.ui.screens.BatterySkipDialog(
@@ -210,8 +258,6 @@ class MainActivity : ComponentActivity() {
                         } else Toast.makeText(context, "保存失败，请重试", Toast.LENGTH_SHORT).show()
                     },
                 )
-                val tutorialStore = remember { TutorialStore.get(context) }
-                val tutorial by tutorialStore.state.collectAsState()
                 val openPractice = {
                     tutorialStore.update { it.copy(practiceOpen = true) }
                     startActivity(Intent(this@MainActivity, TutorialPracticeActivity::class.java))
@@ -222,7 +268,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 LaunchedEffect(tutorial.active, tutorial.step) {
-                    if (!tutorial.active) return@LaunchedEffect
+                    if (!tutorial.active && tutorial.completed) return@LaunchedEffect
                     val tutorialTab = when (tutorial.step) {
                         TutorialStep.IMPORT -> 2
                         TutorialStep.PERMISSIONS -> 0
@@ -282,7 +328,7 @@ class MainActivity : ComponentActivity() {
                             val permissionsReady = permissions.snapshot.readyToStart
                             val ready = hasMaps && permissionsReady
                             val description = if (!hasMaps) "导入地图" else if (ready) "启动服务" else "补全权限"
-                            if (page == "main" && (tab == 0 || tab == 1)) Row(
+                            if (page == "main" && (tab == 0 || tab == 1) && (tutorial.completed || tutorial.step in setOf(TutorialStep.DOWNLOAD, TutorialStep.IMPORT, TutorialStep.PERMISSIONS, TutorialStep.START))) Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                             ) {
@@ -304,7 +350,9 @@ class MainActivity : ComponentActivity() {
                                         val currentHasMaps = withContext(Dispatchers.IO) {
                                             AppServices.repository.loadCatalog().maps.isNotEmpty()
                                         }
-                                        if (!currentHasMaps) {
+                                        if (permissions.snapshot.readyToStart && tutorialBlocksStart()) {
+                                            showBlockedTutorialStart()
+                                        } else if (!currentHasMaps) {
                                             showImportGuideDialog = true
                                         } else if (permissions.snapshot.captureMethod == ScreenCaptureMethod.MEDIA_PROJECTION &&
                                             permissions.snapshot.overlay &&
@@ -312,11 +360,10 @@ class MainActivity : ComponentActivity() {
                                             permissions.snapshot.foregroundService &&
                                             permissions.snapshot.mediaProjectionService &&
                                             permissions.snapshot.batteryRequirementSatisfied) {
-                                            permissions.requestScreenCapture {
-                                                OverlayService.start(this@MainActivity)
-                                            }
+                                            if (tutorialBlocksStart()) showBlockedTutorialStart()
+                                            else permissions.requestScreenCapture(startOverlay)
                                         } else if (permissions.snapshot.readyToStart) {
-                                            OverlayService.start(this@MainActivity)
+                                            startOverlay()
                                         } else permissions.requestNextMissing()
                                     }
                                 },
@@ -346,12 +393,12 @@ class MainActivity : ComponentActivity() {
                         ) { (currentPage, currentTab) ->
                             // 整页平移复用绘制层，避免动画每帧重绘文字、图标和卡片。
                             Column(Modifier.fillMaxSize().graphicsLayer().padding(bottom = if (currentPage == "main") navigationBarHeight else 0.dp)) {
-                                if (tutorial.active && currentPage == "main") TutorialPanel(
+                                if ((tutorial.active || !tutorial.completed) && currentPage == "main") TutorialPanel(
                                     store = tutorialStore,
                                     hasMaps = hasMaps,
                                     permissionsReady = permissions.snapshot.readyToStart,
                                     onPractice = openPractice,
-                                    onPause = { tutorialStore.update { it.copy(active = false) } },
+                                    onPause = { if (tutorial.completed) tutorialStore.update { it.copy(active = false) } else finishAndRemoveTask() },
                                     modifier = Modifier.fillMaxWidth(),
                                 )
                                 Box(Modifier.weight(1f)) {
@@ -546,31 +593,11 @@ class MainActivity : ComponentActivity() {
                     )
                 }
                 if (showTutorialEntryDialog) {
-                    AlertDialog(
-                        onDismissRequest = { showTutorialEntryDialog = false },
-                        title = { Text("新手教程") },
-                        text = {
-                            Text(
-                                "请务必认真进行新手教程，非必要时不要跳过。",
-                                style = MaterialTheme.typography.bodyLarge,
-                            )
-                        },
-                        confirmButton = {
-                            TextButton(
-                                onClick = {
-                                    showTutorialEntryDialog = false
-                                    tutorialStore.update { it.copy(active = true) }
-                                }
-                            ) {
-                                Text("确认")
-                            }
-                        },
-                        dismissButton = {
-                            TextButton(onClick = { showTutorialEntryDialog = false }) {
-                                Text("取消")
-                            }
-                        },
-                    )
+                    com.idvb.android.tutorial.TutorialEntryDialog(onEnter = {
+                        showTutorialEntryDialog = false
+                        tutorialEntryConfirmed = true
+                        tutorialStore.update { it.copy(active = true) }
+                    })
                 }
                 if (showDownloadQueue) SubscriptionDownloadDialog(
                     downloadJobs,
@@ -597,6 +624,9 @@ class MainActivity : ComponentActivity() {
     private fun handleFileIntent(intent: Intent?) {
         if (!UsageConsent.isAccepted(this)) return
         if (com.idvb.android.onboarding.FeatureGuideRegistry.pending(AppServices.prefs.completedFeatureGuides).isNotEmpty()) return
+        val progress = TutorialStore.get(this).state.value
+        if (!progress.completed && !tutorialEntryConfirmed) return
+        if (!progress.completed && progress.step !in setOf(TutorialStep.DOWNLOAD, TutorialStep.IMPORT)) return
         val source = intent ?: return
         val uris = when (source.action) {
             Intent.ACTION_VIEW -> (listOfNotNull(source.data) + source.clipData.allUris()).distinct()

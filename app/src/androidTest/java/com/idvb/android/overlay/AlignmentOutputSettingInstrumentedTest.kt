@@ -8,7 +8,6 @@ import android.os.Build
 import android.view.WindowManager
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.idvb.android.AppServices
 import com.idvb.android.UsageConsent
 import com.idvb.android.data.OverlayPrefs
 import org.junit.Assert.*
@@ -20,7 +19,7 @@ import java.util.UUID
 class AlignmentOutputSettingInstrumentedTest {
 
     @Test
-    fun showAlignmentOutputDefaultsToTrueAndPersistsUserChoices() {
+    fun showAlignmentOutputAlwaysEnabledIncludingLegacyFalseAndPresetChanges() {
         val target = InstrumentationRegistry.getInstrumentation().targetContext
         val name = "alignment-output-setting-${UUID.randomUUID()}"
         val isolated = object : ContextWrapper(target) {
@@ -31,15 +30,14 @@ class AlignmentOutputSettingInstrumentedTest {
         try {
             val prefs = OverlayPrefs(isolated)
             assertTrue("Default must be true", prefs.showAlignmentOutput)
-            prefs.showAlignmentOutput = true
-            assertTrue(OverlayPrefs(isolated).showAlignmentOutput)
-            prefs.showAlignmentOutput = false
-            assertFalse(OverlayPrefs(isolated).showAlignmentOutput)
+            assertTrue(target.getSharedPreferences(name, Context.MODE_PRIVATE).edit()
+                .putBoolean("show_alignment_output", false).commit())
+            assertTrue("Existing instance must ignore legacy false", prefs.showAlignmentOutput)
+            assertTrue("Recreated instance must ignore legacy false", OverlayPrefs(isolated).showAlignmentOutput)
             assertTrue(prefs.completeFeatureGuide("scan-preset-v1", "automatic"))
             assertTrue(OverlayPrefs(isolated).showAlignmentOutput)
-            prefs.showAlignmentOutput = false
             assertTrue(prefs.completeFeatureGuide("scan-preset-v1", "traditional"))
-            assertFalse(OverlayPrefs(isolated).showAlignmentOutput)
+            assertTrue(OverlayPrefs(isolated).showAlignmentOutput)
             assertTrue(prefs.completeFeatureGuide("scan-preset-v1", "automatic"))
             assertTrue(OverlayPrefs(isolated).showAlignmentOutput)
         } finally {
@@ -48,13 +46,13 @@ class AlignmentOutputSettingInstrumentedTest {
     }
 
     @Test
-    fun alignmentNotificationsOnlyShowWhenEnabled() {
+    fun alignmentNotificationsAlwaysShowDespiteLegacyDisabledSetting() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val target = instrumentation.targetContext
         val consent = target.getSharedPreferences("mandatory_usage_consent", Context.MODE_PRIVATE)
         val previousConsent = consent.all["accepted_revision"] as? Int
-        val previousSetting = AppServices.prefs.showAlignmentOutput
-        var service: OverlayService? = null
+        val overlayPrefs = target.getSharedPreferences("overlay", Context.MODE_PRIVATE)
+        val previousSetting = overlayPrefs.all["show_alignment_output"] as? Boolean
         try {
             assertTrue(consent.edit().putInt("accepted_revision", UsageConsent.REVISION).commit())
             instrumentation.runOnMainSync {
@@ -64,14 +62,14 @@ class AlignmentOutputSettingInstrumentedTest {
                 val context = if (Build.VERSION.SDK_INT >= 30) {
                     display.createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null)
                 } else display
-                val s = OverlayService().also { service = it }
+                val s = OverlayService()
                 ContextWrapper::class.java.getDeclaredMethod("attachBaseContext", Context::class.java).apply {
                     isAccessible = true
                 }.invoke(s, context)
                 val field = { name: String -> OverlayService::class.java.getDeclaredField(name).apply { isAccessible = true } }
                 field("overlayContext").set(s, context)
                 val notices = OverlayNotifications(context) { 1280 to 720 }
-                field("notifications").set(s, notices)
+                field("alignmentNotifications").set(s, notices)
 
                 val showMethod = OverlayService::class.java.getDeclaredMethod("showAlignmentNotice", String::class.java, Long::class.javaPrimitiveType).apply {
                     isAccessible = true
@@ -80,15 +78,8 @@ class AlignmentOutputSettingInstrumentedTest {
                     isAccessible = true
                 }
 
-                // 1. When disabled: showing alignment notice returns -1 and no message appears
-                AppServices.prefs.showAlignmentOutput = false
-                val idDisabled = showMethod.invoke(s, "正在准备自动贴合…", 0L) as Long
-                assertEquals(-1L, idDisabled)
-                updateMethod.invoke(s, idDisabled, "正在自动贴合 · 结构校验", 0L)
-                assertEquals(emptyList<String>(), notices.messages())
-
-                // 2. When enabled: showing alignment notice creates a card and update modifies it
-                AppServices.prefs.showAlignmentOutput = true
+                // A legacy disabled preference cannot suppress creation or updates.
+                assertTrue(overlayPrefs.edit().putBoolean("show_alignment_output", false).commit())
                 val idEnabled = showMethod.invoke(s, "正在准备自动贴合…", 0L) as Long
                 assertTrue(idEnabled > 0L)
                 assertEquals(listOf("正在准备自动贴合…"), notices.messages())
@@ -98,7 +89,10 @@ class AlignmentOutputSettingInstrumentedTest {
                 notices.close()
             }
         } finally {
-            AppServices.prefs.showAlignmentOutput = previousSetting
+            val settingEdit = overlayPrefs.edit()
+            if (previousSetting == null) settingEdit.remove("show_alignment_output")
+            else settingEdit.putBoolean("show_alignment_output", previousSetting)
+            assertTrue(settingEdit.commit())
             val edit = consent.edit()
             if (previousConsent == null) edit.remove("accepted_revision") else edit.putInt("accepted_revision", previousConsent)
             assertTrue(edit.commit())

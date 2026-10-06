@@ -83,8 +83,7 @@ fun rememberPermissionController(): PermissionController {
     val captureLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
-        val screenCaptureGranted = result.resultCode == Activity.RESULT_OK && result.data != null
-        ScreenCaptureGrant.update(result.resultCode, result.data)
+        val screenCaptureGranted = ScreenCaptureGrant.update(result.resultCode, result.data)
         val continuation = onScreenCaptureGranted
         onScreenCaptureGranted = null
         if (screenCaptureGranted) continuation?.invoke()

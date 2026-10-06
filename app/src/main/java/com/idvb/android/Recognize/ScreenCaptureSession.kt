@@ -19,6 +19,10 @@ import com.idvb.android.alignment.AlignmentLogSink
 import com.idvb.android.alignment.AutoMapOpenTiming
 import com.idvb.android.alignment.emit
 
+/** The Bitmap belongs to the consumer; identity and arrival time belong to the physical frame. */
+data class ProjectionCaptureFrame(val bitmap: Bitmap, val sequence: Long,
+    val receivedNanos: Long, val timestampNanos: Long)
+
 /** All projection, reader and retained-frame operations share this session's monitor. */
 class ScreenCaptureSession(private val context: Context) {
     val grantRevision = ScreenCaptureGrant.revision
@@ -41,7 +45,7 @@ class ScreenCaptureSession(private val context: Context) {
     @Volatile var onStopped: (() -> Unit)? = null
 
     private inner class Request(val region: Rect, val minimumSequence: Long, val auto: Boolean,
-        val log: AlignmentLogSink, val callback: (Result<Bitmap>) -> Unit) : Runnable {
+        val log: AlignmentLogSink, val callback: (Result<ProjectionCaptureFrame>) -> Unit) : Runnable {
         val started = System.nanoTime()
         val deadline = SystemClock.uptimeMillis() + 3_000L
         val timeout = Runnable { synchronized(this@ScreenCaptureSession) {
@@ -56,10 +60,11 @@ class ScreenCaptureSession(private val context: Context) {
                 latest != null && sequence > minimumSequence && (!auto || ProjectionFrameFreshness.usable(
                     sequence, minimumSequence, System.nanoTime() - latestReceivedNanos, AutoMapOpenTiming.MAXIMUM_CAPTURE_AGE_MS)) -> {
                     val copiedAt = System.nanoTime()
-                    val result = runCatching { copyRegion(latest!!, region) }
+                    val result = runCatching { ProjectionCaptureFrame(copyRegion(latest!!, region),
+                        sequence, latestReceivedNanos, latest!!.timestamp) }
                     if (auto && result.isSuccess) deliveredAutoSequence = sequence
                     log.emit(AlignmentLogEvent("capture.projection-frame", durationNanos = System.nanoTime() - started,
-                        measurements = mapOf("frameSequence" to sequence.toDouble(), "frameTimestampNanos" to latest!!.timestamp.toDouble(),
+                        measurements = mapOf("frameSequence" to sequence.toDouble(), "minimumSequence" to minimumSequence.toDouble(), "frameTimestampNanos" to latest!!.timestamp.toDouble(),
                             "frameReceivedNanos" to latestReceivedNanos.toDouble(), "frameAgeMs" to (copiedAt - latestReceivedNanos) / 1e6,
                             "waitMs" to (copiedAt - started) / 1e6, "copyMs" to (System.nanoTime() - copiedAt) / 1e6),
                         labels = mapOf("captureMethod" to "MEDIA_PROJECTION", "distinctFrame" to (minimumSequence >= 0).toString())))
@@ -69,10 +74,16 @@ class ScreenCaptureSession(private val context: Context) {
                 else -> Unit // Image arrival wakes pending requests; no polling sleep.
             }
         }
-        fun finish(result: Result<Bitmap>) {
-            if (!pending.remove(this)) { result.getOrNull()?.recycle(); return }
+        fun finish(result: Result<ProjectionCaptureFrame>) {
+            if (!pending.remove(this)) { result.getOrNull()?.bitmap?.recycle(); return }
             handler.removeCallbacks(this)
             handler.removeCallbacks(timeout)
+            if (result.isFailure) log.emit(AlignmentLogEvent("capture.projection-terminal",
+                if (result.exceptionOrNull() is java.util.concurrent.CancellationException) "cancelled" else "error",
+                durationNanos = System.nanoTime() - started,
+                measurements = mapOf("minimumSequence" to minimumSequence.toDouble(), "latestSequence" to sequence.toDouble(),
+                    "frameReceivedNanos" to latestReceivedNanos.toDouble()),
+                labels = mapOf("reason" to result.exceptionOrNull()?.message.orEmpty())))
             result.exceptionOrNull()?.let { Log.e("IDVBCapture", "MediaProjection capture failed", it) }
             callback(result)
         }
@@ -129,9 +140,10 @@ class ScreenCaptureSession(private val context: Context) {
 
     /** Clear BEFORE hiding overlays, so the final static frame produced by hiding them is retained. */
     @Synchronized
-    fun prepareCapture() {
+    fun prepareCapture(): Long {
         latest?.close(); latest = null
         runCatching { reader?.acquireLatestImage()?.close() }.onFailure { stop(it) }
+        return sequence
     }
 
     @Synchronized
@@ -154,11 +166,20 @@ class ScreenCaptureSession(private val context: Context) {
         sequence, deliveredAutoSequence, System.nanoTime() - latestReceivedNanos, AutoMapOpenTiming.MAXIMUM_CAPTURE_AGE_MS)
 
     @Synchronized
-    fun captureNext(region: Rect, log: AlignmentLogSink, callback: (Result<Bitmap>) -> Unit): () -> Unit =
-        request(region, sequence, false, log, callback)
+    fun frameSequenceWatermark(): Long = sequence
+
+    /** Consume a frame newer than the consumer's last observation, including one already retained. */
+    @Synchronized
+    fun captureAfter(region: Rect, lastConsumedSequence: Long, log: AlignmentLogSink,
+        callback: (Result<ProjectionCaptureFrame>) -> Unit): () -> Unit =
+        requestFrame(region, lastConsumedSequence, false, log, callback)
 
     private fun request(region: Rect, minimumSequence: Long, auto: Boolean, log: AlignmentLogSink,
-        callback: (Result<Bitmap>) -> Unit): () -> Unit {
+        callback: (Result<Bitmap>) -> Unit): () -> Unit =
+        requestFrame(region, minimumSequence, auto, log) { result -> callback(result.map { it.bitmap }) }
+
+    private fun requestFrame(region: Rect, minimumSequence: Long, auto: Boolean, log: AlignmentLogSink,
+        callback: (Result<ProjectionCaptureFrame>) -> Unit): () -> Unit {
         if (closed || failure != null || reader == null) {
             callback(Result.failure(failure ?: IllegalStateException("屏幕捕获会话未启动")))
             return {}

@@ -42,9 +42,6 @@ class OverlayPrefs(context: Context) {
             editor.putString("search_button_action", SearchButtonAction.SCAN_MAP.name)
                 .putString("eye_button_action", preset.eyeAction.name)
                 .putBoolean("auto_detect_map_open_enabled", preset.autoDetect)
-            if (preset == com.idvb.android.onboarding.ScanPreset.AUTOMATIC) {
-                editor.putBoolean("show_alignment_output", true)
-            }
         }
         choice.captureMethod?.let { method ->
             editor.putString("screen_capture_method", method.name)
@@ -174,10 +171,9 @@ class OverlayPrefs(context: Context) {
         get() = prefs.getBoolean("recognition_diagnostics_enabled", DefaultSettings.RECOGNITION_DIAGNOSTICS)
         set(value) = prefs.edit().putBoolean("recognition_diagnostics_enabled", value).apply()
 
-    /** 打开后才会显示贴合的状态通知信息，默认关闭。 */
-    var showAlignmentOutput: Boolean
-        get() = prefs.getBoolean("show_alignment_output", DefaultSettings.SHOW_ALIGNMENT_OUTPUT)
-        set(value) = prefs.edit().putBoolean("show_alignment_output", value).apply()
+    /** 贴合状态通知固定开启，忽略旧版保存的关闭值，不再提供写入入口。 */
+    val showAlignmentOutput: Boolean
+        get() = true
 
     /** 将攻略地图显示区域限制在屏幕范围内。 */
     var constrainGuideToScreen: Boolean

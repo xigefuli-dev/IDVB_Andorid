@@ -189,65 +189,50 @@ class AutoMapOpenNegativeInstrumentedTest {
         }
     }
 
-    @Test fun queuedMonitoringTickCannotCancelReferenceEditorOrReferenceCapture() {
+    @Test fun detectorCaptureOwnsItsSuccessorUntilCompletion() {
         instrumentation.runOnMainSync {
-            val service = fixtureService(privateContext())
-            try {
-                val aborts = AtomicInteger()
-                val abort: () -> Unit = { aborts.incrementAndGet(); Unit }
-                val poll = service.javaClass.getDeclaredMethod("pollAutoMapOpen").apply { isAccessible = true }
-                assertNull("This fixture deliberately has no saved reference", serviceField(service, "autoReference"))
-                setServiceField(service, "autoCaptureGeneration", 42)
-                setServiceField(service, "abortAutoCapture", abort)
-                for (phase in listOf("editor", "capturing")) {
-                    setServiceField(service, "autoReferenceEditor", phase == "editor")
-                    setServiceField(service, "autoReferenceCapturing", phase == "capturing")
-                    poll.invoke(service)
-                    assertEquals(phase + ": a queued monitor tick must not invalidate the reference capture", 42,
-                        serviceField(service, "autoCaptureGeneration"))
-                    assertEquals(phase + ": monitoring must not abort the one-off reference workflow", 0, aborts.get())
-                    assertSame(phase + ": the reference request keeps ownership of its cancellation", abort,
-                        serviceField(service, "abortAutoCapture"))
-                    assertEquals(phase == "editor", serviceField(service, "autoReferenceEditor"))
-                    assertEquals(phase == "capturing", serviceField(service, "autoReferenceCapturing"))
-                }
-            } finally { closeFixtureService(service) }
+            val queued = LinkedHashMap<Runnable, Long>()
+            var inFlight = false
+            var polls = 0
+            val loop = AutoMapOpenPollLoop(
+                post = { task, delay -> queued[task] = delay }, remove = { queued.remove(it); Unit },
+                canSchedule = { true }, canRecover = { true }, sampleInFlight = { inFlight },
+                poll = { polls++; inFlight = true },
+            )
+            loop.schedule(0L)
+            val tick = queued.keys.single()
+            queued.remove(tick)
+            tick.run()
+            assertEquals(1, polls)
+            assertFalse("The current capture owns successor scheduling", loop.pending)
+            assertTrue(queued.isEmpty())
+            inFlight = false
+            loop.schedule(117L)
+            assertTrue(loop.pending)
+            assertEquals(117L, queued.values.single())
+            loop.stop()
+            assertTrue(queued.isEmpty())
         }
     }
 
-    @Test fun floorChangeCancelsReferenceCaptureAndRestoresEnabledMonitoringTick() {
-        val base = instrumentation.targetContext
-        assertEquals("Only the isolated verification preferences may change", "com.idvb.android.verification", base.packageName)
-        val prefs = base.getSharedPreferences("overlay", Context.MODE_PRIVATE)
-        val key = "auto_detect_map_open_enabled"
-        val original = prefs.all[key]
-        check(original == null || original is Boolean)
+    @Test fun floorChangeCancelsDetectorCaptureAndInvalidatesItsOldCallbackOwner() {
         instrumentation.runOnMainSync {
             val service = fixtureService(privateContext())
             try {
-                com.idvb.android.AppServices.prefs.autoDetectMapOpenEnabled = true
                 val aborts = AtomicInteger()
-                val abort: () -> Unit = { aborts.incrementAndGet(); Unit }
-                setServiceField(service, "guideVisible", false)
-                setServiceField(service, "autoReference", null)
-                setServiceField(service, "autoReferenceCapturing", true)
                 setServiceField(service, "autoCaptureGeneration", 71)
-                setServiceField(service, "abortAutoCapture", abort)
-                val handler = serviceField(service, "mainHandler") as Handler
-                val tick = serviceField(service, "autoTick") as Runnable
-                assertFalse("Reference capture initially owns the paused monitoring loop", handler.hasCallbacks(tick))
+                setServiceField(service, "autoCaptureBusy", true)
+                setServiceField(service, "autoPauseReason", "map-or-floor-changed")
+                setServiceField(service, "abortAutoCapture", { aborts.incrementAndGet(); Unit })
                 service.javaClass.getDeclaredMethod("refreshGuideSelection").apply { isAccessible = true }.invoke(service)
-                assertEquals("Floor change must actually abort the reference capture", 1, aborts.get())
-                assertTrue("The old reference callback must become stale", (serviceField(service, "autoCaptureGeneration") as Int) > 71)
-                assertEquals(false, serviceField(service, "autoReferenceCapturing"))
+                assertEquals("Floor change must actually abort the detector capture", 1, aborts.get())
+                assertTrue("Old callbacks no longer belong to this request", (serviceField(service, "autoCaptureGeneration") as Int) > 71)
+                assertEquals(false, serviceField(service, "autoCaptureBusy"))
                 assertNull(serviceField(service, "abortAutoCapture"))
-                assertTrue("An enabled detector must resume after reference capture was cancelled", handler.hasCallbacks(tick))
-            } finally {
-                closeFixtureService(service)
-                val editor = prefs.edit()
-                if (original is Boolean) editor.putBoolean(key, original) else editor.remove(key)
-                check(editor.commit())
-            }
+                // Cancellation has one owner even if the selection is refreshed again.
+                service.javaClass.getDeclaredMethod("refreshGuideSelection").apply { isAccessible = true }.invoke(service)
+                assertEquals(1, aborts.get())
+            } finally { closeFixtureService(service) }
         }
     }
 

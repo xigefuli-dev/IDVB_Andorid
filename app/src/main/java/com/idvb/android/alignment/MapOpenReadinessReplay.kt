@@ -8,7 +8,8 @@ import kotlinx.serialization.json.*
 
 /** Replays the exact sampled inputs, including timed-out requests with no alignment result. */
 object MapOpenReadinessReplay {
-    data class Frame(val attempt: Int, val recordedReady: Boolean, val replayed: MapFrameReadiness)
+    data class Frame(val attempt: Int, val recordedReady: Boolean, val replayed: MapFrameReadiness,
+        val frameSequence: Long? = null, val frameReceivedNanos: Long? = null)
     fun run(archive: File): List<Frame> = ZipFile(archive).use { zip ->
         val manifest = Json.parseToJsonElement(zip.getInputStream(requireNotNull(zip.getEntry("diagnostics.json"))).bufferedReader().readText()).jsonObject
         require(manifest["readinessReplayReady"]?.jsonPrimitive?.boolean == true) { "Readiness inputs unavailable or incomplete" }
@@ -20,8 +21,16 @@ object MapOpenReadinessReplay {
                 values.getValue("blueGray").jsonPrimitive.double, values.getValue("meanValue").jsonPrimitive.double)
         }
         var previous: MapFrameSignature? = null
+        var previousSequence: Long? = null
         events.filter { it["stage"]?.jsonPrimitive?.content == "readiness.frame" }.map { event ->
-            val attempt = event.getValue("measurements").jsonObject.getValue("attempt").jsonPrimitive.double.toInt()
+            val measurements = event.getValue("measurements").jsonObject
+            val attempt = measurements.getValue("attempt").jsonPrimitive.double.toInt()
+            val sequence = measurements["frameSequence"]?.jsonPrimitive?.double?.toLong()?.takeIf { it >= 0 }
+            val received = measurements["frameReceivedNanos"]?.jsonPrimitive?.double?.toLong()?.takeIf { it > 0 }
+            sequence?.let {
+                require(previousSequence == null || it > checkNotNull(previousSequence)) { "Readiness reused a physical projection frame" }
+                previousSequence = it
+            }
             val name = "readiness-$attempt.argb"
             val bytes = zip.getInputStream(requireNotNull(zip.getEntry(name))).readBytes()
             require(bytes.size == MapOpenReadiness.WIDTH * MapOpenReadiness.HEIGHT * 4)
@@ -31,7 +40,8 @@ object MapOpenReadinessReplay {
             val signature = MapOpenReadiness.signature(IntArray(bytes.size / 4) { input.int })
             val decision = MapOpenReadiness.evaluate(signature, reference, previous)
             previous = signature
-            Frame(attempt, event.getValue("labels").jsonObject.getValue("decision").jsonPrimitive.content == "ready", decision)
+            Frame(attempt, event.getValue("labels").jsonObject.getValue("decision").jsonPrimitive.content == "ready", decision,
+                sequence, received)
         }
     }
 }

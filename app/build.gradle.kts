@@ -133,6 +133,7 @@ val generateAlignmentProvenance = tasks.register<GenerateAlignmentProvenance>("g
         include("**/*.kt", "**/*.java", "**/*.xml", "**/*.contract")
         include("**/*.cpp", "**/*.h", "**/*.mk")
         include("main/assets/FloorIndicators/*.png", "main/assets/FloorIndicators/*.json")
+        include("main/assets/recognition/*.png")
     }, rootProject.fileTree("tools") { include("**/*.ps1", "**/*.rules", "**/*.properties") },
         rootProject.file("app/build.gradle.kts"), rootProject.file("build.gradle.kts"),
         rootProject.file("settings.gradle.kts"), rootProject.file("gradle/libs.versions.toml"),
@@ -264,7 +265,22 @@ val verifyMediaStorageBoundary = tasks.register("verifyMediaStorageBoundary") {
         logger.lifecycle("PASS: runtime, test, build and local verification sources have no shared-media output APIs or paths")
     }
 }
-tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(verifyMediaStorageBoundary) }
+val verifyRecognitionAssets = tasks.register("verifyRecognitionAssets") {
+    val gate = layout.projectDirectory.file("src/main/assets/recognition/Gate.png")
+    inputs.file(gate)
+    doLast {
+        check(gate.asFile.isFile) { "Required recognition asset missing: recognition/Gate.png" }
+        val sha256 = MessageDigest.getInstance("SHA-256").digest(gate.asFile.readBytes())
+            .joinToString("") { "%02x".format(it) }
+        check(sha256 == "caf6964009e0fa967e3ac42c8d68efc174872ccf978075fb29272b09af072f0b") {
+            "Gate.png differs from the audited template; verify its origin and update the expected fingerprint deliberately"
+        }
+        logger.lifecycle("PASS: required Gate.png matches the audited recognition template")
+    }
+}
+tasks.matching { it.name == "preBuild" }.configureEach {
+    dependsOn(verifyMediaStorageBoundary, verifyRecognitionAssets)
+}
 
 dependencies {
     implementation(platform(libs.compose.bom))
