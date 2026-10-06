@@ -21,6 +21,16 @@ class ForegroundWindowPolicyTest {
             "com.idvb.android", "com.idvb.android.overlay.CandidateSelectionView"))
     }
 
+    @Test fun recordedColorOsVolumeDialogRetainsTheGameAfterItsPanelCloses() {
+        // Original OPPO feedback: app.log 2026-10-03 23:03:05.620.
+        val window = "com.oplus.systemui.volume.view.OplusVolumeDialogView\$CustomDialog"
+        assertEquals("transient-volume-window", ForegroundWindowPolicy.ignoredWindowReason(
+            "com.android.systemui", window))
+        assertNull(ForegroundWindowPolicy.ignoredWindowReason("another.app", window))
+        assertNull(ForegroundWindowPolicy.ignoredWindowReason("com.android.systemui",
+            "com.oplus.systemui.shade.OplusNotificationShadeWindowView"))
+    }
+
     @Test fun notificationShadeLockScreenHomeAndSettingsRemainForegroundChanges() {
         for ((pkg, window) in listOf(
             "com.android.systemui" to "com.android.systemui.shade.NotificationShadeWindowView",

@@ -15,7 +15,7 @@ import java.io.File
 /** Repair semantic details omitted by the walkable contour profile using the immutable
  * reference source and the original prebuilt domain, never live observations or residuals. */
 internal object VpsgReferenceGeometry {
-    const val ALGORITHM_ID = "prepared-geometry-v11"
+    const val ALGORITHM_ID = "prepared-geometry-v12"
     private data class Prepared(val line: ResolvedPrebuiltStructureLine, val color: ByteArray,
         val original: ByteArray, val holes: List<Double>, val sourceHash: String, val colorArtifact: String,
         val hatch: ReferenceHatchGeometry.Result, val partition: ReferencePartitionGeometry.Result,
@@ -112,14 +112,15 @@ internal object VpsgReferenceGeometry {
                 "policy" to "source-only-parallel-diagonal-texture-with-continuous-measured-rectangular-frame; prebuilt-walls-preserved")))
         log.attach("reference-partitions.gray8") { prepared.partition.edges }
         log.attach("reference-striped-frames.gray8") { prepared.striped.edges }
-        log.emit(AlignmentLogEvent("vpsg.reference.striped-frames", "reference-room-framed-vertical-stripes-v5",
+        log.emit(AlignmentLogEvent("vpsg.reference.striped-frames", "reference-room-framed-vertical-stripes-v6",
             thresholds = ReferenceStripedFrameGeometry.thresholds,
             series = ReferenceStripedFrameGeometry.colorRanges + mapOf(
                 "candidateLTRBLeftRightTopBottomSupportBandsDensityAccepted" to prepared.striped.candidates,
                 "componentXYWHAreaEligible" to prepared.striped.components,
+                "horizontalRunPairsLeftRightYLeftRightYOverlapEndpointsAgreeProposed" to prepared.striped.horizontalRunPairs,
                 "acceptedLTRB" to prepared.striped.rectangles),
             labels = mapOf("sourceSha256" to prepared.sourceHash, "artifact" to "reference-striped-frames.gray8",
-                "policy" to "immutable-source-only-room-grates; corridor-stair-decoration-excluded; grouping-joins-measured-horizontal-and-vertical-borders; measured-four-borders-max-fixed-flank-or-directional-top-hat-continuity-and-four-stripe-bands; no-live-input-or-residual; original-walls-preserved")))
+                "policy" to "immutable-source-only-room-grates; corridor-stair-decoration-excluded; dim-end-horizontal-runs-use-measured-union-only-with-75-percent-overlap; measured-four-full-span-borders-max-fixed-flank-or-directional-top-hat-continuity-and-four-stripe-bands; no-endpoint-extrapolation-or-live-residual; original-walls-preserved")))
         log.emit(AlignmentLogEvent("vpsg.reference.partitions", "reference-anchored-partition-v1",
             thresholds = ReferencePartitionGeometry.thresholds,
             series = ReferencePartitionGeometry.colorRanges + mapOf("candidateVerticalXYWHDomainFlankMissingAnchorIncluded" to prepared.partition.candidates,

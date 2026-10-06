@@ -57,7 +57,8 @@ class AlignmentFailureCorpusInstrumentedTest {
             }
             val saved = AlignmentDiagnosticsStore(storeContext).record(trace,
                 AlignmentDiagnosticContext(replay.testCase.methodId, request.map, request.floor.key,
-                    request.viewport, 0, 0, "saved-failure-replay"), request.frame, report.result,
+                    request.viewport, 0, 0, "saved-failure-replay",
+                    floorSelectedByIndicator = request.floorSelectedByIndicator), request.frame, report.result,
                 "replay").getOrThrow()
             val roundTrip = AlignmentPackageReplay.open(context, saved).use { recorded ->
                 recorded.run(expectedOutcome = report.result.outcome,

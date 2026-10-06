@@ -165,7 +165,7 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
         presentAlpha(eyeButton, if (enabled) 1f else .32f)
         eyeButton.contentDescription = when {
             candidatesAvailable -> "查看候选地图"
-            automaticMapOpen -> "自动开图检测中，手动显示已禁用"
+            automaticMapOpen && mapLocked -> "自动小抄，手动显示或隐藏攻略地图"
             else -> "显示攻略地图"
         }
     }
@@ -179,7 +179,7 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
             false -> "?$label"
             null -> label
         }
-        floorButton.contentDescription = if (automaticMapOpen) "自动小抄，手动切换楼层已禁用" else when (identityVerified) {
+        floorButton.contentDescription = when (identityVerified) {
             true -> "结构已确认的地图，切换楼层"
             false -> "人工选择且结构未确认的地图，切换楼层"
             null -> "切换楼层"

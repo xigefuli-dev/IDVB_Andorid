@@ -17,6 +17,49 @@ class AutoMapOpenFrameReuseInstrumentedTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val main = Handler(Looper.getMainLooper())
     private val bounds = Rect(20, 30, 180, 130)
+
+    @Test fun builtinAssetLoadsAfterCalibrationReachesTheScreenEdgeAcrossLandscapeSizes() {
+        val store = AutoMapOpenReferenceStore(instrumentation.targetContext)
+        for ((width, height) in listOf(2414 to 1080, 2400 to 1080, 1920 to 1080, 2560 to 1600)) {
+            for (calibratedRight in listOf(.87f, .96f, 1f)) {
+                val reference = requireNotNull(store.loadBuiltin(width, height, calibratedRight, "com.netease.dwrg"))
+                assertTrue(reference.region[0] <= calibratedRight)
+                val left = kotlin.math.floor(reference.region[0].toDouble() * width)
+                assertTrue(width - left >= requireNotNull(reference.sidebarAspectRatio) * height * 1.15)
+                assertTrue(AutoMapOpenDetector.isUsableReference(AutoMapOpenDetector.signature(reference.signaturePixels)))
+            }
+        }
+    }
+
+    @Test fun cancellingQueuedAutomaticSamplePreventsComparisonAndReleasesCapturedBitmap() {
+        val captured = Bitmap.createBitmap(160, 100, Bitmap.Config.ARGB_8888)
+        var queued: Runnable? = null
+        var cancel: (() -> Unit)? = null
+        var callbacks = 0
+        var comparisons = 0
+        val trace = AlignmentTrace()
+        instrumentation.runOnMainSync {
+            cancel = AutoMapOpenFrameSampler(main, java.util.concurrent.Executor { queued = it },
+                compare = { comparisons++; error("Cancelled sample must not compare") },
+                captureFrame = { _, callback -> callback(Result.success(captured)); {} })
+                .sampleWithFrame(bounds, bounds, null, { true }, { false }, { true }, trace) {
+                    assertTrue(it.isFailure); callbacks++
+                }
+        }
+        instrumentation.waitForIdleSync()
+        instrumentation.runOnMainSync {
+            assertNotNull(queued)
+            requireNotNull(cancel).invoke()
+        }
+        val executor = Executors.newSingleThreadExecutor()
+        try { executor.submit(requireNotNull(queued)).get(5, TimeUnit.SECONDS) }
+        finally { executor.shutdownNow() }
+        instrumentation.waitForIdleSync()
+        assertTrue(captured.isRecycled)
+        assertEquals(0, comparisons)
+        assertEquals(1, callbacks)
+        assertTrue(trace.snapshot().any { it.stage == "sample.cancelled-exit" && it.detail == "worker-start" })
+    }
     private fun frame(color: Int, at: Long = SystemClock.uptimeMillis(), region: Rect = bounds): PreparedMapFrame =
         PreparedMapFrame(Bitmap.createBitmap(160, 100, Bitmap.Config.ARGB_8888).apply { eraseColor(color) }, Rect(region), at, at)
 

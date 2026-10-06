@@ -8,7 +8,7 @@ import kotlin.math.abs
  * Require four measured borders and repeated vertical stripes; never use a live residual. */
 internal object ReferenceStripedFrameGeometry {
     data class Result(val edges: ByteArray, val candidates: List<Double>, val rectangles: List<Double>,
-        val components: List<Double>)
+        val components: List<Double>, val horizontalRunPairs: List<Double>)
     private data class Run(val left: Int, val right: Int, val y: Int)
     val colorRanges = mapOf("roomHsvMin" to listOf(0.0, 18.0, 50.0), "roomHsvMax" to listOf(25.0, 165.0, 200.0),
         "wrapRoomHsvMin" to listOf(170.0, 18.0, 50.0), "wrapRoomHsvMax" to listOf(179.0, 165.0, 200.0))
@@ -17,6 +17,7 @@ internal object ReferenceStripedFrameGeometry {
         "groupWidth" to 5.0, "groupHeight" to 3.0, "minimumArea" to 80.0,
         "minimumWidth" to 12.0, "minimumHeight" to 8.0, "maximumSpan" to 100.0,
         "borderSearchPadding" to 6.0, "borderEndpointTolerance" to 2.0,
+        "minimumHorizontalRunOverlap" to .75,
         "sideProbeRadius" to 2.0, "minimumSideSupport" to .75, "minimumHorizontalSupport" to .75,
         "directionalEdgeMinimumContrast" to 6.0, "directionalEdgeMinimumContinuity" to .75,
         "sideFlankDistance" to 6.0, "minimumSideContrast" to 12.0,
@@ -59,6 +60,7 @@ internal object ReferenceStripedFrameGeometry {
             val componentStats = IntArray(count * Imgproc.CC_STAT_MAX).also { stats.get(0, 0, it) }
             val componentValues = DoubleArray(maxOf(0, count - 1) * 6)
             val evidence = ArrayList<Double>(); val rectangles = ArrayList<IntArray>()
+            val horizontalRunPairs = ArrayList<Double>()
             for (component in 1 until count) {
                 AlignmentCancellation.checkpoint("vpsg.reference.striped-component")
                 val at = component * Imgproc.CC_STAT_MAX
@@ -87,9 +89,22 @@ internal object ReferenceStripedFrameGeometry {
                 for (top in runs) for (bottom in runs) {
                     AlignmentCancellation.checkpoint("vpsg.reference.striped-frame")
                     val span = bottom.y - top.y
-                    if (span !in 8..100 || top.right - top.left !in 12..100 ||
-                        abs(top.left - bottom.left) > 2 || abs(top.right - bottom.right) > 2) continue
-                    val left = (top.left + bottom.left) / 2; val right = (top.right + bottom.right) / 2
+                    if (span !in 8..100 || top.right - top.left !in 12..100) continue
+                    val endpointsAgree = abs(top.left - bottom.left) <= 2 && abs(top.right - bottom.right) <= 2
+                    val unionLeft = minOf(top.left, bottom.left); val unionRight = maxOf(top.right, bottom.right)
+                    val overlap = (minOf(top.right, bottom.right) - maxOf(top.left, bottom.left) + 1)
+                        .coerceAtLeast(0).toDouble() / (unionRight - unionLeft + 1)
+                    // A dim end can shorten one horizontal top-hat run without removing
+                    // the frame. Propose its measured union only when both runs cover
+                    // the same border domain; all four full-span support gates below
+                    // still have to pass. Never extrapolate beyond a measured endpoint.
+                    val proposed = unionRight - unionLeft in 12..100 && (endpointsAgree || overlap >= .75)
+                    horizontalRunPairs.addAll(listOf(top.left.toDouble(), top.right.toDouble(), top.y.toDouble(),
+                        bottom.left.toDouble(), bottom.right.toDouble(), bottom.y.toDouble(), overlap,
+                        if (endpointsAgree) 1.0 else 0.0, if (proposed) 1.0 else 0.0))
+                    if (!proposed) continue
+                    val left = if (endpointsAgree) (top.left + bottom.left) / 2 else unionLeft
+                    val right = if (endpointsAgree) (top.right + bottom.right) / 2 else unionRight
                     fun side(center: Int, direction: Int) = (maxOf(0, center - 2)..minOf(width - 1, center + 2)).maxOf { col ->
                         val flank = (center + direction * 6).coerceIn(0, width - 1)
                         (top.y..bottom.y).count { row ->
@@ -139,7 +154,8 @@ internal object ReferenceStripedFrameGeometry {
                         Point(right.toDouble(), bottom.y.toDouble()), Scalar.all(255.0), 2)
                 }
             }
-            return Result(pixels(output), evidence, rectangles.flatMap { it.map(Int::toDouble) }, componentValues.asList())
+            return Result(pixels(output), evidence, rectangles.flatMap { it.map(Int::toDouble) },
+                componentValues.asList(), horizontalRunPairs)
         } finally {
             listOf(hsv, semantic, wrap, high, binary, vertical, horizontal, grouped,
                 labels, stats, centers, output, k5, kv, kh, kg).forEach(Mat::release)

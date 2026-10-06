@@ -7,7 +7,7 @@ import org.opencv.core.*
 import org.opencv.imgproc.Imgproc
 
 class ReferenceStripedGeometryInstrumentedTest {
-    private fun frame(borders: Boolean, stripes: Boolean): ReferenceStripedFrameGeometry.Result {
+    private fun frame(borders: Boolean, stripes: Boolean, dimTopEnd: Int = 0): ReferenceStripedFrameGeometry.Result {
         OpenCvRuntime.requireAvailable()
         val source = Mat(100, 150, CvType.CV_8UC3, Scalar(66.0, 80.0, 97.0))
         val gray = Mat()
@@ -15,9 +15,21 @@ class ReferenceStripedGeometryInstrumentedTest {
             if (stripes) for (x in 48..78 step 5) Imgproc.line(source, Point(x.toDouble(), 36.0),
                 Point(x.toDouble(), 58.0), Scalar(102.0, 119.0, 143.0), 1)
             if (borders) Imgproc.rectangle(source, Point(45.0, 35.0), Point(80.0, 59.0), Scalar(102.0, 119.0, 143.0), 1)
+            if (dimTopEnd > 0) Imgproc.line(source, Point((80 - dimTopEnd).toDouble(), 35.0),
+                Point(79.0, 35.0), Scalar(66.0, 80.0, 97.0), 1)
             Imgproc.cvtColor(source, gray, Imgproc.COLOR_BGR2GRAY)
             return ReferenceStripedFrameGeometry.extract(source, gray)
         } finally { source.release(); gray.release() }
+    }
+    @Test fun dimHorizontalEndUsesMeasuredFullFrameWithoutInventingMissingBorders() {
+        val recovered = frame(true, true, dimTopEnd = 7)
+        assertEquals(recovered.rectangles.toString(), 4, recovered.rectangles.size)
+        assertEquals(45.0, recovered.rectangles[0], 2.0)
+        assertEquals(80.0, recovered.rectangles[2], 2.0)
+        val pairs = recovered.horizontalRunPairs.chunked(9)
+        assertTrue("Must exercise unequal measured endpoints", pairs.any { it[7] == 0.0 && it[8] == 1.0 })
+        val missingBorder = frame(true, true, dimTopEnd = 18)
+        assertTrue(missingBorder.rectangles.toString(), missingBorder.rectangles.isEmpty())
     }
     @Test fun requiresClosedContrastFrameAndRepeatedSlats() {
         val accepted = frame(true, true)

@@ -28,6 +28,7 @@ class AutoMapOpenFrameSampler(
         indicatorBounds: Rect? = null, isIndicatorOccluded: () -> Boolean = { true },
         callback: (Result<AutoMapOpenSample>) -> Unit): () -> Unit {
         val done = AtomicBoolean(false)
+        val cancelRequestedNanos = java.util.concurrent.atomic.AtomicLong(0L)
         var abort: (() -> Unit)? = null
         val startedAtMs = SystemClock.uptimeMillis()
         fun finish(result: Result<AutoMapOpenSample>) {
@@ -56,6 +57,17 @@ class AutoMapOpenFrameSampler(
                             log.emit(AlignmentLogEvent("sample.worker-queue", durationNanos = System.nanoTime() - queued))
                             var retained: PreparedMapFrame? = null
                             val sampled = runCatching {
+                                fun checkCancelled(stage: String) {
+                                    if (done.get()) {
+                                        log.emit(AlignmentLogEvent("sample.cancelled-exit", stage,
+                                            durationNanos = System.nanoTime() - queued,
+                                            measurements = mapOf("cancelResponseMs" to cancelRequestedNanos.get().let {
+                                                if (it > 0) (System.nanoTime() - it) / 1e6 else 0.0
+                                            })))
+                                        throw java.util.concurrent.CancellationException("auto-detection-cancelled-$stage")
+                                    }
+                                }
+                                checkCancelled("worker-start")
                                 require(bitmap.width == captureBounds.width() && bitmap.height == captureBounds.height()) { "auto-detection-size-changed" }
                                 require(captureBounds.contains(bounds)) { "auto-detection-region-changed" }
                                 val reducedAt = System.nanoTime()
@@ -65,11 +77,13 @@ class AutoMapOpenFrameSampler(
                                     finally { if (patch !== bitmap) patch.recycle() }
                                 log.emit(AlignmentLogEvent("sample.roi", durationNanos = System.nanoTime() - reducedAt))
                                 val decidedAt = System.nanoTime()
+                                checkCancelled("before-comparison")
                                 val comparison = compare?.invoke(pixels)
                                 val decisionMs = (System.nanoTime() - decidedAt) / 1e6
                                 log.emit(AlignmentLogEvent("sample.spatial-comparison", durationNanos = (decisionMs * 1e6).toLong(),
                                     labels = mapOf("backend" to AutoMapOpenNativeKernel.backend,
                                         "search" to "unchanged-all-windows-all-nine-probes", "score" to "unchanged-double-precision")))
+                                checkCancelled("after-comparison")
                                 if (retainMap && (comparison == null || comparison.score >= .85) && captureBounds.contains(requireNotNull(mapBounds))) {
                                     val copiedAt = System.nanoTime()
                                     val cropped = Bitmap.createBitmap(bitmap, mapBounds.left - captureBounds.left,
@@ -114,6 +128,9 @@ class AutoMapOpenFrameSampler(
             }
         }
         return {
+            if (!done.get()) cancelRequestedNanos.compareAndSet(0L, System.nanoTime())
+            log.emit(AlignmentLogEvent("sample.cancel-requested", "capture-and-queued-sampling",
+                measurements = mapOf("alreadyCompleted" to if (done.get()) 1.0 else 0.0)))
             finish(Result.failure(java.util.concurrent.CancellationException("auto-detection-cancelled")))
             abort?.invoke()
         }

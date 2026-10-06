@@ -6,7 +6,8 @@ object ForegroundWindowPolicy {
         if (className?.startsWith("com.idvb.android.overlay.") == true) return "own-overlay"
         if (packageName == "com.android.systemui" && className != null) {
             val windowClass = className.substringAfterLast('.').substringBefore('$')
-            if (windowClass.startsWith("VolumeDialog") || windowClass.startsWith("VolumePanel")) {
+            if (windowClass.startsWith("VolumeDialog") || windowClass.startsWith("VolumePanel") ||
+                windowClass == "OplusVolumeDialogView") {
                 // Dismissal of the volume panel need not emit a new game window event.
                 return "transient-volume-window"
             }

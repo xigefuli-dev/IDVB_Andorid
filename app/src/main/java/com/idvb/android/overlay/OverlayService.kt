@@ -207,6 +207,8 @@ class OverlayService : Service() {
     private var captureSession: ScreenCaptureSession? = null
     private var captureMethod = AppServices.prefs.screenCaptureMethod
     private var lastCaptureScreen: Pair<Int, Int>? = null
+    private var lastCaptureRotation: Int? = null
+    private var calibrationRevision = 0L
     private var destroyed = false
     private val capturePreferencesListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == "auto_detect_map_open_enabled") mainHandler.post {
@@ -474,6 +476,8 @@ class OverlayService : Service() {
         val density = overlayContext.resources.displayMetrics.density
         val screen = screenSize()
         val catalog = AppServices.repository.loadCatalog()
+        lastCaptureScreen = screen
+        lastCaptureRotation = screenRotation()
         val activeClassId = resolveActiveClassId(catalog)
         currentMap = AppServices.prefs.lastMapId?.let { id ->
             catalog.maps.firstOrNull { it.id == id && it.classId == activeClassId }
@@ -485,7 +489,10 @@ class OverlayService : Service() {
         // 收起菜单时窗口必须与小球同高，避免不可见的透明区域拦截底层应用触摸。
         val hasVariants = catalog.nextVariantMapId(currentMap?.id.orEmpty()) != null
         window.width = ((if (hasVariants) 264 else 212) * density).toInt(); window.height = (48 * density).toInt()
-        window.x = (screen.first - window.width).coerceAtLeast(0); window.y = (screen.second * .28f).toInt()
+        // Automatic detection samples the fixed right-hand sidebar. Starting the row
+        // on that edge makes our own controls permanently occlude every sample.
+        window.x = if (AppServices.prefs.autoDetectMapOpenEnabled) 0 else (screen.first - window.width).coerceAtLeast(0)
+        window.y = (screen.second * .28f).toInt()
         balls = OverlayBallView(overlayContext).apply {
             ballMenu = OverlayBallMenuWindow(overlayContext, window, morePanel, ::screenSize)
             mapLocked = currentMap != null
@@ -503,12 +510,9 @@ class OverlayService : Service() {
                 }
                 override fun useAssistTouchToggle() = false
                 override fun onAssistTouch() {}
-                override fun onToggleGuide() {
-                    if (!requireTutorialCompleted()) return
-                    if (!showPendingCandidates() && !AppServices.prefs.autoDetectMapOpenEnabled) toggleGuide()
-                }
+                override fun onToggleGuide() = handleEyeAction()
                 override fun onOpenGuide() = openGuide()
-                override fun onCloseGuide() { if (!AppServices.prefs.autoDetectMapOpenEnabled) hideGuide() }
+                override fun onCloseGuide() = hideGuide()
                 override fun onNextFloor() = nextFloor()
                 override fun onNextVariant() = nextVariant()
                 override fun onFreeAdjust() = enterFreeAdjustMode()
@@ -1199,6 +1203,11 @@ class OverlayService : Service() {
         if (candidateView == null && candidateResult != null) closeCandidates(recycleCapture = true)
     }
 
+    private fun handleEyeAction() {
+        if (!requireTutorialCompleted()) return
+        if (!showPendingCandidates()) toggleGuide()
+    }
+
     private fun toggleGuide() {
         if (!requireTutorialCompleted()) return
         if (guideVisible) hideGuide() else openGuide()
@@ -1295,10 +1304,6 @@ class OverlayService : Service() {
 
     private fun openGuide() {
         if (!requireTutorialCompleted()) return
-        if (AppServices.prefs.autoDetectMapOpenEnabled) {
-            showPendingCandidates()
-            return
-        }
         val replaceAutomaticRequest = autoGuideOwned && (aligning || !alignmentDisplayReady)
         autoDetector?.manualClose()
         autoGuideOwned = false
@@ -1435,6 +1440,7 @@ class OverlayService : Service() {
             recordAlignmentPreflightFailure(clicked, "map-or-floor-catalog-changed", "地图资料已更新，请重新选择地图"); return
         }
         val screen = screenSize()
+        val requestRotation = screenRotation()
         val region = captureRegionPixels(screen.first, screen.second) ?: run {
             recordAlignmentPreflightFailure(clicked, "capture-region-missing", "截图区域尚未校准"); return
         }
@@ -1511,6 +1517,7 @@ class OverlayService : Service() {
                 "identitySource" to AppServices.prefs.lastMapIdentitySource.name,
                 "showAlignmentOutput" to AppServices.prefs.showAlignmentOutput.toString()),
             measurements = mapOf("screenWidth" to screen.first.toDouble(), "screenHeight" to screen.second.toDouble(),
+                "displayRotation" to requestRotation.toDouble(),
                 "captureX" to viewport.x, "captureY" to viewport.y, "captureWidth" to viewport.width, "captureHeight" to viewport.height)))
         fun complete(outcome: AlignmentResult?, terminal: String, frame: Bitmap? = null) {
             if (trace.completed.get()) return
@@ -1594,7 +1601,8 @@ class OverlayService : Service() {
         fun current() = !destroyed && generation == alignmentGeneration && guideVisible &&
             OverlayState.state.value.visible && !practiceForeground && currentMap == map &&
             isAlignmentCatalogCurrent(catalogSnapshot,map,floor) &&
-            map.floors.sortedBy { it.sortOrder }.getOrNull(floorIndex) == floor && screenSize() == screen &&
+            map.floors.sortedBy { it.sortOrder }.getOrNull(floorIndex) == floor && screenSize() == screen && screenRotation() == requestRotation &&
+            captureRegionPixels(screen.first, screen.second) == region &&
             (if (autoCycle == null) AppServices.prefs.eyeButtonAction == EyeButtonAction.SHOW_AND_ALIGN else
                 autoGuideOwned && autoContext == requestAutoContext && autoDetector === requestDetector &&
                 requestDetector?.isOpen == true && requestDetector.manualSuppressed == false &&
@@ -1979,7 +1987,8 @@ class OverlayService : Service() {
 
     private fun nextFloor() {
         if (!requireTutorialCompleted()) return
-        if (AppServices.prefs.autoDetectMapOpenEnabled) return
+        if (!OverlayControlPolicy(AppServices.prefs.autoDetectMapOpenEnabled, currentMap != null,
+                candidateResult != null).floorEnabled) return
         val map = currentMap ?: return
         val floors = map.floors.sortedBy { it.sortOrder }
         if (floors.isEmpty()) return
@@ -1992,7 +2001,9 @@ class OverlayService : Service() {
     }
 
     private fun previousFloor() {
-        if (AppServices.prefs.autoDetectMapOpenEnabled) return
+        if (!requireTutorialCompleted()) return
+        if (!OverlayControlPolicy(AppServices.prefs.autoDetectMapOpenEnabled, currentMap != null,
+                candidateResult != null).floorEnabled) return
         val map = currentMap ?: return
         val floors = map.floors.sortedBy { it.sortOrder }
         if (floors.isEmpty()) return
@@ -2290,30 +2301,15 @@ class OverlayService : Service() {
     private fun enterBlueprintMode() {
         if (!requireTutorialCompleted()) return
         if (blueprintView != null || adjustView != null || candidateView != null) return
-        cancelAlignment()
+        invalidateAutomaticCalibration("calibration-enter")
+        cancelCaptureScan()
         val screen = screenSize()
         blueprintWindow.x = 0; blueprintWindow.y = 0
         blueprintWindow.width = screen.first; blueprintWindow.height = screen.second
         blueprintView = BlueprintCalibrationView(overlayContext).apply {
             listener = object : BlueprintCalibrationView.Listener {
                 override fun onConfirmed(region: RectF) {
-                    alignedGuideBounds = null
-                    alignedGuideViewport = null
-                    val size = screenSize()
-                    AppServices.prefs.setCaptureRegion(
-                        landscape = size.first > size.second,
-                        left = region.left / width,
-                        top = region.top / height,
-                        right = region.right / width,
-                        bottom = region.bottom / height,
-                    )
-                    if (guideVisible) {
-                        val guideRegion = guideRegionPixels(size.first, size.second) ?: region
-                        applyGuidePlacement(guideRegion)
-                        guideWindow.update()
-                    }
-                    exitBlueprintMode()
-                    notifyOverlay("显示区域已校准")
+                    commitBlueprintCalibration(this@apply, region)
                 }
                 override fun onCancelled() = exitBlueprintMode()
             }
@@ -2324,9 +2320,59 @@ class OverlayService : Service() {
     }
 
     private fun exitBlueprintMode() {
+        // Clear before removing the full-screen mask so its last pixels cannot be reused.
+        captureSession?.prepareCapture()
         blueprintWindow.remove()
         blueprintView = null
         refreshCalibrationBorder()
+        scheduleAutoMapOpen(0L)
+    }
+
+    private fun invalidateAutomaticCalibration(reason: String) {
+        calibrationRevision++
+        stopAutoMapGuide(reason)
+        autoDetector = null; autoContext = ""; autoReferenceScreen = ""
+        autoOpeningFrameNanos = 0L
+    }
+
+    private fun commitBlueprintCalibration(view: BlueprintCalibrationView, region: RectF) {
+        if (!com.idvb.android.UsageConsent.isAccepted(this) || !requireTutorialCompleted()) return
+        val size = screenSize()
+        val origin = IntArray(2).also(view::getLocationOnScreen)
+        val started = System.nanoTime()
+        val converted = runCatching { CalibrationCoordinatePolicy.screenRegion(
+            ScreenRect(region.left.toDouble(), region.top.toDouble(), region.right.toDouble() - region.left.toDouble(),
+                region.bottom.toDouble() - region.top.toDouble()),
+            origin[0], origin[1], view.width, view.height, size.first, size.second) }
+        val physical = converted.getOrNull()
+        autoDiagnostics.captureEvent(AlignmentLogEvent("calibration.coordinates", if (physical == null) "rejected" else "converted-to-display",
+            durationNanos = System.nanoTime() - started,
+            measurements = mapOf("viewOriginX" to origin[0].toDouble(), "viewOriginY" to origin[1].toDouble(),
+                "viewWidth" to view.width.toDouble(), "viewHeight" to view.height.toDouble(),
+                "screenWidth" to size.first.toDouble(), "screenHeight" to size.second.toDouble(),
+                "displayRotation" to screenRotation().toDouble(), "localLeft" to region.left.toDouble(),
+                "localTop" to region.top.toDouble(), "localRight" to region.right.toDouble(), "localBottom" to region.bottom.toDouble()) +
+                (physical?.let { mapOf("screenLeft" to it.x, "screenTop" to it.y,
+                    "screenRight" to it.x + it.width, "screenBottom" to it.y + it.height) } ?: emptyMap()),
+            labels = mapOf("coordinatePolicy" to "view-local-plus-actual-screen-origin; normalize-by-display-size",
+                "failure" to converted.exceptionOrNull()?.toString().orEmpty())))
+        if (physical == null) { notifyOverlay("校准窗口尺寸已变化，请重新框选"); return }
+        val oldRegion = captureRegionPixels(size.first, size.second)
+        invalidateAutomaticCalibration("calibration-committed")
+        alignedGuideBounds = null; alignedGuideViewport = null
+        AppServices.prefs.setCaptureRegion(size.first > size.second,
+            (physical.x / size.first).toFloat(), (physical.y / size.second).toFloat(),
+            ((physical.x + physical.width) / size.first).toFloat(), ((physical.y + physical.height) / size.second).toFloat())
+        autoDiagnostics.event("calibration-committed", autoReference, sessionLogs.sessionId,
+            state = mapOf("calibrationRevision" to calibrationRevision.toString(),
+                "previousRegion" to oldRegion?.toShortString().orEmpty(),
+                "currentRegion" to captureRegionPixels(size.first, size.second)?.toShortString().orEmpty()), forceSnapshot = true)
+        if (guideVisible) {
+            guideRegionPixels(size.first, size.second)?.let(::applyGuidePlacement)
+            guideWindow.update()
+        }
+        exitBlueprintMode()
+        notifyOverlay("显示区域已校准")
     }
 
     private fun refreshCalibrationBorder() {
@@ -2425,6 +2471,7 @@ class OverlayService : Service() {
                     "mapId" to currentMap?.id.orEmpty(), "floorIndex" to floorIndex.toString(),
                     "hostForeground" to hostForeground.toString(), "practiceForeground" to practiceForeground.toString(),
                     "overlayVisible" to OverlayState.state.value.visible.toString(),
+                    "displayRotation" to screenRotation().toString(), "screenSize" to screenSize().toString(),
                     "pollPending" to autoPollLoop.pending.toString(), "captureBusy" to autoCaptureBusy.toString(),
                     "recoveryIntervalMs" to "350", "detectorOpen" to autoDetector?.isOpen.toString(),
                     "manualSuppressed" to autoDetector?.manualSuppressed.toString(),
@@ -2495,6 +2542,7 @@ class OverlayService : Service() {
             captureSession?.hasFreshAutoFrame() != true && !autoStaticResume) return
 
         val screen = screenSize()
+        val rotation = screenRotation()
         if (screen.first <= screen.second) {
             stopAutoMapGuide("landscape-required")
             return
@@ -2512,7 +2560,8 @@ class OverlayService : Service() {
         }
 
         val calibRight = calibrated.right
-        val screenKey = "$screen:${calibRight}:$targetPackage"
+        val sampleCalibrationRevision = calibrationRevision
+        val screenKey = "$screen:$rotation:$sampleCalibrationRevision:${calibRight}:$targetPackage"
         if (autoReferenceScreen != screenKey || autoReference == null) {
             autoReferenceScreen = screenKey
             autoReference = autoReferenceStore.loadBuiltin(screen.first, screen.second, calibRight / screen.first, targetPackage)
@@ -2530,7 +2579,7 @@ class OverlayService : Service() {
         val interval = if (method == ScreenCaptureMethod.MEDIA_PROJECTION)
             com.idvb.android.alignment.AutoMapOpenTiming.INTERVAL_MS else 350L
         val floorContext = if (AppServices.prefs.autoFloorEnabled) "indicator" else floorIndex.toString()
-        val context = "${reference.id}:$targetPackage:$screen:${currentMap?.id}:$floorContext:${AppServices.prefs.alignmentMethodId}:$method:${calibrated.toShortString()}"
+        val context = "${reference.id}:$targetPackage:$screen:$rotation:$sampleCalibrationRevision:${currentMap?.id}:$floorContext:${AppServices.prefs.alignmentMethodId}:$method:${calibrated.toShortString()}"
         if (context != autoContext || autoDetector == null) {
             val widthFraction = reference.sidebarAspectRatio?.let { aspect ->
                 (aspect * screen.second / ((1.0 - reference.region[0]) * screen.first)).coerceIn(1e-6, 1.0)
@@ -2575,7 +2624,15 @@ class OverlayService : Service() {
             detector.observe(null, now)
             if (autoPauseReason != "reference-occluded") {
                 autoPauseReason = "reference-occluded"
+                autoDiagnostics.captureEvent(AlignmentLogEvent("auto-map.reference-occluded", "unknown-observation; sample-paused",
+                    labels = mapOf("referenceBounds" to region.toShortString(),
+                        "independentRoots" to OverlayWindowManager.visibleScreenRoots(setOf(guideWindow, calibrationBorderWindow))
+                            .joinToString(";") { "${it.viewClass}:${it.bounds.toShortString()}:viewAlpha=${it.viewAlpha}:windowAlpha=${it.windowAlpha}" },
+                        "guideVisibleParts" to guideView?.visibleAlignedParts()?.joinToString(";") { it.toShortString() }.orEmpty(),
+                        "calibratedBounds" to calibrated.toShortString(), "displayRotation" to rotation.toString(),
+                        "calibrationRevision" to sampleCalibrationRevision.toString())))
                 autoDiagnostics.event(autoPauseReason, reference, sessionLogs.sessionId, lastAlignmentRequestId)
+                notifyOverlay("右侧开图检测区域被悬浮窗遮挡，请移开悬浮按钮或提示窗口")
             }
             scheduleAutoMapOpen(interval)
             return
@@ -2611,6 +2668,11 @@ class OverlayService : Service() {
             event.measurements["frameSequence"]?.let { observedFrameSequence.set(it.toLong()) }
             autoDiagnostics.captureEvent(event.copy(labels = event.labels + ("autoSampleId" to sampleId)))
         }
+        captureLog.emit(AlignmentLogEvent("sample.coordinate-space", "current-display-upright",
+            measurements = mapOf("screenWidth" to screen.first.toDouble(), "screenHeight" to screen.second.toDouble(),
+                "displayRotation" to rotation.toDouble(), "calibrationRevision" to sampleCalibrationRevision.toDouble(), "calibratedRight" to calibRight.toDouble(),
+                "referenceLeft" to region.left.toDouble(), "referenceRight" to region.right.toDouble()),
+            labels = mapOf("rotationPolicy" to "invalidate-even-when-width-and-height-unchanged", "autoContext" to context)))
         calibrationBorderView?.takeIf { it.isShown }?.let { border ->
             captureLog.emit(AlignmentLogEvent("sample.calibration-border", "outside-map-viewport",
                 measurements = mapOf("left" to calibrationBorderWindow.x.toDouble(),
@@ -2640,7 +2702,8 @@ class OverlayService : Service() {
             isCurrent = { !destroyed && generation == autoCaptureGeneration && autoContext == context &&
                 !scanning && blueprintView == null && adjustView == null && candidateView == null &&
                 AppServices.prefs.autoDetectMapOpenEnabled && com.idvb.android.UsageConsent.isAccepted(this) &&
-                !practiceForeground && OverlayState.state.value.visible && screenSize() == screen &&
+                !practiceForeground && OverlayState.state.value.visible && screenSize() == screen && screenRotation() == rotation &&
+                calibrationRevision == sampleCalibrationRevision && captureRegionPixels(screen.first, screen.second) == calibrated &&
                 autoExternalPackage() == targetPackage && AppServices.prefs.screenCaptureMethod == method },
             isOccluded = { autoRegionOccluded(region) },
             isMapOccluded = { mapRegion == null || autoRegionOccluded(RectF(mapRegion)) },
@@ -2798,6 +2861,7 @@ class OverlayService : Service() {
     private fun refreshWindowsForDisplayChange() {
         if (balls == null) return
         val screen = screenSize()
+        val rotation = screenRotation()
         notifications?.position()
         alignmentNotifications?.position()
         if (blueprintView != null) {
@@ -2827,7 +2891,10 @@ class OverlayService : Service() {
                 (screen.second - scanProgressWindow.height).coerceAtLeast(0))
             scanProgressWindow.update()
         }
-        if (lastCaptureScreen != screen) {
+        if (lastCaptureScreen != screen || lastCaptureRotation != rotation) {
+            blueprintView?.resetSelectionForDisplayChange()
+            stopAutoMapGuide("display-coordinate-space-changed")
+            autoDetector = null; autoContext = ""; autoReferenceScreen = ""
             assistController?.cancel()
             assistEditorWindow?.remove(); assistEditorWindow = null
             cancelCaptureScan()
@@ -2835,9 +2902,10 @@ class OverlayService : Service() {
             alignedGuideViewport = null
             guideView?.clearAlignment()
             lastCaptureScreen = screen
+            lastCaptureRotation = rotation
         }
         if (AppServices.prefs.screenCaptureMethod == ScreenCaptureMethod.MEDIA_PROJECTION) {
-            captureSession?.start(screen.first, screen.second)
+            captureSession?.start(screen.first, screen.second, rotation)
         }
         if (guideVisible) {
             val guideRegion = guideRegionPixels(screen.first, screen.second)
@@ -2895,6 +2963,9 @@ class OverlayService : Service() {
             .setSmallIcon(R.drawable.ic_notification).setContentIntent(openApp).setOngoing(true)
             .addAction(0, "关闭", close).build()
     }
+
+    private fun screenRotation(): Int = getSystemService(DisplayManager::class.java)
+        .getDisplay(Display.DEFAULT_DISPLAY)?.rotation ?: android.view.Surface.ROTATION_0
 
     private fun screenSize(): Pair<Int, Int> {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {

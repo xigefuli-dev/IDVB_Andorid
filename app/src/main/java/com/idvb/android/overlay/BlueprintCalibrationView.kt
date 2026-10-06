@@ -38,6 +38,17 @@ class BlueprintCalibrationView(context: Context,
     private var selecting = false
     private var selection: RectF? = null
 
+    fun resetSelectionForDisplayChange() {
+        selecting = false
+        selection = null
+        invalidate()
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        if (oldw > 0 && oldh > 0 && (w != oldw || h != oldh)) resetSelectionForDisplayChange()
+    }
+
     private val safeTop get() = if (Build.VERSION.SDK_INT >= 30) {
         rootWindowInsets?.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())?.top ?: 0
     } else rootWindowInsets?.systemWindowInsetTop ?: 0
@@ -78,7 +89,8 @@ class BlueprintCalibrationView(context: Context,
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 if (cancelRect.contains(event.x, event.y) || resetRect.contains(event.x, event.y) || confirmRect.contains(event.x, event.y)) return true
-                startX = event.x; startY = event.y; currentX = event.x; currentY = event.y; selecting = true
+                startX = event.x.coerceIn(0f, width.toFloat()); startY = event.y.coerceIn(0f, height.toFloat())
+                currentX = startX; currentY = startY; selecting = true
                 selection = makeRect(); invalidate()
             }
             MotionEvent.ACTION_MOVE -> if (selecting) {

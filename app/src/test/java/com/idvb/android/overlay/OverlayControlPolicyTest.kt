@@ -15,19 +15,19 @@ class OverlayControlPolicyTest {
         assertFalse(pending.floorEnabled)
         // Manual selection and reliable scan confirmation both commit a map.
         val selected = pending.copy(mapSelected = true, candidatesPending = false)
-        assertFalse(selected.eyeEnabled)
-        assertFalse(selected.floorEnabled)
+        assertTrue(selected.eyeEnabled)
+        assertTrue(selected.floorEnabled)
         assertFalse(selected.retainDismissedCandidates)
     }
 
-    @Test fun ambiguousRescanOverridesRetainedMapAndNextConfirmationDisablesEye() {
+    @Test fun ambiguousRescanOverridesRetainedMapAndConfirmationRestoresManualControls() {
         val selected = OverlayControlPolicy(true, true, false)
-        assertFalse(selected.eyeEnabled)
+        assertTrue(selected.eyeEnabled)
         val ambiguous = selected.copy(candidatesPending = true)
         assertTrue(ambiguous.eyeEnabled)
         assertTrue(ambiguous.retainDismissedCandidates)
         assertFalse(ambiguous.floorEnabled)
-        assertFalse(ambiguous.copy(candidatesPending = false).eyeEnabled)
+        assertTrue(ambiguous.copy(candidatesPending = false).eyeEnabled)
     }
 
     @Test fun traditionalControlsAndDismissalRemainManual() {

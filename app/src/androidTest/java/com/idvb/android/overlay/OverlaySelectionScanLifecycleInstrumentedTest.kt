@@ -208,7 +208,7 @@ class OverlaySelectionScanLifecycleInstrumentedTest {
         }
     }
 
-    @Test fun automaticCandidateDismissalRetainsChoiceAndManualCommitDisablesControls() {
+    @Test fun automaticCandidateDismissalRetainsChoiceAndManualCommitRestoresControls() {
         Fixture().use { f ->
             f.main {
                 AppServices.prefs.autoDetectMapOpenEnabled = true
@@ -229,20 +229,139 @@ class OverlaySelectionScanLifecycleInstrumentedTest {
                 assertEquals(true, f.lock(manual))
                 assertNull(f.get("candidateResult"))
                 assertFalse(f.balls.candidatesAvailable)
-                assertFalse(OverlayControlPolicy(true, f.balls.mapLocked, false).eyeEnabled)
+                assertTrue(OverlayControlPolicy(true, f.balls.mapLocked, false).eyeEnabled)
+                assertTrue(OverlayControlPolicy(true, f.balls.mapLocked, false).floorEnabled)
                 assertEquals(MapIdentitySource.MANUAL_UNVERIFIED, AppServices.prefs.lastMapIdentitySource)
             }
         }
     }
 
-    @Test fun automaticFloorCommandsDoNotCancelOrChangeSelection() {
+    @Test fun automaticFloorCommandsCancelPendingScanAndChangeSelection() {
         Fixture().use { f ->
             f.main {
                 AppServices.prefs.autoDetectMapOpenEnabled = true
-                f.call("nextFloor"); f.call("previousFloor")
+                f.call("nextFloor")
+                assertEquals(1, f.get("floorIndex"))
+                assertEquals("2f", AppServices.prefs.lastFloorKey)
+                assertTrue((f.get("scanGeneration") as Int) > 41)
+                f.call("previousFloor")
                 assertEquals(0, f.get("floorIndex"))
                 assertEquals("1f", AppServices.prefs.lastFloorKey)
-                assertEquals(41, f.get("scanGeneration"))
+                assertTrue((f.get("scanGeneration") as Int) > 41)
+            }
+        }
+    }
+
+    @Test fun oppositeRotationWithUnchangedDimensionsCancelsOldAutomaticCapture() {
+        Fixture().use { f ->
+            f.main {
+                val screen = f.call("screenSize")
+                val rotation = f.call("screenRotation") as Int
+                f.set("lastCaptureScreen", screen)
+                f.set("lastCaptureRotation", (rotation + 2) % 4)
+                f.set("autoContext", "old-opposite-rotation")
+                f.set("autoCaptureBusy", true)
+                val aborted = AtomicInteger()
+                f.set("abortAutoCapture", { aborted.incrementAndGet(); Unit })
+                val detector = com.idvb.android.alignment.AutoMapOpenDetector(
+                    com.idvb.android.alignment.AutoMapOpenDetector.signature(IntArray(768) {
+                        if (it / 32 % 4 < 2) 0xff687580.toInt() else 0xffc0c8d0.toInt()
+                    }))
+                f.set("autoDetector", detector)
+                f.call("refreshWindowsForDisplayChange")
+                assertEquals(1, aborted.get())
+                assertFalse(f.get("autoCaptureBusy") as Boolean)
+                assertNull(f.get("autoDetector"))
+                assertEquals("", f.get("autoContext"))
+                assertEquals(screen, f.get("lastCaptureScreen"))
+                assertEquals(rotation, f.get("lastCaptureRotation"))
+                assertFalse(f.get("scanning") as Boolean)
+            }
+        }
+    }
+
+    @Test fun automaticEyeHandlerClosesAndCancelsActualAlignmentThenReopensSelectedGuide() {
+        Fixture().use { f ->
+            f.main {
+                assertTrue(com.idvb.android.UsageConsent.accept(InstrumentationRegistry.getInstrumentation().targetContext))
+                AppServices.prefs.autoDetectMapOpenEnabled = true
+                AppServices.prefs.eyeButtonAction = com.idvb.android.data.EyeButtonAction.SHOW_ONLY
+                f.set("scanning", false)
+                val screen = f.call("screenSize") as Pair<*, *>
+                AppServices.prefs.setCaptureRegion((screen.first as Int) > (screen.second as Int), .1f, .1f, .8f, .8f)
+                f.installCachedGuide()
+                val cancellation = AlignmentCancellation()
+                f.set("activeAlignmentCancellation", cancellation)
+                f.set("aligning", true); f.set("guideVisible", true); f.set("autoGuideOwned", true)
+                f.call("handleEyeAction")
+                assertTrue(cancellation.isCancelled)
+                assertFalse(f.get("guideVisible") as Boolean)
+                assertFalse(f.get("autoGuideOwned") as Boolean)
+                f.call("handleEyeAction")
+                assertTrue(f.get("guideVisible") as Boolean)
+                assertTrue(f.balls.guideVisible)
+                assertFalse(f.get("aligning") as Boolean)
+            }
+        }
+    }
+
+    @Test fun automaticDefaultControlRootDoesNotOccludeTheRightSidebar() {
+        Fixture().use { f ->
+            f.main {
+                assertTrue(com.idvb.android.UsageConsent.accept(InstrumentationRegistry.getInstrumentation().targetContext))
+                AppServices.prefs.autoDetectMapOpenEnabled = true
+                f.set("scanning", false)
+                (f.get("window") as OverlayWindowManager).remove()
+                f.set("balls", null)
+                f.call("ensureBalls")
+            }
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            f.main {
+                val screen = f.call("screenSize") as Pair<*, *>
+                val width = screen.first as Int; val height = screen.second as Int
+                assertEquals(0, (f.get("window") as OverlayWindowManager).x)
+                assertEquals(false, f.call("autoRegionOccluded", RectF(width * .85f, 0f, width.toFloat(), height.toFloat()), RectF::class.java))
+                assertTrue((f.get("balls") as OverlayBallView).isShown)
+            }
+        }
+    }
+
+    @Test fun recalibrationStopsOldCaptureAndScanAndPersistsActualWindowCoordinates() {
+        Fixture().use { f ->
+            val aborted = AtomicInteger()
+            val scan = AlignmentCancellation()
+            f.main {
+                assertTrue(com.idvb.android.UsageConsent.accept(InstrumentationRegistry.getInstrumentation().targetContext))
+                f.set("autoCaptureBusy", true)
+                f.set("abortAutoCapture", { aborted.incrementAndGet(); Unit })
+                f.set("autoContext", "before-recalibration")
+                f.set("scanCancellation", scan)
+                f.call("enterBlueprintMode")
+                assertEquals(1, aborted.get())
+                assertTrue(scan.isCancelled)
+                assertFalse(f.get("scanning") as Boolean)
+                assertFalse(f.get("autoCaptureBusy") as Boolean)
+                assertEquals("", f.get("autoContext"))
+            }
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            f.main {
+                val view = f.get("blueprintView") as BlueprintCalibrationView
+                assertTrue("Actual calibration window was not laid out", view.width > 0 && view.height > 0)
+                val origin = IntArray(2).also(view::getLocationOnScreen)
+                val screen = f.call("screenSize") as Pair<*, *>
+                val width = screen.first as Int; val height = screen.second as Int
+                val region = RectF(view.width * .2f, view.height * .2f, view.width * .7f, view.height * .7f)
+                val revision = f.get("calibrationRevision") as Long
+                f.confirmCalibration(view, region)
+                val saved = requireNotNull(AppServices.prefs.captureRegion(width > height))
+                assertEquals((origin[0] + region.left) / width, saved[0], .00001f)
+                assertEquals((origin[1] + region.top) / height, saved[1], .00001f)
+                assertEquals((origin[0] + region.right) / width, saved[2], .00001f)
+                assertEquals((origin[1] + region.bottom) / height, saved[3], .00001f)
+                assertEquals(revision + 1, f.get("calibrationRevision"))
+                assertNull(f.get("blueprintView"))
+                assertNull(f.get("alignedGuideBounds"))
+                assertEquals(1, aborted.get())
             }
         }
     }
@@ -311,12 +430,21 @@ class OverlaySelectionScanLifecycleInstrumentedTest {
         private val prefs = base.getSharedPreferences("overlay", Context.MODE_PRIVATE)
         private val savedKeys = listOf("last_map_id", "last_floor_key", "last_map_identity_source",
             "selected_map_class_id", "debug_mode", "manual_map_selection_enabled", "show_unconfirmed_candidates", "background_scan_enabled",
-            "auto_detect_map_open_enabled")
+            "auto_detect_map_open_enabled", "eye_button_action") +
+            listOf("capture_landscape", "capture_portrait", "guide_landscape", "guide_portrait")
+                .flatMap { prefix -> listOf("left", "top", "right", "bottom").map { "${prefix}_$it" } }
         private val saved = savedKeys.associateWith { prefs.all[it] }
+        private val layoutPrefs = base.getSharedPreferences("overlay_button_layout", Context.MODE_PRIVATE)
+        private val hadCustomLayout = layoutPrefs.contains("custom")
+        private val originalCustomLayout = layoutPrefs.getBoolean("custom", false)
         private val originalCatalog = AppServices.repository.loadCatalog()
         private val consentPrefs = base.getSharedPreferences("mandatory_usage_consent", Context.MODE_PRIVATE)
         private val hadConsentRecord = consentPrefs.contains("accepted_revision")
         private val originalConsentRevision = consentPrefs.getInt("accepted_revision", 0)
+        private val tutorialStore = com.idvb.android.tutorial.TutorialStore.get(base)
+        private val originalTutorial = tutorialStore.state.value
+        private val tutorialPrefs = base.getSharedPreferences("beginner_tutorial_v1", Context.MODE_PRIVATE)
+        private val originalTutorialRecord = tutorialPrefs.getString("progress", null)
         private val originalState = OverlayState.state.value
         private val practiceField = OverlayService::class.java.getDeclaredField("practiceForeground").apply { isAccessible = true }
         private val originalPractice = practiceField.getBoolean(null)
@@ -352,6 +480,15 @@ class OverlaySelectionScanLifecycleInstrumentedTest {
             var createdHandler: Handler? = null
             main {
                 practiceField.setBoolean(null, false)
+                assertTrue(layoutPrefs.edit().putBoolean("custom", false).commit())
+                // This fixture is restricted to the isolated verification App above.
+                // Exercise controls after the real tutorial gate has been satisfied.
+                tutorialStore.update { com.idvb.android.tutorial.TutorialProgress(
+                    step = com.idvb.android.tutorial.TutorialStep.DONE,
+                    passed = com.idvb.android.tutorial.TutorialStep.activeSteps.toSet(),
+                    quizAnswered = com.idvb.android.tutorial.TutorialQuiz.questions.size,
+                    completionRevision = com.idvb.android.tutorial.TutorialQuiz.REVISION,
+                    practiceFinished = true) }
                 AppServices.repository.saveCatalog(MapCatalogDocument(classes = listOf(ClassRecord(id, "fixture"),
                     ClassRecord(otherClass, "other")), maps = listOf(a, b),
                     variantGroups = listOf(MapVariantGroupRecord("$id-group", id, 0, listOf(a.id, b.id)))))
@@ -363,7 +500,7 @@ class OverlaySelectionScanLifecycleInstrumentedTest {
                 ContextWrapper::class.java.getDeclaredMethod("attachBaseContext", Context::class.java)
                     .apply { isAccessible = true }.invoke(service, context)
                 set("overlayContext", context)
-                for (name in listOf("window", "guideWindow", "candidateWindow", "scanProgressWindow", "blueprintWindow")) {
+                for (name in listOf("window", "guideWindow", "candidateWindow", "scanProgressWindow", "blueprintWindow", "calibrationBorderWindow")) {
                     val window = OverlayWindowManager(context)
                     set(name, window); windows.add(window)
                 }
@@ -385,6 +522,19 @@ class OverlaySelectionScanLifecycleInstrumentedTest {
         private fun field(name: String) = OverlayService::class.java.getDeclaredField(name).apply { isAccessible = true }
         fun get(name: String): Any? = field(name).get(service)
         fun set(name: String, value: Any?) = field(name).set(service, value)
+        fun installCachedGuide() {
+            val prepared = call("guideFloorPreparation") as Pair<*, *>
+            set("guideBitmapKey", prepared.first)
+            val bitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
+            set("guideBitmap", bitmap)
+            val view = GuideMapView(get("overlayContext") as Context)
+            set("guideView", view)
+            windows[1].apply { width = 32; height = 32; add(view, locked = true) }
+            AppServices.prefs.clearGuideRegion(true); AppServices.prefs.clearGuideRegion(false)
+        }
+        fun confirmCalibration(view: BlueprintCalibrationView, region: RectF) = OverlayService::class.java
+            .getDeclaredMethod("commitBlueprintCalibration", BlueprintCalibrationView::class.java, RectF::class.java)
+            .apply { isAccessible = true }.invoke(service, view, region)
         fun call(name: String) = OverlayService::class.java.getDeclaredMethod(name).apply { isAccessible = true }.invoke(service)
         fun call(name: String, value: Any?, type: Class<*>) = OverlayService::class.java.getDeclaredMethod(name, type)
             .apply { isAccessible = true }.invoke(service, value)
@@ -451,6 +601,8 @@ class OverlaySelectionScanLifecycleInstrumentedTest {
             awaitResourceRelease()
             main {
                 handler.removeCallbacksAndMessages(null)
+                (get("buttonLayout") as? OverlayButtonLayout)?.dispose()
+                (get("ballMenu") as? OverlayBallMenuWindow)?.hide()
                 call("closeCandidates", true, java.lang.Boolean.TYPE)
                 call("hideScanProgress")
                 windows.forEach { it.remove() }
@@ -468,15 +620,25 @@ class OverlaySelectionScanLifecycleInstrumentedTest {
                     null -> editor.remove(key)
                     is String -> editor.putString(key, value)
                     is Boolean -> editor.putBoolean(key, value)
+                    is Float -> editor.putFloat(key, value)
                 } }
                 assertTrue(editor.commit())
+                val layoutEditor = layoutPrefs.edit()
+                if (hadCustomLayout) layoutEditor.putBoolean("custom", originalCustomLayout) else layoutEditor.remove("custom")
+                assertTrue(layoutEditor.commit())
                 val consentEditor = consentPrefs.edit()
                 if (hadConsentRecord) consentEditor.putInt("accepted_revision", originalConsentRevision)
                 else consentEditor.remove("accepted_revision")
                 assertTrue(consentEditor.commit())
+                tutorialStore.update { originalTutorial }
+                val tutorialEditor = tutorialPrefs.edit()
+                if (originalTutorialRecord == null) tutorialEditor.remove("progress")
+                else tutorialEditor.putString("progress", originalTutorialRecord)
+                assertTrue(tutorialEditor.commit())
                 OverlayState.update { originalState }
                 practiceField.setBoolean(null, originalPractice)
                 if (!frame.isRecycled) frame.recycle()
+                (get("guideBitmap") as? Bitmap)?.let { if (!it.isRecycled) it.recycle() }
             }
         }
     }

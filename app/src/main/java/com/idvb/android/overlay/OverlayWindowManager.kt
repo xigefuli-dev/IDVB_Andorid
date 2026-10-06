@@ -25,8 +25,11 @@ class OverlayWindowManager(private val context: Context) {
         // visibility changes/animations never temporarily exceed the shared UID budget.
         private val attached = mutableSetOf<OverlayWindowManager>()
 
-        /** Conservative bounds of visible independent overlay roots, in screen coordinates. */
-        fun visibleScreenBounds(excluding: Set<OverlayWindowManager> = emptySet()): List<android.graphics.RectF> =
+        data class VisibleRoot(val viewClass: String, val bounds: android.graphics.RectF,
+            val viewAlpha: Float, val windowAlpha: Float)
+
+        /** Actual root coordinates also explain why an automatic sample was occluded. */
+        fun visibleScreenRoots(excluding: Set<OverlayWindowManager> = emptySet()): List<VisibleRoot> =
             attached.filter { it !in excluding && it.view?.let { view -> view.isShown && view.alpha > 0f } == true }
                 .map { manager ->
                     val root = requireNotNull(manager.view)
@@ -35,9 +38,13 @@ class OverlayWindowManager(private val context: Context) {
                         ?: manager.context.resources.displayMetrics.widthPixels
                     val h = root.height.takeIf { it > 0 } ?: manager.height.takeIf { it > 0 }
                         ?: manager.context.resources.displayMetrics.heightPixels
-                    android.graphics.RectF(location[0].toFloat(), location[1].toFloat(),
-                        (location[0] + w).toFloat(), (location[1] + h).toFloat())
+                    VisibleRoot(root.javaClass.name, android.graphics.RectF(location[0].toFloat(), location[1].toFloat(),
+                        (location[0] + w).toFloat(), (location[1] + h).toFloat()), root.alpha, manager.opacity)
                 }
+
+        /** Conservative bounds of visible independent overlay roots, in screen coordinates. */
+        fun visibleScreenBounds(excluding: Set<OverlayWindowManager> = emptySet()): List<android.graphics.RectF> =
+            visibleScreenRoots(excluding).map { it.bounds }
 
         private fun refreshTouchOpacity() {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return

@@ -190,13 +190,14 @@ internal object VpsgLiveExtractor {
                         try {
                             val geometry = com.idvb.android.alignment.ReferenceStripedFrameGeometry.extract(input, luminance, colors, 82.0)
                             target.put(0, 0, geometry.edges)
-                            log.emit(AlignmentLogEvent("vpsg.extract.striped-evidence", "measured-room-framed-vertical-stripes-v5",
+                            log.emit(AlignmentLogEvent("vpsg.extract.striped-evidence", "measured-room-framed-vertical-stripes-v6",
                                 thresholds = com.idvb.android.alignment.ReferenceStripedFrameGeometry.thresholds + ("minimumValue" to 82.0),
                                 series = mapOf("roiXYWH" to listOf(x.toDouble(), y.toDouble(), roi.width.toDouble(), roi.height.toDouble()),
                                     "candidateRoiLTRBLeftRightTopBottomSupportBandsDensityAccepted" to geometry.candidates,
                                     "componentRoiXYWHAreaEligible" to geometry.components,
+                                    "horizontalRunPairsRoiLeftRightYLeftRightYOverlapEndpointsAgreeProposed" to geometry.horizontalRunPairs,
                                     "acceptedRoiLTRB" to geometry.rectangles),
-                                labels = mapOf("artifact" to "live-striped-frames.gray8", "policy" to "observed-room-grates-only; corridor-stair-decoration-excluded; grouping-joins-horizontal-and-vertical-borders; four-borders-max-fixed-flank-or-directional-top-hat-continuity-and-four-stripe-bands; original-resolved-wall-and-occlusion-gates-applied; proposals-unchanged")))
+                                labels = mapOf("artifact" to "live-striped-frames.gray8", "policy" to "observed-room-grates-only; corridor-stair-decoration-excluded; dim-end-horizontal-runs-use-measured-union-only-with-75-percent-overlap; four-full-span-borders-max-fixed-flank-or-directional-top-hat-continuity-and-four-stripe-bands; no-endpoint-extrapolation; original-resolved-wall-and-occlusion-gates-applied; proposals-unchanged")))
                         } finally { input.release(); luminance.release(); colors.release(); target.release() }
                     }
                     frames.setTo(Scalar.all(0.0), dilatedExclusion)

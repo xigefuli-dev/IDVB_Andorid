@@ -126,6 +126,8 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
                         measurements = mapOf("attempt" to attemptNumber.toDouble(), "attemptStartUptimeMs" to attemptStartUptimeMs.toDouble()),
                         durationNanos = System.nanoTime() - attemptStarted))
                     val conversionStarted = System.nanoTime()
+                    var fullWidth = 0; var fullHeight = 0
+                    var actualRegion: Rect? = null
                     val converted = runCatching {
                         val buffer = result.hardwareBuffer
                         try {
@@ -138,8 +140,10 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
                                 hardwareBitmap.recycle()
                             }
                             try {
+                                fullWidth = full.width; fullHeight = full.height
                                 val safe = Rect(region)
                                 require(safe.intersect(0, 0, full.width, full.height)) { "截图区域超出屏幕" }
+                                actualRegion = Rect(safe)
                                 // 再复制一次，确保返回结果不依赖全屏截图或 HardwareBuffer 的生命周期。
                                 val cropped = Bitmap.createBitmap(full, safe.left, safe.top, safe.width(), safe.height())
                                 if (cropped === full) full.copy(Bitmap.Config.ARGB_8888, false)
@@ -153,7 +157,13 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
                     }
                     log.emit(AlignmentLogEvent("capture.accessibility.convert-and-crop", if (converted.isSuccess) "completed" else "failed",
                         durationNanos = System.nanoTime() - conversionStarted,
-                        measurements = mapOf("width" to region.width().toDouble(), "height" to region.height().toDouble())))
+                        measurements = mapOf("width" to region.width().toDouble(), "height" to region.height().toDouble(),
+                            "fullWidth" to fullWidth.toDouble(), "fullHeight" to fullHeight.toDouble(),
+                            "requestedLeft" to region.left.toDouble(), "requestedTop" to region.top.toDouble(),
+                            "requestedRight" to region.right.toDouble(), "requestedBottom" to region.bottom.toDouble()) +
+                            (actualRegion?.let { mapOf("actualLeft" to it.left.toDouble(), "actualTop" to it.top.toDouble(),
+                                "actualRight" to it.right.toDouble(), "actualBottom" to it.bottom.toDouble()) } ?: emptyMap()),
+                        labels = mapOf("failure" to converted.exceptionOrNull()?.toString().orEmpty())))
                     finish(converted)
                 }
 

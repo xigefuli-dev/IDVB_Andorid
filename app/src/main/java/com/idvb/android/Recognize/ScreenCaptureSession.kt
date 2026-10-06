@@ -34,6 +34,7 @@ class ScreenCaptureSession(private val context: Context) {
     private var latest: Image? = null
     private var width = 0
     private var height = 0
+    private var displayRotation: Int? = null
     private var closed = false
     private var failure: Throwable? = null
     private val pending = linkedSetOf<Request>()
@@ -66,7 +67,11 @@ class ScreenCaptureSession(private val context: Context) {
                     log.emit(AlignmentLogEvent("capture.projection-frame", durationNanos = System.nanoTime() - started,
                         measurements = mapOf("frameSequence" to sequence.toDouble(), "minimumSequence" to minimumSequence.toDouble(), "frameTimestampNanos" to latest!!.timestamp.toDouble(),
                             "frameReceivedNanos" to latestReceivedNanos.toDouble(), "frameAgeMs" to (copiedAt - latestReceivedNanos) / 1e6,
-                            "waitMs" to (copiedAt - started) / 1e6, "copyMs" to (System.nanoTime() - copiedAt) / 1e6),
+                            "waitMs" to (copiedAt - started) / 1e6, "copyMs" to (System.nanoTime() - copiedAt) / 1e6,
+                            "fullWidth" to latest!!.width.toDouble(), "fullHeight" to latest!!.height.toDouble(),
+                            "displayRotation" to (displayRotation ?: -1).toDouble(),
+                            "requestedLeft" to region.left.toDouble(), "requestedTop" to region.top.toDouble(),
+                            "requestedRight" to region.right.toDouble(), "requestedBottom" to region.bottom.toDouble()),
                         labels = mapOf("captureMethod" to "MEDIA_PROJECTION", "distinctFrame" to (minimumSequence >= 0).toString())))
                     finish(result)
                 }
@@ -101,9 +106,12 @@ class ScreenCaptureSession(private val context: Context) {
     }
 
     @Synchronized
-    fun start(screenWidth: Int, screenHeight: Int): Boolean {
+    fun start(screenWidth: Int, screenHeight: Int, rotation: Int = context.getSystemService(DisplayManager::class.java)
+        .getDisplay(android.view.Display.DEFAULT_DISPLAY)?.rotation ?: android.view.Surface.ROTATION_0): Boolean {
         if (closed || failure != null) return false
         return runCatching {
+            val rotationChanged = displayRotation != null && displayRotation != rotation
+            if (rotationChanged) Log.i("IDVBCapture", "capture-rotation-changed from=$displayRotation to=$rotation width=$screenWidth height=$screenHeight")
             if (projection == null) {
                 val data = ScreenCaptureGrant.consume(grantRevision) ?: return false
                 projection = (context.getSystemService(MediaProjectionManager::class.java)
@@ -115,7 +123,8 @@ class ScreenCaptureSession(private val context: Context) {
                     "IDVB capture", width, height, context.resources.displayMetrics.densityDpi,
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader!!.surface, null, handler,
                 ) ?: error("无法创建屏幕捕获显示器")
-            } else resize(screenWidth, screenHeight)
+            } else resize(screenWidth, screenHeight, rotationChanged)
+            displayRotation = rotation
             true
         }.getOrElse { stop(it); false }
     }
@@ -219,10 +228,10 @@ class ScreenCaptureSession(private val context: Context) {
         deliveredAutoSequence = -1L
     }
 
-    private fun resize(w: Int, h: Int) {
-        if (w == width && h == height) return
+    private fun resize(w: Int, h: Int, force: Boolean = false) {
+        if (w == width && h == height && !force) return
         val current = display ?: return
-        pending.toList().forEach { it.finish(Result.failure(IllegalStateException("屏幕尺寸已变化，请重新截图"))) }
+        pending.toList().forEach { it.finish(Result.failure(IllegalStateException("屏幕尺寸或方向已变化，请重新截图"))) }
         val next = newReader(w, h)
         try {
             current.resize(w, h, context.resources.displayMetrics.densityDpi)
@@ -231,6 +240,7 @@ class ScreenCaptureSession(private val context: Context) {
         latest?.close(); latest = null
         reader?.close(); reader = next
         width = w; height = h
+        Log.i("IDVBCapture", "capture-coordinate-space-reset width=$w height=$h previousRotation=$displayRotation forced=$force; old frames discarded")
     }
 
     private fun stop(error: Throwable) {

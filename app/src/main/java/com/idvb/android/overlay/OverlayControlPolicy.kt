@@ -6,7 +6,7 @@ internal data class OverlayControlPolicy(
     val mapSelected: Boolean,
     val candidatesPending: Boolean,
 ) {
-    val eyeEnabled: Boolean get() = candidatesPending || (!automaticMapOpen && mapSelected)
-    val floorEnabled: Boolean get() = !automaticMapOpen && mapSelected
+    val eyeEnabled: Boolean get() = candidatesPending || mapSelected
+    val floorEnabled: Boolean get() = mapSelected && (!automaticMapOpen || !candidatesPending)
     val retainDismissedCandidates: Boolean get() = automaticMapOpen && candidatesPending
 }

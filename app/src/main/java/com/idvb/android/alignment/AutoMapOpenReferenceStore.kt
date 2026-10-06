@@ -86,14 +86,16 @@ class AutoMapOpenReferenceStore(private val context: Context) {
     /**
      * 加载内置侧边栏开图参照。
      * 用户无需手动截取参照，使用内置的标准侧边栏图像（位于 assets/recognition/map_open_sidebar.png），
-     * 识别区域从用户已校准区域的最右侧边延伸至屏幕本身的最右侧边（高度为屏幕横放高度）。
+     * 识别区域延伸至屏幕最右侧；校准框过宽时仍保留完整侧边栏及缩放搜索空间。
      */
     fun loadBuiltin(screenWidth: Int, screenHeight: Int, calibratedRightRatio: Float, targetPackage: String? = null): AutoMapOpenReference? = synchronized(lock) {
         if (screenWidth <= screenHeight || screenHeight <= 0 || !calibratedRightRatio.isFinite() ||
-            calibratedRightRatio <= 0f || calibratedRightRatio >= 1f || targetPackage.isNullOrBlank()) return@synchronized null
+            calibratedRightRatio !in 0f..1f || targetPackage.isNullOrBlank()) return@synchronized null
         val pixels = getOrLoadBuiltinSignature() ?: return@synchronized null
         val hash = getOrLoadBuiltinHash()
-        val region = floatArrayOf(calibratedRightRatio, 0f, 1f, 1f)
+        val left = AutoMapOpenRegionPolicy.leftRatio(screenWidth, screenHeight, calibratedRightRatio,
+            requireNotNull(cachedBuiltinAspectRatio))
+        val region = floatArrayOf(left, 0f, 1f, 1f)
         AutoMapOpenReference(
             id = "builtin-sidebar",
             landscape = true,
