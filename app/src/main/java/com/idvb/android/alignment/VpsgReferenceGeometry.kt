@@ -43,15 +43,19 @@ internal object VpsgReferenceGeometry {
         val region = if (assets.recognitionImageFile == null) assets.recognitionRegion else null
         val crop = if (assets.recognitionImageFile == null) repository.loadFreeCropPoints(map.id, floor) else emptyList()
         val key = "$ALGORITHM_ID|${map.id}|${floor.key}|${source.canonicalPath}|${source.length()}|${source.lastModified()}|$region|$crop|${line.file.canonicalPath}|${line.file.length()}|${line.file.lastModified()}"
-        val prepared = cache[key]?.takeIf { it.line.file.isFile } ?: log.measure("vpsg.reference.prepare") {
+        val cached = cache[key]?.takeIf { it.line.file.isFile }
+        val prepared = cached ?: log.measure("vpsg.reference.prepare") {
             val bitmap = requireNotNull(decodeMapRegion(source, region, maxOf(line.width, line.height),
                 crop))
             val sized = Bitmap.createScaledBitmap(bitmap, line.width, line.height, false)
             val color = source.readBytes()
+            val sourceHash = AlignmentDiagnosticsStore.sha256(color)
             val bgr = try { CvImages.bitmapToBgr(sized) } finally {
                 if (sized !== bitmap) sized.recycle(); bitmap.recycle()
             }
             val gray = Mat(); val filled = Mat(); val hierarchy = Mat()
+            // Read-only request-owned preprocessing shared by source-only detectors.
+            val hsv = Mat(); val topHat = Mat()
             val contours = ArrayList<MatOfPoint>()
             val original = line.file.readBytes()
             val originalMat = CvImages.loadGray(line.file)
@@ -59,6 +63,24 @@ internal object VpsgReferenceGeometry {
             val records = ArrayList<Double>()
             try {
                 Imgproc.cvtColor(bgr, gray, Imgproc.COLOR_BGR2GRAY)
+                log.measure("vpsg.reference.preprocess.hsv") {
+                    Imgproc.cvtColor(bgr, hsv, Imgproc.COLOR_BGR2HSV)
+                }
+                log.measure("vpsg.reference.preprocess.top-hat") {
+                    val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(5.0, 5.0))
+                    try { Imgproc.morphologyEx(gray, topHat, Imgproc.MORPH_TOPHAT, kernel) }
+                    finally { kernel.release() }
+                }
+                log.emit(AlignmentLogEvent("vpsg.reference.preprocess", "shared-immutable-source-preprocessing-v1",
+                    measurements = mapOf("width" to line.width.toDouble(), "height" to line.height.toDouble(),
+                        "hsvConsumers" to 4.0, "topHatConsumers" to 3.0),
+                    thresholds = mapOf("topHatKernel" to 5.0),
+                    labels = mapOf("policy" to "one-BGR2HSV-and-one-rectangular-top-hat; identical-source-pixels; read-only-borrowed-mats",
+                        "sourceArtifact" to if (assets.recognitionImageFile == null) "reference-source.png" else "reference-color.png",
+                        "sourceSha256" to sourceHash,
+                        "sourceResize" to "Bitmap.createScaledBitmap-filter-false; prebuilt-line-dimensions",
+                        "hsvConsumerStages" to "hatch-frames,partitions,striped-frames,semantic-boundaries",
+                        "topHatConsumerStages" to "hatch-frames,partitions,striped-frames")))
                 Imgproc.threshold(gray, filled, 16.0, 255.0, Imgproc.THRESH_BINARY)
                 Imgproc.findContours(filled, contours, hierarchy, Imgproc.RETR_CCOMP, Imgproc.CHAIN_APPROX_SIMPLE)
                 for ((i, contour) in contours.withIndex()) {
@@ -70,11 +92,11 @@ internal object VpsgReferenceGeometry {
                     records.addAll(listOf(box.x.toDouble(), box.y.toDouble(), box.width.toDouble(), box.height.toDouble(), area, parent.toDouble(), if (include) 1.0 else 0.0))
                     if (include) Imgproc.drawContours(augmented, contours, i, Scalar.all(255.0), 2, Imgproc.LINE_8)
                 }
-                val hatch = log.measure("vpsg.reference.hatch-frames") { ReferenceHatchGeometry.extract(bgr, gray) }
+                val hatch = log.measure("vpsg.reference.hatch-frames") { ReferenceHatchGeometry.extract(bgr, gray, hsv, topHat) }
                 val hatchMat = Mat(line.height, line.width, CvType.CV_8UC1)
                 try { hatchMat.put(0, 0, hatch.edges); Core.bitwise_or(augmented, hatchMat, augmented) }
                 finally { hatchMat.release() }
-                val partition = log.measure("vpsg.reference.partitions") { ReferencePartitionGeometry.extract(bgr, gray, originalMat) }
+                val partition = log.measure("vpsg.reference.partitions") { ReferencePartitionGeometry.extract(bgr, gray, originalMat, hsv, topHat) }
                 val partitionMat = Mat(line.height, line.width, CvType.CV_8UC1)
                 try { partitionMat.put(0, 0, partition.edges); Core.bitwise_or(augmented, partitionMat, augmented) }
                 finally { partitionMat.release() }
@@ -82,13 +104,13 @@ internal object VpsgReferenceGeometry {
                     "$ALGORITHM_ID|${ReferenceStripedFrameGeometry.thresholds}|${ReferenceSemanticGeometry.thresholds}|${map.id}|${floor.key}|$region|$crop|${line.width}x${line.height}".toByteArray())
                 val proposalFile = File(repository.alignmentReferenceCacheRoot, "$fingerprint-$ALGORITHM_ID-proposal.png")
                 if (!proposalFile.isFile) check(Imgcodecs.imwrite(proposalFile.path, augmented))
-                val striped = log.measure("vpsg.reference.striped-frames") { ReferenceStripedFrameGeometry.extract(bgr, gray) }
+                val striped = log.measure("vpsg.reference.striped-frames") { ReferenceStripedFrameGeometry.extract(bgr, gray, hsv, preparedTopHat = topHat) }
                 val stripedMat = Mat(line.height, line.width, CvType.CV_8UC1)
                 try { stripedMat.put(0, 0, striped.edges); Core.bitwise_or(augmented, stripedMat, augmented) }
                 finally { stripedMat.release() }
                 val structuralFile = File(repository.alignmentReferenceCacheRoot, "$fingerprint-$ALGORITHM_ID-structural.png")
                 if (!structuralFile.isFile) check(Imgcodecs.imwrite(structuralFile.path, augmented))
-                val semantic = log.measure("vpsg.reference.semantic-boundaries") { ReferenceSemanticGeometry.extract(bgr, gray) }
+                val semantic = log.measure("vpsg.reference.semantic-boundaries") { ReferenceSemanticGeometry.extract(bgr, gray, hsv) }
                 val semanticMat = Mat(line.height, line.width, CvType.CV_8UC1)
                 val precisionFile = File(repository.alignmentReferenceCacheRoot, "$fingerprint-$ALGORITHM_ID-precision.png")
                 try {
@@ -100,17 +122,24 @@ internal object VpsgReferenceGeometry {
                 val output = File(repository.alignmentReferenceCacheRoot, "$fingerprint-$ALGORITHM_ID.png")
                 if (!output.isFile) check(Imgcodecs.imwrite(output.path, augmented))
                 Prepared(ResolvedPrebuiltStructureLine(output, line.width, line.height, line.algorithmId + "+$ALGORITHM_ID"),
-                    color, original, records, AlignmentDiagnosticsStore.sha256(color),
+                    color, original, records, sourceHash,
                     if (assets.recognitionImageFile == null) "reference-source.png" else "reference-color.png", hatch, partition, striped, semantic,
                     ResolvedPrebuiltStructureLine(proposalFile, line.width, line.height, line.algorithmId + "+$ALGORITHM_ID-proposal"),
                     ResolvedPrebuiltStructureLine(structuralFile, line.width, line.height, line.algorithmId + "+$ALGORITHM_ID-structural"),
                     ResolvedPrebuiltStructureLine(if (semantic.photometricEdges.count { it.toInt() and 255 > 128 } >= 300)
                         precisionFile else proposalFile, line.width, line.height, line.algorithmId + "+$ALGORITHM_ID-precision"))
-            } finally { bgr.release(); gray.release(); filled.release(); hierarchy.release(); originalMat.release(); augmented.release(); contours.forEach(MatOfPoint::release) }
+            } finally { bgr.release(); gray.release(); hsv.release(); topHat.release(); filled.release(); hierarchy.release(); originalMat.release(); augmented.release(); contours.forEach(MatOfPoint::release) }
         }.also {
             if (cache.size >= 8) cache.remove(cache.keys.first())
             cache[key] = it
         }
+        log.emit(AlignmentLogEvent("vpsg.reference.preprocess-domain", "shared-immutable-source-preprocessing-v1",
+            measurements = mapOf("width" to line.width.toDouble(), "height" to line.height.toDouble()),
+            thresholds = mapOf("topHatKernel" to 5.0),
+            labels = mapOf("geometryCache" to if (cached == null) "miss" else "hit",
+                "sourceArtifact" to prepared.colorArtifact, "sourceSha256" to prepared.sourceHash,
+                "policy" to "BGR2HSV-and-rectangular-top-hat; read-only-reuse-within-source-preparation",
+                "timingPolicy" to "cold-preprocessing-spans-nested-in-reference.prepare; cached-geometry-runs-do-not-recompute")))
         log.attach("reference-prebuilt.png") { prepared.original }
         log.attach("reference-proposal.png") { prepared.proposalLine.file.readBytes() }
         log.attach("reference-structural.png") { prepared.structuralLine.file.readBytes() }

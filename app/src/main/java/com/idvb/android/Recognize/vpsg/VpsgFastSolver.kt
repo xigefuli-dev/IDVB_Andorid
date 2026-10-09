@@ -16,6 +16,7 @@ internal object VpsgFastSolver {
     data class Point(val x: Int, val y: Int)
     data class Pose(val scale: Double, val x: Double, val y: Double, val score: Double = 0.0)
     data class Peak(val pitch: Double, val ratio: Double)
+    data class ScaleProposal(val axis: String, val pitch: Double, val ratio: Double, val scale: Double)
     data class Index(val width: Int, val height: Int, val k3: LongArray, val k5: LongArray,
         val prior: Peak, val edgeCount: Int,
         val distance: FloatArray? = null, val edgePositions: IntArray? = null,
@@ -102,6 +103,27 @@ internal object VpsgFastSolver {
                 val delta = if (denominator > 1e-9) ((raw[i + 1] - raw[i - 1]) / denominator).coerceIn(-.5, .5) else 0.0
                 Peak(i + 12.0 + delta, raw[i] / median)
             }
+    }
+
+    /** A live period is meaningful only against the reference period on the same axis. */
+    fun scaleAlternatives(live: Correlation, prior: Peak, referenceEdges: Int, axis: String,
+        maximumScale: Double, log: AlignmentLogSink = AlignmentLogSink.NONE): List<ScaleProposal> {
+        val t = VpsgAlignmentTuning
+        val gates = listOf(
+            AlignmentGate("reference-edges", referenceEdges.toDouble(), ">=", t.MIN_REFERENCE_EDGES.toDouble(), referenceEdges >= t.MIN_REFERENCE_EDGES),
+            AlignmentGate("reference-pitch", prior.pitch, ">", t.MIN_PITCH, prior.pitch > t.MIN_PITCH),
+            AlignmentGate("reference-pitch-ratio", prior.ratio, ">=", t.MIN_PITCH_RATIO, prior.ratio >= t.MIN_PITCH_RATIO))
+        val proposals = if (gates.all(AlignmentGate::passed)) live.alternatives(prior.pitch * t.MIN_SCALE,
+            prior.pitch * maximumScale).map { ScaleProposal(axis, it.pitch, it.ratio, it.pitch / prior.pitch) }
+            else emptyList()
+        log.emit(AlignmentLogEvent("vpsg.scale.axis-alternatives", if (gates.all(AlignmentGate::passed)) "proposals" else "reference-unresolved",
+            measurements = mapOf("referencePitch" to prior.pitch, "referenceRatio" to prior.ratio,
+                "referenceEdges" to referenceEdges.toDouble(), "minimumSearchPitch" to prior.pitch * t.MIN_SCALE,
+                "maximumSearchPitch" to prior.pitch * maximumScale), gates = gates,
+            thresholds = mapOf("minimumScale" to t.MIN_SCALE, "maximumScale" to maximumScale),
+            series = mapOf("livePitchRatioScale" to proposals.flatMap { listOf(it.pitch, it.ratio, it.scale) }),
+            labels = mapOf("scaleAxis" to axis, "policy" to "same-axis-reference-period; proposals-require-full-structural-and-unique-pose-gates")))
+        return proposals
     }
 
     fun scale(live: Correlation, reference: Index, log: AlignmentLogSink = AlignmentLogSink.NONE,
@@ -220,10 +242,16 @@ internal object VpsgFastSolver {
                 "distinctRadius" to 2.0, "rivalDistance" to minimumRivalDistance, "minimumRivalHits" to 3.0)))
         val scores = log.measure("vpsg.translation.score-grid") { scoreGrid(scaled, index, minX, maxX, minY, maxY) }
         val columns = (maxX - minX) / 4 + 1
-        log.attachOwned("translation-scores.i32le") {
-            java.nio.ByteBuffer.allocate(scores.size * 4).order(java.nio.ByteOrder.LITTLE_ENDIAN).also { buffer ->
-                scores.forEach(buffer::putInt)
-            }.array()
+        log.attachStream("translation-scores.i32le") { output ->
+            val buffer = java.nio.ByteBuffer.allocate(64 * 1024).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            for (score in scores) {
+                if (!buffer.hasRemaining()) {
+                    AlignmentCancellation.checkpoint("diagnostics.translation-scores.chunk")
+                    output.write(buffer.array(), 0, buffer.position()); buffer.clear()
+                }
+                buffer.putInt(score)
+            }
+            output.write(buffer.array(), 0, buffer.position())
         }
         if (log.enabled) log.emit(AlignmentLogEvent("vpsg.translation.grid-layout", measurements = mapOf(
             "columns" to columns.toDouble(), "rows" to ((maxY - minY) / 4 + 1).toDouble(),

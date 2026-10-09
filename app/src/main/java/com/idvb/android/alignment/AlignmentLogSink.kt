@@ -3,6 +3,7 @@ package com.idvb.android.alignment
 /** Algorithm-neutral events; adapters may write Logcat, JSON, diagnostics packages or test traces.
  * Frames are deliberately caller-owned and are not implicitly retained by logging.
  */
+@kotlinx.serialization.Serializable
 data class AlignmentLogEvent(
     val stage: String,
     val detail: String = "",
@@ -15,6 +16,7 @@ data class AlignmentLogEvent(
     val durationNanos: Long? = null,
 )
 
+@kotlinx.serialization.Serializable
 data class AlignmentGate(val name: String, val actual: Double, val comparison: String,
     val threshold: Double, val passed: Boolean)
 
@@ -23,6 +25,11 @@ fun interface AlignmentLogSink {
     val enabled: Boolean get() = true
     /** Lazy so a sink that does not retain images never reads or encodes them. */
     fun attach(name: String, bytes: () -> ByteArray) = Unit
+    /** Synchronous: borrowed inputs need only survive this call. File-backed sinks stream
+     * without retaining a full managed/native copy; legacy/test sinks still receive bytes. */
+    fun attachStream(name: String, encode: (java.io.OutputStream) -> Unit) = attach(name) {
+        java.io.ByteArrayOutputStream().use { output -> encode(output); output.toByteArray() }
+    }
     /** Only for suppliers owning immutable managed data, never a live Mat or Bitmap. */
     fun attachOwned(name: String, bytes: () -> ByteArray) = attach(name, bytes)
     /** Capture an owned immutable buffer during this call, while a borrowed input is alive.

@@ -20,7 +20,7 @@ internal object ReferenceSemanticGeometry {
         "corridorHsvMin" to listOf(95.0, 14.0, 50.0),
         "corridorHsvMax" to listOf(130.0, 105.0, 200.0))
 
-    fun extract(bgr: Mat, gray: Mat): Result {
+    fun extract(bgr: Mat, gray: Mat, preparedHsv: Mat? = null): Result {
         val hsv = Mat(); val room = Mat(); val wrap = Mat(); val corridor = Mat()
         val hierarchy = Mat(); val photo = Mat(); val support = Mat(); val appearanceDomain = Mat()
         val output = Mat.zeros(gray.size(), CvType.CV_8UC1)
@@ -29,11 +29,12 @@ internal object ReferenceSemanticGeometry {
         val records = ArrayList<Double>(); val points = ArrayList<Double>()
         try {
             AlignmentCancellation.checkpoint("vpsg.reference.semantic.before")
-            Imgproc.cvtColor(bgr, hsv, Imgproc.COLOR_BGR2HSV)
-            Core.inRange(hsv, Scalar(0.0, 18.0, 50.0), Scalar(25.0, 165.0, 200.0), room)
-            Core.inRange(hsv, Scalar(170.0, 18.0, 50.0), Scalar(179.0, 165.0, 200.0), wrap)
+            if (preparedHsv == null) Imgproc.cvtColor(bgr, hsv, Imgproc.COLOR_BGR2HSV)
+            val colors = preparedHsv ?: hsv
+            Core.inRange(colors, Scalar(0.0, 18.0, 50.0), Scalar(25.0, 165.0, 200.0), room)
+            Core.inRange(colors, Scalar(170.0, 18.0, 50.0), Scalar(179.0, 165.0, 200.0), wrap)
             Core.bitwise_or(room, wrap, room)
-            Core.inRange(hsv, Scalar(95.0, 14.0, 50.0), Scalar(130.0, 105.0, 200.0), corridor)
+            Core.inRange(colors, Scalar(95.0, 14.0, 50.0), Scalar(130.0, 105.0, 200.0), corridor)
             Core.bitwise_or(room, corridor, appearanceDomain)
             Imgproc.dilate(appearanceDomain, appearanceDomain, k3)
             for ((domain, mask) in listOf(room, corridor).withIndex()) {

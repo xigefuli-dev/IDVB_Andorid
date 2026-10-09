@@ -8,6 +8,26 @@ import java.util.concurrent.TimeUnit
 import com.idvb.android.recognize.vpsg.VpsgFastSolver
 
 class AlignmentCancellationTest {
+    @Test fun parallelScanWorkerObservesParentCancellationAndClearsItsContext() {
+        val token=AlignmentCancellation()
+        val started=CountDownLatch(1)
+        val worker=Executors.newSingleThreadExecutor()
+        try {
+            val pending=worker.submit<Boolean> {
+                try {
+                    AlignmentCancellation.withContext(token) {
+                        started.countDown()
+                        while (true) AlignmentCancellation.checkpoint("scan.candidate-loop")
+                    }
+                    false
+                } catch (expected: AlignmentCancelledException) { expected.stage=="scan.candidate-loop" }
+            }
+            assertTrue(started.await(2,TimeUnit.SECONDS)); token.cancel("eye-hidden")
+            assertTrue(pending.get(2,TimeUnit.SECONDS))
+            assertNull(worker.submit<AlignmentCancellation?> { AlignmentCancellation.current() }.get(2,TimeUnit.SECONDS))
+        } finally { worker.shutdownNow() }
+    }
+
     @Test fun cancelExitsRunningWorkAndDoesNotPoisonNextTask() {
         val cancellation = AlignmentCancellation()
         val started = CountDownLatch(1)

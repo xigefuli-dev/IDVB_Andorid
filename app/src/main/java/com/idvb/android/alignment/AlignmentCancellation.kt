@@ -60,6 +60,13 @@ class AlignmentCancellation {
     companion object {
         private val active = ThreadLocal<AlignmentCancellation>()
         internal fun current(): AlignmentCancellation? = active.get()
+        /** Parallel scan workers observe the parent token without claiming its single owner. */
+        internal fun <T> withContext(token: AlignmentCancellation?, block: () -> T): T {
+            val previous=active.get()
+            if (token==null) active.remove() else active.set(token)
+            try { checkpoint("scan.worker.start"); return block() }
+            finally { if (previous==null) active.remove() else active.set(previous) }
+        }
         /** Also available to future algorithms; outside an alignment request this is a no-op. */
         fun checkpoint(stage: String) { active.get()?.throwIfCancelled(stage) }
     }

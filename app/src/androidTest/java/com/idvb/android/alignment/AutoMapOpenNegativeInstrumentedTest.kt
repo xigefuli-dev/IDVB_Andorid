@@ -259,6 +259,58 @@ class AutoMapOpenNegativeInstrumentedTest {
         assertEquals("A closed diagnostic writer must not publish late evidence", before, after)
     }
 
+    @Test fun snapshotsBindSamplesToOneReferenceAndLabelStateOnlyEvents() {
+        val context = privateContext()
+        val source = frame()
+        val reference = try { AutoMapOpenReferenceStore(context).save(source, fullRegion, "com.idvb.synthetic.game") }
+            finally { source.recycle() }
+        val other = reference.copy(id = UUID.randomUUID().toString())
+        val history = com.idvb.android.diagnostics.DiagnosticHistory(File(context.filesDir, "idvb/diagnostics"))
+        val session = history.begin()
+        val diagnostics = AutoMapOpenDiagnostics(context)
+        val signature = AutoMapOpenDetector.signature(reference.signaturePixels)
+        val detector = AutoMapOpenDetector(signature)
+        try {
+            diagnostics.frame(reference, reference.signaturePixels, detector.observe(signature, 1000), 1000, 1.0)
+            diagnostics.event("first-reference", reference, session.name)
+            diagnostics.frame(other, other.signaturePixels, detector.observe(signature, 1500), 1500, 1.0)
+            diagnostics.event("stale-reference-event", reference, session.name)
+            diagnostics.event("current-reference", other, session.name)
+            diagnostics.awaitIdle()
+            val saved = history.files("alignment").filter { it.name.endsWith(".json") }.associate {
+                val json = org.json.JSONObject(it.readText()); json.getString("detail") to json
+            }
+            assertTrue(saved.getValue("first-reference").getBoolean("replayReady"))
+            val state = saved.getValue("stale-reference-event")
+            assertFalse(state.getBoolean("replayReady")); assertEquals("state-event", state.getString("recordType"))
+            assertEquals(1, state.getInt("omittedFramesWithDifferentReference"))
+            assertEquals("no-known-captured-samples", state.getString("replayUnavailableReason"))
+            assertEquals(1, AutoMapOpenReplay.replay(saved.getValue("current-reference").toString()).knownFrames)
+            assertEquals(1, saved.getValue("current-reference").getJSONArray("frames").length())
+        } finally { diagnostics.close(); diagnostics.awaitIdle() }
+    }
+
+    @Test fun snapshotLimitHasADurableReceiptAndResetsForTheNextSession() {
+        val context = privateContext()
+        val history = com.idvb.android.diagnostics.DiagnosticHistory(File(context.filesDir, "idvb/diagnostics"))
+        val first = history.begin()
+        val diagnostics = AutoMapOpenDiagnostics(context)
+        try {
+            repeat(66) { diagnostics.event("state-$it", null, first.name) }
+            diagnostics.awaitIdle()
+            val files = history.directoryFor(first.name, "alignment").listFiles().orEmpty()
+            val receipt = files.single { it.name.endsWith("-limit.json") }
+            assertEquals(65, files.size)
+            val json = org.json.JSONObject(receipt.readText())
+            assertFalse(json.getBoolean("replayReady"))
+            assertEquals("spatial-snapshot-limit-reached", json.getString("replayUnavailableReason"))
+            val second = history.begin()
+            diagnostics.event("next-session", null, second.name)
+            diagnostics.awaitIdle()
+            assertEquals(1, history.directoryFor(second.name, "alignment").listFiles().orEmpty().size)
+        } finally { diagnostics.close(); diagnostics.awaitIdle() }
+    }
+
     @Test fun persistedReferenceAndLiveSamplerUseTheSameActualBitmapSampling() {
         val source = frame(641, 479)
         try {

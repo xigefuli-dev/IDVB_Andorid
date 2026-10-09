@@ -23,7 +23,8 @@ internal object ReferencePartitionGeometry {
     val colorRanges = mapOf("corridorHsvMin" to listOf(95.0, 14.0, 50.0),
         "corridorHsvMax" to listOf(130.0, 105.0, 200.0))
 
-    fun extract(bgr: Mat, gray: Mat, originalPrebuilt: Mat): Result {
+    fun extract(bgr: Mat, gray: Mat, originalPrebuilt: Mat,
+        preparedHsv: Mat? = null, preparedTopHat: Mat? = null): Result {
         val hsv = Mat(); val semantic = Mat(); val high = Mat(); val binary = Mat()
         val contours = ArrayList<MatOfPoint>(); val hierarchy = Mat()
         val domain = Mat.zeros(gray.size(), CvType.CV_8UC1)
@@ -36,10 +37,10 @@ internal object ReferencePartitionGeometry {
         val k3 = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(3.0, 3.0))
         try {
             AlignmentCancellation.checkpoint("vpsg.reference.partition-start")
-            Imgproc.cvtColor(bgr, hsv, Imgproc.COLOR_BGR2HSV)
-            Core.inRange(hsv, Scalar(95.0, 14.0, 50.0), Scalar(130.0, 105.0, 200.0), semantic)
-            Imgproc.morphologyEx(gray, high, Imgproc.MORPH_TOPHAT, k5)
-            Core.inRange(high, Scalar.all(12.0), Scalar.all(255.0), binary)
+            if (preparedHsv == null) Imgproc.cvtColor(bgr, hsv, Imgproc.COLOR_BGR2HSV)
+            Core.inRange(preparedHsv ?: hsv, Scalar(95.0, 14.0, 50.0), Scalar(130.0, 105.0, 200.0), semantic)
+            if (preparedTopHat == null) Imgproc.morphologyEx(gray, high, Imgproc.MORPH_TOPHAT, k5)
+            Core.inRange(preparedTopHat ?: high, Scalar.all(12.0), Scalar.all(255.0), binary)
             Core.bitwise_and(binary, semantic, binary)
             Imgproc.findContours(contourInput, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
             Imgproc.drawContours(domain, contours, -1, Scalar.all(255.0), Imgproc.FILLED)

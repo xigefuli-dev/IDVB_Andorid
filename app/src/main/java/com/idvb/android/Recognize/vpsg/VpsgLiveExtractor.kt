@@ -18,7 +18,7 @@ import com.idvb.android.alignment.AlignmentCancellation
 
 /** Desktop Vpsg3FastLiveExtractor 的结构色域、轮廓和动态遮挡路径。 */
 internal object VpsgLiveExtractor {
-    const val RESOLVED_WALL_POLICY = "resolved-walls-canny120-240-dilate3-v1"
+    const val RESOLVED_WALL_POLICY = "resolved-walls-canny120-240-dilate3-room-domain-v2"
     data class Observation(val edges: Mat, val valid: Mat, val proposal: Mat,
         val revealed: Mat? = null, val wallEdges: Mat? = null) : AutoCloseable {
         val visibilityBytes: ByteArray by lazy {
@@ -153,6 +153,7 @@ internal object VpsgLiveExtractor {
                 excludePlayerMarkers(hsv, exclusion, log, markerYellow.takeUnless { it.empty() })
                 excludeNavigationArrows(hsv, exclusion, log)
                 log.measure("vpsg.extract.compound-annotations") { excludeCompoundAnnotations(hsv, exclusion, log) }
+                log.measure("vpsg.extract.neutral-annotations") { excludeNeutralAnnotations(hsv, exclusion, log) }
             }
             Imgproc.dilate(exclusion, dilatedExclusion, k5)
             if (visibilityScopedReverse) VpsgMaskEvidence.attach(log, "occlusion-mask.gray8", dilatedExclusion)
@@ -172,6 +173,14 @@ internal object VpsgLiveExtractor {
             // Desktop uses strong photometric support for scale/translation proposals;
             // weak observed edges remain available for the final full-resolution verification.
             Core.bitwise_and(candidates, support, proposal)
+            }
+            if (visibilityScopedReverse) log.measure("vpsg.extract.room-visibility") {
+                // A detached reveal halo can retain the room's HSV color and one sharp
+                // horizontal rim while the rest is a soft fade. That rim does not prove
+                // a two-dimensional revealed room. Keep its proposal, but classify the
+                // isolated component as unknown for forward and reverse verification.
+                excludeUnresolvedRoomFragments(room, gray, gradientX, gradientY, strong,
+                    candidates, dilatedExclusion, k5, log)
             }
             if (visibilityScopedReverse) log.measure("vpsg.extract.striped-frames") {
                 candidates.copyTo(wallCandidates)
@@ -292,6 +301,73 @@ internal object VpsgLiveExtractor {
         }
     }
 
+    private fun excludeUnresolvedRoomFragments(room: Mat, gray: Mat, dx: Mat, dy: Mat,
+        strong: Mat, candidates: Mat, invalid: Mat, dilation: Mat, log: AlignmentLogSink) {
+        val labels = Mat(); val stats = Mat(); val centers = Mat()
+        val unresolved = Mat.zeros(room.size(), org.opencv.core.CvType.CV_8UC1)
+        try {
+            val count = Imgproc.connectedComponentsWithStats(room, labels, stats, centers, 8)
+            if (count <= 1) return
+            if (dx.empty()) Imgproc.Sobel(gray, dx, org.opencv.core.CvType.CV_16S, 1, 0, 3, 1.0, 0.0, Core.BORDER_REPLICATE)
+            if (dy.empty()) Imgproc.Sobel(gray, dy, org.opencv.core.CvType.CV_16S, 0, 1, 3, 1.0, 0.0, Core.BORDER_REPLICATE)
+            val width = room.cols(); val height = room.rows(); val size = width * height
+            val components = IntArray(size).also { labels.get(0, 0, it) }
+            val edges = ByteArray(size).also { strong.get(0, 0, it) }
+            val gx = ShortArray(size).also { dx.get(0, 0, it) }
+            val gy = ShortArray(size).also { dy.get(0, 0, it) }
+            val xmin = IntArray(count) { width }; val xmax = IntArray(count) { -1 }
+            val ymin = IntArray(count) { height }; val ymax = IntArray(count) { -1 }
+            for (y in 0 until height) {
+                if (y and 31 == 0) AlignmentCancellation.checkpoint("vpsg.extract.room-visibility.row")
+                for (x in 0 until width) {
+                    val at = y * width + x
+                    if (edges[at].toInt() and 255 == 0) continue
+                    var component = components[at]
+                    if (component == 0) search@ for (oy in -2..2) for (ox in -2..2) {
+                        val ix = x + ox; val iy = y + oy
+                        if (ix in 0 until width && iy in 0 until height && components[iy * width + ix] > 0) {
+                            component = components[iy * width + ix]; break@search
+                        }
+                    }
+                    if (component == 0) continue
+                    val ax = abs(gx[at].toInt()); val ay = abs(gy[at].toInt())
+                    if (ay >= 2 * ax && ay > 0) { xmin[component] = minOf(xmin[component], x); xmax[component] = maxOf(xmax[component], x) }
+                    if (ax >= 2 * ay && ax > 0) { ymin[component] = minOf(ymin[component], y); ymax[component] = maxOf(ymax[component], y) }
+                }
+            }
+            val rejected = BooleanArray(count)
+            val evidence = mutableListOf<Double>()
+            for (component in 1 until count) {
+                val row = IntArray(5).also { stats.get(component, 0, it) }
+                val horizontal = maxOf(0, xmax[component] - xmin[component] + 1)
+                val vertical = maxOf(0, ymax[component] - ymin[component] + 1)
+                // Scope the extra visibility rule to shallow detached color islands.
+                // Tall rooms and ordinary corridor fills retain the original extractor.
+                rejected[component] = row[3] < row[2] * .4 && horizontal >= 12 && vertical < 12
+                evidence += row.map(Int::toDouble) + listOf(horizontal.toDouble(), vertical.toDouble(), if (rejected[component]) 1.0 else 0.0)
+            }
+            val bytes = ByteArray(size)
+            for (i in components.indices) {
+                if (i and 4095 == 0) AlignmentCancellation.checkpoint("vpsg.extract.room-visibility.mask")
+                if (rejected[components[i]]) bytes[i] = 255.toByte()
+            }
+            unresolved.put(0, 0, bytes)
+            room.setTo(Scalar.all(0.0), unresolved)
+            Imgproc.dilate(unresolved, unresolved, dilation)
+            candidates.setTo(Scalar.all(0.0), unresolved)
+            Core.bitwise_or(invalid, unresolved, invalid)
+            VpsgMaskEvidence.attach(log, "unresolved-room-fragments.gray8", unresolved)
+            VpsgMaskEvidence.attach(log, "resolved-room-fill.gray8", room)
+            log.emit(AlignmentLogEvent("vpsg.extract.room-visibility-evidence",
+                measurements = mapOf("components" to (count - 1).toDouble(), "unknownComponents" to rejected.count { it }.toDouble()),
+                thresholds = mapOf("shallowHeightWidthRatio" to .4, "minimumResolvedAxisSpanPixels" to 12.0,
+                    "gradientDirectionDominance" to 2.0, "boundaryNeighborhoodRadius" to 2.0, "unknownDilation" to 5.0),
+                series = mapOf("componentXYWHAreaHorizontalSpanVerticalSpanUnknown" to evidence),
+                labels = mapOf("policy" to "shallow-detached-room-color-island-with-only-one-resolved-axis-is-unknown; proposal-retained",
+                    "domainArtifact" to "unresolved-room-fragments.gray8", "knownFillArtifact" to "resolved-room-fill.gray8")))
+        } finally { labels.release(); stats.release(); centers.release(); unresolved.release() }
+    }
+
     /** Small saturated red enemy markers can fall inside the wraparound room hue range.
      * Exclude their footprint as occluded evidence, not as either walls or known empty floor.
      * Large connected color fields remain available as real room structure.
@@ -398,6 +474,68 @@ internal object VpsgLiveExtractor {
                     "componentXYWHAreaEligible" to records, "chainXYWHCountExcluded" to chains),
                 labels = mapOf("artifact" to "occlusion-mask.gray8", "policy" to "measured-repeated-small-yellow-navigation-chain-is-occluded; isolated-door-ticks-preserved")))
         } finally { seed.release(); labels.release(); stats.release(); centers.release() }
+    }
+
+    /** Gray/blue compound glyphs need their own seed: the warm annotation seed cannot
+     * observe them. Multiple closed holes distinguish this conservative class from a
+     * straight short wall or a single closed room. All gates use component pixels,
+     * never viewport extent, so adding blank canvas cannot change the decision. */
+    private fun excludeNeutralAnnotations(hsv: Mat, exclusion: Mat, log: AlignmentLogSink) {
+        val blue = Mat(); val neutral = Mat(); val seed = Mat()
+        val labels = Mat(); val stats = Mat(); val centers = Mat()
+        val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(3.0, 3.0))
+        val records = ArrayList<Double>()
+        try {
+            Core.inRange(hsv, Scalar(95.0, 0.0, 95.0), Scalar(150.0, 90.0, 255.0), blue)
+            Core.inRange(hsv, Scalar(0.0, 0.0, 95.0), Scalar(179.0, 20.0, 255.0), neutral)
+            Core.bitwise_or(blue, neutral, seed)
+            Imgproc.morphologyEx(seed, seed, Imgproc.MORPH_CLOSE, kernel)
+            VpsgMaskEvidence.attach(log, "neutral-annotation-seed.gray8", seed)
+            AlignmentCancellation.checkpoint("vpsg.extract.neutral-components.before")
+            val count = Imgproc.connectedComponentsWithStats(seed, labels, stats, centers)
+            AlignmentCancellation.checkpoint("vpsg.extract.neutral-components.after")
+            val data = IntArray(count * Imgproc.CC_STAT_MAX).also { stats.get(0, 0, it) }
+            val holes = IntArray(count)
+            val contours = ArrayList<MatOfPoint>(); val hierarchy = Mat(); val input = seed.clone()
+            try {
+                Imgproc.findContours(input, contours, hierarchy, Imgproc.RETR_CCOMP, Imgproc.CHAIN_APPROX_SIMPLE)
+                for (i in contours.indices) {
+                    AlignmentCancellation.checkpoint("vpsg.extract.neutral-topology")
+                    val parent = hierarchy.get(0, i)[3].toInt()
+                    if (parent < 0 || Imgproc.contourArea(contours[i]) < 2.0) continue
+                    val point = contours[parent].toArray().first()
+                    val component = labels.get(point.y.toInt(), point.x.toInt())[0].toInt()
+                    if (component in 1 until count) holes[component]++
+                }
+            } finally { contours.forEach(MatOfPoint::release); hierarchy.release(); input.release() }
+            for (i in 1 until count) {
+                AlignmentCancellation.checkpoint("vpsg.extract.neutral-component")
+                val at = i * Imgproc.CC_STAT_MAX
+                val x = data[at + Imgproc.CC_STAT_LEFT]; val y = data[at + Imgproc.CC_STAT_TOP]
+                val w = data[at + Imgproc.CC_STAT_WIDTH]; val h = data[at + Imgproc.CC_STAT_HEIGHT]
+                val area = data[at + Imgproc.CC_STAT_AREA]; val density = area.toDouble() / (w * h)
+                // Native phone chest glyphs can exceed 900 pixels (the feedback
+                // glyph is 52x28 / 1026 pixels). Retain topology, density, extent
+                // and aspect gates so connected room outlines remain walls.
+                val annotation = area in 80..1600 && w in 6..64 && h in 6..64 &&
+                    maxOf(w, h).toDouble() / minOf(w, h) <= 2.6 && density >= .35 && holes[i] >= 2
+                records.addAll(listOf(x.toDouble(), y.toDouble(), w.toDouble(), h.toDouble(),
+                    area.toDouble(), density, holes[i].toDouble(), if (annotation) 1.0 else 0.0))
+                if (annotation) Imgproc.rectangle(exclusion, Point((x - 3).toDouble(), (y - 3).toDouble()),
+                    Point((x + w + 2).toDouble(), (y + h + 2).toDouble()), Scalar.all(255.0), -1)
+            }
+            log.emit(AlignmentLogEvent("vpsg.extract.neutral-annotation-evidence", "compound-neutral-topology-v2",
+                thresholds = mapOf("minimumArea" to 80.0, "maximumArea" to 1600.0,
+                    "minimumDimension" to 6.0, "maximumDimension" to 64.0, "minimumDensity" to .35,
+                    "maximumAspectRatio" to 2.6, "minimumHoles" to 2.0, "minimumHoleArea" to 2.0,
+                    "closingKernel" to 3.0, "padding" to 3.0),
+                series = mapOf("blueHsvMin" to listOf(95.0, 0.0, 95.0), "blueHsvMax" to listOf(150.0, 90.0, 255.0),
+                    "neutralHsvMin" to listOf(0.0, 0.0, 95.0), "neutralHsvMax" to listOf(179.0, 20.0, 255.0),
+                    "componentXYWHAreaDensityHolesExcluded" to records),
+                labels = mapOf("seedArtifact" to "neutral-annotation-seed.gray8", "maskArtifact" to "occlusion-mask.gray8",
+                    "policy" to "small-dense-multiple-closed-hole-neutral-glyphs; component-pixel-domain; no-canvas-normalization; excluded-bidirectionally",
+                    "rejectionPolicy" to "area-dimensions-aspect-density-or-topology-gate-failed; single-hole-or-open-wall-retained")))
+        } finally { blue.release(); neutral.release(); seed.release(); labels.release(); stats.release(); centers.release(); kernel.release() }
     }
 
     /** Filled compound map annotations (chests, numbers) are neither walls nor known floor.

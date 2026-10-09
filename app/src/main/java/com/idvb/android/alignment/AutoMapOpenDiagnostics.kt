@@ -19,14 +19,17 @@ class AutoMapOpenDiagnostics(context: Context) {
     private var snapshots = 0
     private var closed = false
     private var snapshotLimitReported = false
+    private var snapshotSessionId: String? = null
     private val captureEvents = ArrayDeque<JSONObject>()
     private var configuration = AutoMapOpenConfig()
     private var captureMethod = "ACCESSIBILITY"
     private var intervalMs = 350L
+    private var frameReferenceId: String? = null
     private val provenance = runCatching {
         context.assets.open("alignment-provenance.json").bufferedReader().use { JSONObject(it.readText()) }
     }.getOrNull()
     @Synchronized fun configure(config: AutoMapOpenConfig, source: String, interval: Long) {
+        if (configuration != config || captureMethod != source) { frames.clear(); captureEvents.clear(); frameReferenceId = null }
         configuration = config; captureMethod = source; intervalMs = interval
     }
     @Synchronized fun captureEvent(event: AlignmentLogEvent) {
@@ -45,8 +48,9 @@ class AutoMapOpenDiagnostics(context: Context) {
         frameSequence: Long? = null, frameReceivedNanos: Long? = null) {
         if (closed) return
         val recordingStarted = System.nanoTime()
+        if (frameReferenceId != reference.id) { frames.clear(); frameReferenceId = reference.id }
         val comparison = observation.comparison
-        val event = JSONObject().put("nowMs", nowMs).put("captureAndSampleMs", elapsedMs)
+        val event = JSONObject().put("referenceId", reference.id).put("nowMs", nowMs).put("captureAndSampleMs", elapsedMs)
             .put("sampleStartedAtMs", startedAtMs).put("decisionMs", decisionMs).put("cleanViewport", cleanViewport)
             .put("failure", failure ?: JSONObject.NULL)
             .put("nextPollDelayMs", AutoMapOpenTiming.delayAfterSample(startedAtMs, nowMs, intervalMs))
@@ -75,15 +79,35 @@ class AutoMapOpenDiagnostics(context: Context) {
         state: Map<String, String> = emptyMap(), forceSnapshot: Boolean = false) {
         Log.i("IDVB-AutoMap", "run=$runId stage=$detail alignmentRequest=$requestId state=$state")
         if (closed || sessionId == null) return
+        if (snapshotSessionId != sessionId) { snapshotSessionId = sessionId; snapshots = 0; snapshotLimitReported = false }
         if (snapshots >= 64 && !forceSnapshot) {
             if (!snapshotLimitReported) {
                 snapshotLimitReported = true
                 Log.w("IDVB-AutoMap", "run=$runId stage=diagnostics.snapshot-limit detail=64-snapshots-retained; later events have logs only and cannot be spatially replayed")
+                val pending = com.idvb.android.diagnostics.DiagnosticWriteTracker.begin(historyRoot(), "auto-map-limit", runId)
+                try { writer.execute { try { synchronized(DiagnosticHistory.lock) {
+                    runCatching {
+                        val folder = history.directoryFor(sessionId, "alignment")
+                        val destination = File(folder, "auto-map-open-$runId-limit.json")
+                        val temporary = File(folder, ".auto-map-open-$runId-limit.tmp")
+                        try {
+                            temporary.writeText(JSONObject().put("schemaVersion", 3).put("runId", runId)
+                                .put("recordType", "recording-limit").put("replayReady", false)
+                                .put("replayUnavailableReason", "spatial-snapshot-limit-reached")
+                                .put("maximumSnapshotsPerSession", 64).put("maximumFramesPerSnapshot", 24)
+                                .put("sourceFingerprint", provenance?.optString("sourceFingerprint") ?: JSONObject.NULL)
+                                .put("detail", detail).put("sessionId", sessionId)
+                                .put("scope", "later non-forced events have logs only; explicit diagnostic snapshots remain available; next session resets the limit").toString())
+                            check(temporary.renameTo(destination))
+                        } finally { temporary.delete() }
+                    }.onFailure { Log.e("IDVB-AutoMap", "Recording limit receipt unavailable", it) }
+                } } finally { pending.close() } } } catch (error: Throwable) { pending.close(); throw error }
             }
             return
         }
         val config = configuration
-        val savedFrames = frames.toList()
+        val savedFrames = frames.filter { it.optString("referenceId") == reference?.id }
+        val omittedFrames = frames.size - savedFrames.size
         val savedCaptureEvents = captureEvents.toList()
         val source = captureMethod
         val interval = intervalMs
@@ -91,7 +115,8 @@ class AutoMapOpenDiagnostics(context: Context) {
         val replayReady = reference != null && provenance != null && knownInput
         val number = ++snapshots
         // Snapshot immutable inputs here; JSON construction and serialization run on the writer.
-        writer.execute { synchronized(DiagnosticHistory.lock) {
+        val pending = com.idvb.android.diagnostics.DiagnosticWriteTracker.begin(historyRoot(), "auto-map-snapshot", "$runId-$number")
+        try { writer.execute { try { synchronized(DiagnosticHistory.lock) {
             val recordingStarted = System.nanoTime()
             runCatching {
                 val data = JSONObject().put("schemaVersion", 3).put("algorithmVersion",
@@ -99,7 +124,11 @@ class AutoMapOpenDiagnostics(context: Context) {
                     .put("buildVersion", BuildConfig.BUILD_VERSION).put("runId", runId).put("detail", detail)
                     .put("sourceFingerprint", provenance?.optString("sourceFingerprint") ?: JSONObject.NULL)
                     .put("gitBaseCommit", provenance?.optString("gitBaseCommit") ?: JSONObject.NULL)
-                    .put("replayReady", replayReady).put("replayScope", "spatial-comparisons; bounded state history")
+                    .put("replayReady", replayReady).put("replayScope", if (replayReady) "spatial-comparisons; bounded state history" else "state-and-capture-events-only")
+                    .put("recordType", if (replayReady) "comparison-snapshot" else "state-event")
+                    .put("knownCapturedSamples", savedFrames.count { !it.isNull("pixels") })
+                    .put("unknownCapturedSamples", savedFrames.count { it.isNull("pixels") })
+                    .put("omittedFramesWithDifferentReference", omittedFrames)
                     .put("replayUnavailableReason", when {
                         reference == null -> "reference-unavailable"
                         provenance == null -> "source-provenance-unavailable"
@@ -122,7 +151,8 @@ class AutoMapOpenDiagnostics(context: Context) {
                         .put("watchStrategy", "continuous-current-frame-independent-of-touch")
                         .put("pollRecoveryIntervalMs", 350L)
                         .put("pollRecoveryPolicy", "retry-prerequisites-while-consented-visible-and-outside-host-or-practice; capture-completion-owns-inflight-successor")
-                        .put("foregroundPolicy", "own-overlay-and-system-volume-windows-retain-underlying-app")
+                        .put("foregroundPolicy", com.idvb.android.recognize.ForegroundWindowPolicy.VERSION)
+                        .put("foregroundEvidence", com.idvb.android.recognize.AccessibilityScreenCaptureService.foregroundEvidence)
                         .put("nonAlignmentBudgetMs", if (source == "MEDIA_PROJECTION") AutoMapOpenTiming.NON_ALIGNMENT_BUDGET_MS else JSONObject.NULL)
                         .put("windowSearchScales", JSONArray(listOf(.85, 1.0, 1.15))).put("windowSearchStepCells", .5)
                         .put("coordinateSpacePolicy", "current-display-upright; reset-on-size-or-rotation-change; rotation-in-sample.coordinate-space")
@@ -132,12 +162,23 @@ class AutoMapOpenDiagnostics(context: Context) {
                         .put("intervalOrigin", "sample-request-start").put("preparedViewport", "same-unoccluded-capture-readiness-still-required"))
                     .put("frames", JSONArray(savedFrames)).put("captureEvents", JSONArray(savedCaptureEvents)).toString()
                 val folder = history.directoryFor(sessionId, "alignment")
-                File(folder, "auto-map-open-$runId-$number.json").writeText(data, Charsets.UTF_8)
-            }.onFailure { Log.e("IDVB-AutoMap", "Detector evidence unavailable", it) }
+                val destination = File(folder, "auto-map-open-$runId-$number.json")
+                val temporary = File(folder, ".auto-map-open-$runId-$number.tmp")
+                try { temporary.writeText(data, Charsets.UTF_8); check(temporary.renameTo(destination)) }
+                finally { temporary.delete() }
+            }.onFailure { error ->
+                Log.e("IDVB-AutoMap", "Detector evidence unavailable", error)
+                runCatching { File(history.directoryFor(sessionId, "alignment"), "auto-map-open-$runId-$number.failed.json").writeText(
+                    JSONObject().put("schemaVersion", 3).put("recordType", "write-failure")
+                        .put("runId", runId).put("alignmentRequestId", requestId ?: JSONObject.NULL)
+                        .put("replayReady", false).put("replayUnavailableReason", "snapshot-write-failed:${error.message}").toString()) }
+            }
             Log.i("IDVB-AutoMap", "run=$runId stage=diagnostics.write durationNanos=${System.nanoTime() - recordingStarted}")
-        } }
+        } } finally { pending.close() } } } catch (error: Throwable) { pending.close(); throw error }
     }
-    @Synchronized fun clearFrames() { frames.clear(); captureEvents.clear() }
+    private val privateHistoryRoot = File(context.filesDir, "idvb/diagnostics")
+    private fun historyRoot() = privateHistoryRoot
+    @Synchronized fun clearFrames() { frames.clear(); captureEvents.clear(); frameReferenceId = null }
     internal fun awaitIdle() {
         if (writer.isShutdown) check(writer.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS))
         else writer.submit {}.get(30, java.util.concurrent.TimeUnit.SECONDS)

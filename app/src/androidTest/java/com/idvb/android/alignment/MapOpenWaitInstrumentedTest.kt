@@ -15,10 +15,45 @@ class MapOpenWaitInstrumentedTest {
     private val main = Handler(Looper.getMainLooper())
     private fun bitmap(color: Int) = Bitmap.createBitmap(160, 100, Bitmap.Config.ARGB_8888).apply { eraseColor(color) }
 
+    @Test fun floorIndicatorComesOnlyFromTheAcceptedReadyCapture() {
+        val executor = Executors.newSingleThreadExecutor()
+        val done = CountDownLatch(1)
+        val trace = AlignmentTrace()
+        var calls = 0
+        var selectedIndicator: Bitmap? = null
+        var output: Result<Bitmap>? = null
+        val captures = mutableListOf<Bitmap>()
+        try {
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                MapOpenFrameCapture(main, executor, AlignmentCancellation(), trace, null,
+                    callback = { result, _ -> output = result; done.countDown() },
+                    captureFrame = { region, callback ->
+                        assertEquals(Rect(0, 0, 160, 120), region)
+                        val number = ++calls
+                        val frame = Bitmap.createBitmap(160, 120, Bitmap.Config.ARGB_8888)
+                        frame.eraseColor(if (number == 1) 0xffa08450.toInt() else 0xff687580.toInt())
+                        android.graphics.Canvas(frame).drawRect(0f, 0f, 160f, 20f,
+                            android.graphics.Paint().apply { color = if (number < 3) android.graphics.Color.RED else android.graphics.Color.GREEN })
+                        captures += frame
+                        callback(Result.success(frame)); {}
+                    }, intervalMs = 0,
+                    indicatorBounds = Rect(0, 0, 160, 20),
+                    onReadyIndicator = { assertNull(selectedIndicator); selectedIndicator = it },
+                ).start(Rect(0, 20, 160, 120))
+            }
+            assertTrue(done.await(4, TimeUnit.SECONDS))
+            assertTrue(output!!.isSuccess)
+            assertEquals(3, calls)
+            assertEquals(android.graphics.Color.GREEN, selectedIndicator!!.getPixel(0, 0))
+            assertTrue(captures.all { it.isRecycled })
+            assertEquals(3.0, trace.snapshot().single { it.stage == "floor-indicator.frame-binding" }.measurements["readinessAttempt"]!!, 0.0)
+        } finally { output?.getOrNull()?.recycle(); selectedIndicator?.recycle(); executor.shutdown() }
+    }
+
     @Test fun waitsThroughGameplayAndFadeThenReturnsTheReadyFrame() {
         val executor = Executors.newSingleThreadExecutor()
         val done = CountDownLatch(1)
-        val trace = AlignmentTrace(captureArtifacts = true)
+        val trace = AlignmentTrace(captureArtifacts = true, spoolDirectory = java.io.File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "readiness-spool"))
         var calls = 0
         var output: Result<Bitmap>? = null
         InstrumentationRegistry.getInstrumentation().runOnMainSync {

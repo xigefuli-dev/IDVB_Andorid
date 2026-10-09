@@ -675,6 +675,10 @@ class OverlayService : Service() {
 
     private fun processCapturedFrame(captured: Result<Bitmap>, region: RectF, size: Pair<Int, Int>,
         generation: Int, diagnosticSessionId: String?) {
+        val captureCallbackNanos = System.nanoTime()
+        val rotationAtCaptureCallback = screenRotation()
+        val calibrationRevisionAtCaptureCallback = calibrationRevision
+        val sourceAtCaptureCallback = captureMethod.name
         if (generation != scanGeneration) {
             captured.getOrNull()?.recycle()
             return
@@ -717,13 +721,31 @@ class OverlayService : Service() {
                     ?.takeIf { id -> scanCatalog.classes.any { it.id == id } }
                     ?: scanCatalog.classes.firstOrNull()?.id
                 val cancellation = scanCancellation ?: AlignmentCancellation()
+                val captureReplay = AppServices.prefs.recognitionDiagnosticsEnabled
+                val diagnosticPending = if (captureReplay) com.idvb.android.diagnostics.DiagnosticWriteTracker.begin(
+                    java.io.File(filesDir, "idvb/diagnostics"), "recognition-scan", "scan-$generation") else null
                 val accepted = recognitionExecutor.execute {
+                    val scanTrace = if (captureReplay) AlignmentTrace(captureArtifacts=true,
+                        spoolDirectory=java.io.File(filesDir,"idvb/diagnostics/spool")) else null
+                    var replayInputs: com.idvb.android.recognize.RecognitionReplayInputs? = null
+                    var inputCaptureFailure: String? = null
+                    try {
                     val scanStarted = System.nanoTime()
                     val recognition = runCatching { cancellation.run {
+                        if (captureReplay) {
+                            replayInputs = try { com.idvb.android.recognize.RecognitionReplayInputs.capture(
+                                this, AppServices.repository, scanCatalog, scanClassId)
+                            } catch (cancelled: java.util.concurrent.CancellationException) { throw cancelled }
+                            catch (error: Exception) {
+                                inputCaptureFailure = "${error.javaClass.simpleName}:${error.message}"
+                                Log.e("IDVB-Scan", "Reference snapshot unavailable; scan evidence will be marked non-replayable", error)
+                                null
+                            }
+                        }
                         reportScanProgress(generation, .10, "正在准备扫描…")
                         val viewport = ScreenRect(region.left.toDouble(), region.top.toDouble(),
                             region.width().toDouble(), region.height().toDouble())
-                        com.idvb.android.recognize.MapScanRecognizer(this, AppServices.repository).recognize(
+                        com.idvb.android.recognize.MapScanRecognizer(this, AppServices.repository, scanTrace ?: AlignmentLogSink.NONE).recognize(
                             bitmap, viewport, size.first, size.second, scanClassId,
                             progress = { value, label ->
                                 cancellation.throwIfCancelled("scan.progress")
@@ -741,12 +763,22 @@ class OverlayService : Service() {
                             it.disposition == CandidateDisposition.RELIABLE
                         } ?: 0}" +
                         " vpsgMs=${loggedResult?.vpsgDiagnostics?.elapsedMilliseconds ?: 0.0}" +
+                        " diagnosticReferenceSnapshotMs=${replayInputs?.captureMs ?: 0.0}" +
                         " structureMs=${loggedResult?.diagnostics?.structureTotalMilliseconds ?: 0.0}")
-                    val diagnostics = if (AppServices.prefs.recognitionDiagnosticsEnabled) {
-                        recognition.getOrNull()?.let { result -> runCatching {
+                    scanTrace?.emit(AlignmentLogEvent("scan.request.total",
+                        if (cancellation.isCancelled) "cancelled" else if (recognition.isFailure) "error" else "completed",
+                        durationNanos=System.nanoTime()-scanStarted,
+                        labels=mapOf("request" to "scan-$generation","failure" to recognition.exceptionOrNull().toString(),
+                            "timingScope" to "input-snapshot+algorithm+inline-evidence; excludes-final-archive-writer")))
+                    val diagnostics = if (captureReplay) {
+                        runCatching {
                             AppServices.recognitionDiagnostics.record(
                                 capturedFrame = bitmap,
-                                result = result,
+                                result = recognition.getOrNull(),
+                                replayInputs = replayInputs,
+                                scanTrace = scanTrace,
+                                failure = recognition.exceptionOrNull(),
+                                inputCaptureFailure = inputCaptureFailure,
                                 captureContext = CaptureDiagnosticsContext(
                                     screenWidth = size.first,
                                     screenHeight = size.second,
@@ -757,16 +789,26 @@ class OverlayService : Service() {
                                     classId = scanClassId,
                                     sessionId = diagnosticSessionId,
                                     className = scanCatalog.classes.firstOrNull { it.id == scanClassId }?.name,
+                                    captureSource = sourceAtCaptureCallback,
+                                    scanRequestId = "scan-$generation",
+                                    rotationAtCaptureCallback = rotationAtCaptureCallback,
+                                    calibrationRevisionAtCaptureCallback = calibrationRevisionAtCaptureCallback,
+                                    captureCallbackNanos = captureCallbackNanos,
+                                    workerStartedNanos = scanStarted,
                                 ),
                             )
-                        }.getOrElse { Result.failure(it) } }
+                        }.getOrElse { Result.failure(it) }
                     } else null
                     mainHandler.post {
                         completeCapturedScan(bitmap,generation,scanCatalog,scanClassId,
                             recognition.getOrNull(),recognition.exceptionOrNull(),diagnostics?.exceptionOrNull())
                     }
+                    } finally {
+                        try { replayInputs?.close(); scanTrace?.retainUnpublishedEvidence() } finally { diagnosticPending?.close() }
+                    }
                 }
                 if (!accepted) {
+                    diagnosticPending?.close()
                     mainHandler.post {
                         bitmap.recycle()
                         if (generation != scanGeneration) return@post
@@ -919,7 +961,8 @@ class OverlayService : Service() {
             }
             return
         }
-        if (AppServices.prefs.showUnconfirmedCandidates) {
+        if (AppServices.prefs.showUnconfirmedCandidates &&
+            result.candidates.any { it.disposition == CandidateDisposition.NEEDS_VERIFICATION }) {
             // Background scans retain candidates until the eye button is pressed.
             // Missing structural assets still permit explicit catalog selection.
             val catalog = AppServices.repository.loadCatalog()
@@ -1366,7 +1409,8 @@ class OverlayService : Service() {
         val map = currentMap ?: return
         val screen = screenSize()
         val region = captureRegionPixels(screen.first, screen.second)
-        val trace = AlignmentTrace(clicked, AppServices.prefs.alignmentReplayInputsEnabled)
+        val trace = AlignmentTrace(clicked, AppServices.prefs.alignmentReplayInputsEnabled,
+            spoolDirectory = java.io.File(filesDir, "idvb/diagnostics/spool"))
         lastAlignmentRequestId = trace.id
         lastAlignmentTerminal = "unavailable"
         AppServices.alignmentDiagnostics.recordLifecycle(trace.id, "request.preflight", code, sessionId = sessionLogs.sessionId)
@@ -1458,7 +1502,8 @@ class OverlayService : Service() {
             (it.x + it.width).toInt(), (it.y + it.height).toInt()) }
         val captureBounds = Rect(bounds).apply { indicatorBounds?.let(::union) }
         val viewport = ScreenRect(bounds.left.toDouble(), bounds.top.toDouble(), bounds.width().toDouble(), bounds.height().toDouble())
-        val trace = AlignmentTrace(clicked, AppServices.prefs.alignmentReplayInputsEnabled)
+        val trace = AlignmentTrace(clicked, AppServices.prefs.alignmentReplayInputsEnabled,
+            spoolDirectory = java.io.File(filesDir, "idvb/diagnostics/spool"))
         val ownedPreparedFrames = preparedFrames.toMutableList().also { preparedFrames.clear() }
         ownedPreparedFrames.removeAll { frame ->
             val now = android.os.SystemClock.uptimeMillis()
@@ -1476,9 +1521,10 @@ class OverlayService : Service() {
             invalid
         }
         val hasPreparedFrame = ownedPreparedFrames.isNotEmpty()
-        var preparedIndicator = indicatorBounds?.let { area -> ownedPreparedFrames.lastOrNull()?.takeIndicatorFor(
-            area, android.os.SystemClock.uptimeMillis(), requestDetector?.config?.maximumFrameAgeMs ?: 1_000L) }
-        val needsNewCapture = !hasPreparedFrame || (indicatorBounds != null && preparedIndicator == null)
+        // Floor identity must come from the exact frame accepted by readiness.
+        // Hide overlays conservatively when a paired floor capture may be needed.
+        var readyIndicator: Bitmap? = null
+        val needsNewCapture = !hasPreparedFrame || indicatorBounds != null
         var alignmentWorkNanos = 0L
         var floorSelectedByIndicator = false
         var diagnosticContext = AlignmentDiagnosticContext(methodId, map, floor.key, viewport, screen.first, screen.second, method.name, sessionLogs.sessionId)
@@ -1522,7 +1568,7 @@ class OverlayService : Service() {
         fun complete(outcome: AlignmentResult?, terminal: String, frame: Bitmap? = null) {
             if (trace.completed.get()) return
             ownedPreparedFrames.forEach { it.recycle() }; ownedPreparedFrames.clear()
-            preparedIndicator?.recycle(); preparedIndicator = null
+            readyIndicator?.recycle(); readyIndicator = null
             val latency = com.idvb.android.alignment.AlignmentLatency.measure(clicked, System.nanoTime(), alignmentWorkNanos)
             trace.emit(AlignmentLogEvent("request.non-alignment", "capture-to-terminal-minus-alignment-call",
                 durationNanos = (latency.overheadMs * 1e6).toLong(),
@@ -1628,10 +1674,6 @@ class OverlayService : Service() {
             applyPracticeVisibility()
         }
         var captureStarted = 0L
-        var floorCaptureStartedAtMs = 0L
-        var floorCaptureReceivedAtMs = 0L
-        var floorFrameSequence: Long? = null
-        var floorFrameReceivedNanos: Long? = null
         fun queueAlignment(bitmap: Bitmap) {
             lastAlignmentTerminal = "queued"
             updateAlignmentNotice(notice, "正在自动贴合 · 等待计算", 0L)
@@ -1740,52 +1782,6 @@ class OverlayService : Service() {
                 complete(AlignmentResult.Unavailable("识别线程已停止", "executor-closed"), "unavailable", bitmap)
             }
         }
-        val callback = { captured: Result<Bitmap> ->
-            trace.emit(AlignmentLogEvent("capture.acquire", captured.exceptionOrNull()?.message ?: "captured",
-                durationNanos = System.nanoTime() - captureStarted))
-            val capturedAt = System.nanoTime()
-            mainHandler.post {
-                trace.emit(AlignmentLogEvent("capture.callback-queue", durationNanos = System.nanoTime() - capturedAt))
-                if (!current()) {
-                    if (generation == alignmentGeneration) cancelAlignment()
-                    complete(null, "cancelled-after-capture", captured.getOrNull())
-                    return@post
-                }
-                abortAlignmentCapture = null
-                alignmentCapturing = false
-                applyPracticeVisibility()
-                val bitmap = captured.getOrElse {
-                    aligning = false
-                    val timedOut = cancellation.reason == "map-open-timeout"
-                    val reason = it.message ?: "截图失败"
-                    unavailable(reason)
-                    complete(AlignmentResult.Unavailable(reason, if (timedOut) "map-open-timeout" else "capture-failed"),
-                        if (timedOut) "map-open-timeout" else "capture-failed")
-                    return@post
-                }
-                queueAlignment(bitmap)
-            }
-            Unit
-        }
-        fun queueMapReadiness(bitmap: Bitmap? = null) {
-            captureStarted = System.nanoTime()
-            if (method == ScreenCaptureMethod.ACCESSIBILITY || autoCycle != null) {
-                updateAlignmentNotice(notice, "等待游戏地图画面 · 最多 3 秒", 0L)
-                val initial = ownedPreparedFrames.toMutableList().also { ownedPreparedFrames.clear() }
-                bitmap?.let { initial.add(com.idvb.android.alignment.PreparedMapFrame(it, Rect(bounds),
-                    floorCaptureStartedAtMs, floorCaptureReceivedAtMs, method.name, floorFrameSequence,
-                    frameReceivedNanos = floorFrameReceivedNanos)) }
-                abortAlignmentCapture = com.idvb.android.alignment.MapOpenFrameCapture(
-                    mainHandler, alignmentReadinessExecutor, cancellation, trace, reference,
-                    callback = { result, signature -> readySignature = signature; callback(result) },
-                    captureProjectionFrame = if (method == ScreenCaptureMethod.MEDIA_PROJECTION)
-                        { rect, consumed, received -> requireNotNull(session).captureAfter(rect, consumed, trace, received) } else null,
-                    initialProjectionSequence = projectionWatermark,
-                    intervalMs = if (method == ScreenCaptureMethod.MEDIA_PROJECTION) 0L else com.idvb.android.alignment.MapOpenReadiness.INTERVAL_MS,
-                    maximumFrameAgeMs = requestDetector?.config?.maximumFrameAgeMs ?: 1_000L,
-                ).start(bounds, initial)
-            } else callback(Result.success(requireNotNull(bitmap)))
-        }
         fun selectFloor(indicator: Bitmap, bitmap: Bitmap? = null) {
             updateAlignmentNotice(notice, "正在自动贴合 · 选择楼层", 0L)
             val queued = System.nanoTime()
@@ -1839,7 +1835,7 @@ class OverlayService : Service() {
                             return@floorSelected
                         }
                     }
-                    queueMapReadiness(bitmap)
+                    queueAlignment(requireNotNull(bitmap))
                 }
             }
             if (!accepted) {
@@ -1848,13 +1844,34 @@ class OverlayService : Service() {
                 complete(AlignmentResult.Unavailable("识别线程已停止", "executor-closed"), "unavailable", bitmap)
             }
         }
-        fun selectCapturedFloor(capture: Bitmap) {
-            val bitmap = if (captureBounds == bounds) capture else Bitmap.createBitmap(capture,
-                bounds.left - captureBounds.left, bounds.top - captureBounds.top, bounds.width(), bounds.height())
-            val indicator = indicatorBounds?.let { area -> Bitmap.createBitmap(capture,
-                area.left - captureBounds.left, area.top - captureBounds.top, area.width(), area.height()) }
-            if (capture !== bitmap && capture !== indicator) capture.recycle()
-            if (indicator == null) queueMapReadiness(bitmap) else selectFloor(indicator, bitmap)
+        val callback = { captured: Result<Bitmap> ->
+            trace.emit(AlignmentLogEvent("capture.acquire", captured.exceptionOrNull()?.message ?: "captured",
+                durationNanos = System.nanoTime() - captureStarted))
+            val capturedAt = System.nanoTime()
+            mainHandler.post {
+                trace.emit(AlignmentLogEvent("capture.callback-queue", durationNanos = System.nanoTime() - capturedAt))
+                if (!current()) {
+                    if (generation == alignmentGeneration) cancelAlignment()
+                    complete(null, "cancelled-after-capture", captured.getOrNull())
+                    return@post
+                }
+                abortAlignmentCapture = null
+                alignmentCapturing = false
+                applyPracticeVisibility()
+                val bitmap = captured.getOrElse {
+                    aligning = false
+                    val timedOut = cancellation.reason == "map-open-timeout"
+                    val reason = it.message ?: "截图失败"
+                    unavailable(reason)
+                    complete(AlignmentResult.Unavailable(reason, if (timedOut) "map-open-timeout" else "capture-failed"),
+                        if (timedOut) "map-open-timeout" else "capture-failed")
+                    return@post
+                }
+                val indicator = readyIndicator
+                readyIndicator = null
+                if (indicator != null) selectFloor(indicator, bitmap) else queueAlignment(bitmap)
+            }
+            Unit
         }
         val hidden = System.nanoTime()
         val captureStart = Runnable {
@@ -1866,53 +1883,7 @@ class OverlayService : Service() {
                 complete(null, "cancelled-before-capture"); return@Runnable
             }
             captureStarted = System.nanoTime()
-            val reusedIndicator = preparedIndicator
-            preparedIndicator = null
-            if (reusedIndicator != null) {
-                trace.emit(AlignmentLogEvent("floor-indicator.capture.reused", "same-unoccluded-detector-frame",
-                    labels = mapOf("autoSampleId" to lastAutoSampleId)))
-                selectFloor(reusedIndicator)
-            } else if (indicatorBounds != null) {
-                floorCaptureStartedAtMs = android.os.SystemClock.uptimeMillis()
-                val floorCaptured: (Result<Bitmap>) -> Unit = { result ->
-                    floorCaptureReceivedAtMs = android.os.SystemClock.uptimeMillis()
-                    val receivedAt = System.nanoTime()
-                    trace.emit(AlignmentLogEvent("floor-indicator.capture.acquire", result.exceptionOrNull()?.message ?: "captured",
-                        durationNanos = System.nanoTime() - captureStarted))
-                    mainHandler.post {
-                        trace.emit(AlignmentLogEvent("floor-indicator.capture.callback-queue", durationNanos = System.nanoTime() - receivedAt))
-                        if (!current() || cancellation.isCancelled) {
-                            if (generation == alignmentGeneration) cancelAlignment()
-                            complete(null, "cancelled-before-floor-selection", result.getOrNull())
-                        } else {
-                            val bitmap = result.getOrNull()
-                            if (bitmap == null) {
-                                aligning = false; alignmentCapturing = false; applyPracticeVisibility()
-                                val reason = result.exceptionOrNull()?.message ?: "截图失败"
-                                unavailable(reason)
-                                trace.emit(AlignmentLogEvent("floor-indicator.unavailable", reason,
-                                    labels = mapOf("replay" to "input-missing", "reason" to "capture-failed")))
-                                complete(AlignmentResult.Unavailable(reason, "capture-failed"), "capture-failed")
-                            } else {
-                                abortAlignmentCapture = null
-                                selectCapturedFloor(bitmap)
-                            }
-                        }
-                    }
-                }
-                if (method == ScreenCaptureMethod.ACCESSIBILITY) {
-                    abortAlignmentCapture = AccessibilityScreenCaptureService.capture(captureBounds,
-                        accessibilityCaptureExecutor, floorCaptured, trace)
-                } else {
-                    abortAlignmentCapture = session!!.captureAfter(captureBounds, projectionWatermark, trace) { result ->
-                        result.getOrNull()?.let { frame ->
-                            floorFrameSequence = frame.sequence
-                            floorFrameReceivedNanos = frame.receivedNanos
-                        }
-                        floorCaptured(result.map { it.bitmap })
-                    }
-                }
-            } else if (method == ScreenCaptureMethod.ACCESSIBILITY || autoCycle != null) {
+            if (method == ScreenCaptureMethod.ACCESSIBILITY || autoCycle != null || indicatorBounds != null) {
                 updateAlignmentNotice(notice, "等待游戏地图画面 · 最多 3 秒", 0L)
                 abortAlignmentCapture = com.idvb.android.alignment.MapOpenFrameCapture(
                     mainHandler, alignmentReadinessExecutor, cancellation, trace, reference,
@@ -1922,6 +1893,8 @@ class OverlayService : Service() {
                     initialProjectionSequence = projectionWatermark,
                     intervalMs = if (method == ScreenCaptureMethod.MEDIA_PROJECTION) 0L else com.idvb.android.alignment.MapOpenReadiness.INTERVAL_MS,
                     maximumFrameAgeMs = requestDetector?.config?.maximumFrameAgeMs ?: 1_000L,
+                    indicatorBounds = indicatorBounds,
+                    onReadyIndicator = { readyIndicator?.recycle(); readyIndicator = it },
                 ).start(bounds, ownedPreparedFrames.toList().also { ownedPreparedFrames.clear() })
             } else {
                 session!!.capture(captureBounds, callback)
@@ -2465,6 +2438,7 @@ class OverlayService : Service() {
             autoPauseReason = reason
             autoDiagnostics.event(reason, autoReference, sessionLogs.sessionId, lastAlignmentRequestId,
                 state = mapOf("foregroundPackage" to AccessibilityScreenCaptureService.foregroundPackage.orEmpty(),
+                    "foregroundEvidence" to AccessibilityScreenCaptureService.foregroundEvidence,
                     "targetPackage" to autoReference?.targetPackage.orEmpty(),
                     "captureAvailable" to AccessibilityScreenCaptureService.available.toString(),
                     "detectionEnabled" to AppServices.prefs.autoDetectMapOpenEnabled.toString(),
@@ -2507,6 +2481,8 @@ class OverlayService : Service() {
 
     private fun autoExternalPackage(): String? {
         if (hostForeground) return null
+        if (getSystemService(android.os.PowerManager::class.java)?.isInteractive == false ||
+            getSystemService(android.app.KeyguardManager::class.java)?.isKeyguardLocked == true) return null
         val name = AccessibilityScreenCaptureService.foregroundPackage
         val home = packageManager.resolveActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0)?.activityInfo?.packageName
         if (name != null) {

@@ -62,7 +62,7 @@ class AlignmentLatencyCorpusInstrumentedTest {
                     // Warm/cold costs are reported separately. Live toggles reuse these same assets.
                     val cold = replay.run().elapsedMilliseconds
                     val done = CountDownLatch(1)
-                    val trace = AlignmentTrace(captureArtifacts = true)
+                    val trace = AlignmentTrace(captureArtifacts = true, spoolDirectory = java.io.File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "readiness-spool"))
                     var result: AlignmentTestReport? = null
                     var error: Throwable? = null
                     var elapsed = 0.0

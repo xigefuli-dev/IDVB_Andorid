@@ -65,6 +65,7 @@ data class VpsgScanDiagnostics(
     val identityUnique: Boolean,
     val algorithm: String = "vpsg-prebuilt-lines-v1",
     val floorTimings: List<VpsgFloorTiming> = emptyList(),
+
 )
 
 data class VpsgFloorTiming(

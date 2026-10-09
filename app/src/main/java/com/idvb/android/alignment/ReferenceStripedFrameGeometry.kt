@@ -25,7 +25,8 @@ internal object ReferenceStripedFrameGeometry {
         "minimumStripeDensity" to .10, "maximumStripeDensity" to .80,
         "duplicateTolerance" to 3.0, "frameLineThickness" to 2.0)
 
-    fun extract(bgr: Mat, gray: Mat, preparedHsv: Mat? = null, minimumValue: Double = 50.0): Result {
+    fun extract(bgr: Mat, gray: Mat, preparedHsv: Mat? = null, minimumValue: Double = 50.0,
+        preparedTopHat: Mat? = null): Result {
         val hsv = Mat(); val semantic = Mat(); val wrap = Mat()
         val high = Mat(); val binary = Mat(); val vertical = Mat(); val horizontal = Mat()
         val grouped = Mat(); val labels = Mat(); val stats = Mat(); val centers = Mat()
@@ -42,8 +43,8 @@ internal object ReferenceStripedFrameGeometry {
             // Room grates have closed rectangular frames. Corridor stair textures can
             // form a local rectangle inside an L shape; they are not closed walls.
             Core.bitwise_or(semantic, wrap, semantic)
-            Imgproc.morphologyEx(gray, high, Imgproc.MORPH_TOPHAT, k5)
-            Core.inRange(high, Scalar.all(6.0), Scalar.all(255.0), binary)
+            if (preparedTopHat == null) Imgproc.morphologyEx(gray, high, Imgproc.MORPH_TOPHAT, k5)
+            Core.inRange(preparedTopHat ?: high, Scalar.all(6.0), Scalar.all(255.0), binary)
             Core.bitwise_and(binary, semantic, binary)
             Imgproc.morphologyEx(binary, vertical, Imgproc.MORPH_OPEN, kv)
             Imgproc.morphologyEx(binary, horizontal, Imgproc.MORPH_OPEN, kh)

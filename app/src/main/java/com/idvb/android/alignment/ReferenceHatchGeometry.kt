@@ -30,7 +30,7 @@ internal object ReferenceHatchGeometry {
         "corridorHsvMin" to listOf(95.0, 14.0, 50.0),
         "corridorHsvMax" to listOf(130.0, 105.0, 200.0))
 
-    fun extract(bgr: Mat, gray: Mat): Result {
+    fun extract(bgr: Mat, gray: Mat, preparedHsv: Mat? = null, preparedTopHat: Mat? = null): Result {
         val hsv = Mat(); val room = Mat(); val wrap = Mat(); val corridor = Mat()
         val high = Mat(); val binary = Mat(); val diagonal = Mat(); val opposite = Mat()
         val grouped = Mat(); val horizontal = Mat(); val vertical = Mat(); val near = Mat()
@@ -46,13 +46,14 @@ internal object ReferenceHatchGeometry {
         try {
             kd.put(0, 0, ByteArray(81) { if (it / 9 == it % 9) 1 else 0 })
             ko.put(0, 0, ByteArray(81) { if (it / 9 + it % 9 == 8) 1 else 0 })
-            Imgproc.cvtColor(bgr, hsv, Imgproc.COLOR_BGR2HSV)
-            Core.inRange(hsv, Scalar(0.0, 18.0, 50.0), Scalar(25.0, 165.0, 200.0), room)
-            Core.inRange(hsv, Scalar(170.0, 18.0, 50.0), Scalar(179.0, 165.0, 200.0), wrap)
-            Core.inRange(hsv, Scalar(95.0, 14.0, 50.0), Scalar(130.0, 105.0, 200.0), corridor)
+            if (preparedHsv == null) Imgproc.cvtColor(bgr, hsv, Imgproc.COLOR_BGR2HSV)
+            val colors = preparedHsv ?: hsv
+            Core.inRange(colors, Scalar(0.0, 18.0, 50.0), Scalar(25.0, 165.0, 200.0), room)
+            Core.inRange(colors, Scalar(170.0, 18.0, 50.0), Scalar(179.0, 165.0, 200.0), wrap)
+            Core.inRange(colors, Scalar(95.0, 14.0, 50.0), Scalar(130.0, 105.0, 200.0), corridor)
             Core.bitwise_or(room, wrap, room); Core.bitwise_or(room, corridor, room)
-            Imgproc.morphologyEx(gray, high, Imgproc.MORPH_TOPHAT, k5)
-            Core.inRange(high, Scalar.all(6.0), Scalar.all(255.0), binary)
+            if (preparedTopHat == null) Imgproc.morphologyEx(gray, high, Imgproc.MORPH_TOPHAT, k5)
+            Core.inRange(preparedTopHat ?: high, Scalar.all(6.0), Scalar.all(255.0), binary)
             Core.bitwise_and(binary, room, binary)
             Imgproc.morphologyEx(binary, diagonal, Imgproc.MORPH_OPEN, kd)
             Imgproc.morphologyEx(binary, opposite, Imgproc.MORPH_OPEN, ko)

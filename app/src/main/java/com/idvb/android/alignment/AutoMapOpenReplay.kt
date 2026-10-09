@@ -39,6 +39,9 @@ object AutoMapOpenReplay {
         val frames = snapshot.getValue("frames").jsonArray
         for (index in frames.indices) {
             val frame = frames[index].jsonObject
+            frame["referenceId"]?.let { require(it == snapshot.getValue("reference").jsonObject.getValue("id")) {
+                "自动开图第 $index 帧属于另一参考代次，不能混合回放"
+            } }
             if (frame.getValue("pixels") == JsonNull) { unknown++; continue }
             val pixels = frame.getValue("pixels").jsonArray
             val signature = AutoMapOpenDetector.signature(IntArray(pixels.size) { pixels[it].jsonPrimitive.int })

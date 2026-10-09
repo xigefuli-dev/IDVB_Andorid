@@ -9,6 +9,69 @@ import java.util.Random
 import java.util.zip.ZipFile
 
 class DiagnosticHistoryTest {
+    @Test fun firstQueuedRequestCreatesSessionAtCaptureTimeInsteadOfDelayedWriterTime() {
+        val root = temporary.newFolder()
+        val history = DiagnosticHistory(root) { 10_000L }
+        val first = history.directoryAt(1000, "alignment")
+        assertTrue(first.parentFile!!.name.startsWith("1000-"))
+        repeat(12) { assertEquals(first, history.directoryAt(1000L + it, "alignment")) }
+        assertTrue(runCatching { history.directoryAt(999, "alignment") }.isFailure)
+    }
+
+    @Test fun committedJournalRemainsReadableUntilConcurrentExportLeaseCloses() {
+        val root = temporary.newFolder()
+        val history = DiagnosticHistory(root)
+        val journal = File(root, "spool/request").apply { mkdirs() }
+        val input = File(journal, "input").apply { writeText("original capture") }
+        val capture = history.retainFiles()
+        val export = history.retainFiles()
+        history.discardCommittedJournal(journal)
+        capture.close()
+        assertEquals("original capture", input.readText())
+        assertTrue(runCatching { synchronized(DiagnosticHistory.lock) { DiagnosticHistory.requireIdle(root) } }.isFailure)
+        export.close(); export.close()
+        assertFalse(journal.exists())
+        synchronized(DiagnosticHistory.lock) { DiagnosticHistory.requireIdle(root) }
+    }
+
+    @Test fun exportIncludesUnpublishedInputsAndTheirIncompleteState() {
+        val root = temporary.newFolder()
+        val journal = File(root, "spool/request/artifacts").apply { mkdirs() }
+        File(journal, "reference.png").writeText("original input")
+        File(journal.parentFile, "state.json").writeText("{\"status\":\"collecting\",\"replayReady\":false}")
+        File(journal, ".pending-failed.tmp").writeText("partial")
+        val archive = temporary.newFile()
+        assertEquals(2, HistoryArchive.write(root, archive, true, 0))
+        ZipFile(archive).use { zip ->
+            assertEquals("original input", zip.getInputStream(zip.getEntry("spool/request/artifacts/reference.png")).reader().readText())
+            assertNotNull(zip.getEntry("spool/request/state.json"))
+            assertNull(zip.getEntry("spool/request/artifacts/.pending-failed.tmp"))
+            assertTrue(zip.getInputStream(zip.getEntry("diagnostic-export.json")).reader().readText().contains("collecting records are incomplete"))
+        }
+    }
+
+    @Test fun slowWriterPinsFilesWithoutBlockingHistoryAccessAndPreventsConcurrentClear() {
+        val root = temporary.newFolder()
+        val history = DiagnosticHistory(root)
+        val first = history.begin()
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val finish = java.util.concurrent.CountDownLatch(1)
+        val worker = java.util.concurrent.Executors.newSingleThreadExecutor()
+        try {
+            val writing = worker.submit { history.preservingFiles {
+                entered.countDown()
+                check(finish.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            } }
+            assertTrue(entered.await(2, java.util.concurrent.TimeUnit.SECONDS))
+            assertEquals(first, history.directoryFor(first.name, "alignment").parentFile)
+            synchronized(DiagnosticHistory.lock) {
+                assertTrue(runCatching { DiagnosticHistory.requireIdle(root) }.isFailure)
+            }
+            finish.countDown()
+            writing.get(2, java.util.concurrent.TimeUnit.SECONDS)
+            synchronized(DiagnosticHistory.lock) { DiagnosticHistory.requireIdle(root) }
+        } finally { finish.countDown(); worker.shutdownNow() }
+    }
     @get:Rule val temporary = TemporaryFolder()
 
     @Test fun keepsWholeSessionsAndPrunesTwentyFirstIncludingLegacy() {
@@ -93,7 +156,8 @@ class DiagnosticHistoryTest {
         assertEquals(4, HistoryArchive.write(root, archive, true))
         assertTrue(archive.length() > 20L * 1024 * 1024)
         ZipFile(archive).use { zip ->
-            assertEquals(5, zip.size())
+            assertEquals(6, zip.size())
+            assertNotNull(zip.getEntry("diagnostic-export.json"))
             val entry = zip.getEntry(input.relativeTo(root).invariantSeparatorsPath)
             input.inputStream().use { expected -> zip.getInputStream(entry).use { actual ->
                 val left = ByteArray(8192); val right = ByteArray(8192)

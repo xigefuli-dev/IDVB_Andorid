@@ -66,7 +66,7 @@ class AutoMapOpenFrameReuseInstrumentedTest {
     @Test fun twoCleanDetectionFramesRunReadinessAndReplayWithoutAnotherScreenshotOrWait() {
         val executor = Executors.newSingleThreadExecutor()
         val done = CountDownLatch(1)
-        val trace = AlignmentTrace(captureArtifacts = true)
+        val trace = AlignmentTrace(captureArtifacts = true, spoolDirectory = java.io.File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "readiness-spool"))
         val first = frame(0xff687580.toInt())
         val latest = frame(0xff697681.toInt())
         var calls = 0

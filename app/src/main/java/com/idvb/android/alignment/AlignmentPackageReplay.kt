@@ -31,8 +31,14 @@ class AlignmentPackageReplay private constructor(
         testCase.request.map, testCase.request.floor, AlignmentCancellation(), log)
     fun run(log: AlignmentLogSink = AlignmentLogSink.NONE,
         expectedOutcome: AlignmentOutcome = testCase.expectedOutcome,
-        expectedTransform: AlignmentTransform? = testCase.expectedTransform): AlignmentTestReport =
-        AlignmentReplayRunner(registry, log).run(testCase.copy(expectedOutcome = expectedOutcome, expectedTransform = expectedTransform))
+        expectedTransform: AlignmentTransform? = testCase.expectedTransform,
+        request: AlignmentRequest = testCase.request): AlignmentTestReport {
+        // Display-size variants borrow a caller-owned bitmap and retain the original
+        // isolated reference repository. Callers must scale their own expectations.
+        require(request.map == testCase.request.map && request.floor == testCase.request.floor)
+        return AlignmentReplayRunner(registry, log).run(testCase.copy(request = request,
+            expectedOutcome = expectedOutcome, expectedTransform = expectedTransform))
+    }
     override fun close() { if (!frame.isRecycled) frame.recycle(); root.deleteRecursively() }
 
     companion object {
@@ -59,7 +65,10 @@ class AlignmentPackageReplay private constructor(
                             }
                         }
                     }
-                    val manifest = json.parseToJsonElement(bytes("diagnostics.json").decodeToString()).jsonObject
+                    // Candidate timelines can exceed 64 MiB after all scale modes are
+                    // recorded. Read request metadata incrementally and skip the event
+                    // timeline; retain the complete timeline unchanged in the archive.
+                    val manifest = AlignmentReplayManifest.read(zip)
                     require(manifest.getValue("schemaVersion").jsonPrimitive.int == 1)
                     require(manifest.getValue("replayReady").jsonPrimitive.boolean) { "Replay inputs are incomplete" }
                     val artifacts = manifest.getValue("artifacts").jsonObject

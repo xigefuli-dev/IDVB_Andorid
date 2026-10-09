@@ -26,14 +26,17 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
         if (event == null) return
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val updated = event.packageName?.toString()
-        val ignored = ForegroundWindowPolicy.ignoredWindowReason(updated, event.className?.toString())
+        val ignored = ForegroundWindowPolicy.ignoredWindowReason(updated, event.className?.toString(), event.isFullScreen)
+        foregroundEvidence = "policy=${ForegroundWindowPolicy.VERSION} package=$updated class=${event.className} " +
+            "window=${event.windowId} fullScreen=${event.isFullScreen} eventTime=${event.eventTime} " +
+            "decision=${ignored ?: "replace"} previous=$foregroundPackage"
         if (ignored != null) {
             android.util.Log.i("IDVB-Foreground", "stage=window-ignored reason=$ignored " +
-                "retained=$foregroundPackage package=$updated class=${event.className} window=${event.windowId}")
+                "retained=$foregroundPackage $foregroundEvidence")
             return
         }
         if (updated != foregroundPackage) android.util.Log.i("IDVB-Foreground",
-            "previous=$foregroundPackage package=$updated class=${event.className} window=${event.windowId}")
+            foregroundEvidence)
         if (updated != foregroundPackage) {
             foregroundPackage = updated
             foregroundChangedListener?.invoke(updated)
@@ -49,6 +52,8 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
     companion object {
         @Volatile private var instance: AccessibilityScreenCaptureService? = null
         @Volatile var foregroundPackage: String? = null
+            private set
+        @Volatile var foregroundEvidence: String = "unavailable"
             private set
         @Volatile var foregroundChangedListener: ((String?) -> Unit)? = null
         // Shared by detection, readiness and scan. Android platform baseline is 333ms;

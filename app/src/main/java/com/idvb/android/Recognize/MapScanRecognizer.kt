@@ -17,16 +17,16 @@ import org.opencv.imgproc.Imgproc
 
 /** Choose one complete route from the observation. Ambiguity is a retry outcome,
  * not a reason to repeat the whole catalog with another solver on the same frame. */
-internal class MapScanRecognizer(private val context: Context, private val repository: MapRepository) {
+internal class MapScanRecognizer(private val context: Context, private val repository: MapRepository,
+    log: com.idvb.android.alignment.AlignmentLogSink = com.idvb.android.alignment.AlignmentLogSink.NONE) {
+    private val log = RecognitionEvidenceLog(log)
     fun recognize(frame: Bitmap, viewport: ScreenRect, clientWidth: Int, clientHeight: Int,
         classId: String?, progress: ((Double, String) -> Unit)? = null): RecognitionResult {
         require(clientWidth > 0 && clientHeight > 0)
-        // Wall stroke extraction and geometric tolerances operate in a stable
-        // pixel domain. Merely widening scale bounds leaves morphology dependent
-        // on device resolution (notably thick 4K walls and tiny 720p icons).
-        // Very small captures cannot acquire more evidence through arbitrary
-        // enlargement. Limit upsampling so line pitch/widths stay meaningful.
-        val factor = min(2.0,1440.0 / min(clientWidth, clientHeight))
+        // Preserve native wall strokes on phone captures. Enlarging an already
+        // resolved wall changes Canny/reveal boundaries without adding evidence.
+        // Only reduce oversized frames to bound the extraction/search cost.
+        val factor = min(1.0,1440.0 / min(clientWidth, clientHeight))
         if (kotlin.math.abs(factor - 1.0) < .001)
             return recognizePrepared(frame, viewport, clientWidth, clientHeight, classId, progress)
         val normalized = Bitmap.createScaledBitmap(frame, max(1,(frame.width*factor).roundToInt()),
@@ -49,6 +49,47 @@ internal class MapScanRecognizer(private val context: Context, private val repos
     private fun recognizePrepared(frame: Bitmap, viewport: ScreenRect, clientWidth: Int, clientHeight: Int,
         classId: String?, progress: ((Double, String) -> Unit)?): RecognitionResult {
         progress?.invoke(.02, "正在识别侧门…")
+        // Door templates need a canonical icon size; structural evidence must
+        // retain the native phone pixels that selected-map alignment observes.
+        val gateFactor = min(2.0, 1440.0 / min(clientWidth, clientHeight))
+        val gates = if (kotlin.math.abs(gateFactor - 1.0) < .001) {
+            detectGates(frame, viewport, clientWidth, clientHeight)
+        } else {
+            val gateFrame = Bitmap.createScaledBitmap(frame, max(1,(frame.width*gateFactor).roundToInt()),
+                max(1,(frame.height*gateFactor).roundToInt()),true)
+            try {
+                val detected = detectGates(gateFrame, ScreenRect(viewport.x*gateFactor,viewport.y*gateFactor,
+                    gateFrame.width.toDouble(),gateFrame.height.toDouble()),
+                    (clientWidth*gateFactor).roundToInt(),(clientHeight*gateFactor).roundToInt())
+                detected.copy(gates=detected.gates.map { gate -> gate.copy(scale=gate.scale/gateFactor,
+                    screenBounds=gate.screenBounds.let { ScreenRect(it.x/gateFactor,it.y/gateFactor,
+                        it.width/gateFactor,it.height/gateFactor) }) })
+            } finally { if (gateFrame !== frame) gateFrame.recycle() }
+        }
+        val sideRecognizer = SideEntranceRecognizer(context, repository, classId)
+        fun side(start: Double, span: Double) = sideRecognizer.recognize(frame, viewport, clientWidth, clientHeight,
+            progress = { progress?.invoke(start + span * it, "正在比较地图结构…") }, detectedGates = gates)
+        val maps = repository.loadCatalog().maps.filter { classId == null || it.classId == classId }
+        fun lines(start: Double, span: Double) = VpsgLineScanner(repository,scanLog=log).recognize(frame, viewport, maps) {
+            progress?.invoke(start + span * it, "正在比较地图线图…")
+        }
+        if (gates.gates.isNotEmpty()) {
+            val anchored = SparseGateRecognizer(repository,log).recognize(frame, viewport, maps, gates,
+                SideEntranceScanProfiles.resolve(clientWidth, clientHeight)) {
+                progress?.invoke(.10 + .50 * it, "正在比较地图结构…")
+            } ?: side(.10, .50)
+            progress?.invoke(1.0, "正在确认结果…")
+            return anchored
+        }
+        val vpsg = lines(.10, .85)
+        // With no door the side route cannot add identity evidence; avoid preparing its templates.
+        val result = vpsg ?: side(.95, .05)
+        progress?.invoke(1.0, "正在确认结果…")
+        return result
+    }
+
+    private fun detectGates(frame: Bitmap, viewport: ScreenRect, clientWidth: Int,
+        clientHeight: Int): GateDetectionResult {
         val gray = CvImages.bitmapToGray(frame)
         // Fog often leaves most of the viewport exactly black. Template matching
         // need not slide over that empty margin. Keep 128px padding and preserve
@@ -64,7 +105,7 @@ internal class MapScanRecognizer(private val context: Context, private val repos
             }
         } finally { occupied.release() }
         val gateInput = gray.submat(gateBounds)
-        val gates = try {
+        return try {
             GateTemplateDetector.fromAssets(context).use { detector -> detector.detect(
                 liveMatchImage = gateInput, viewportBounds = ScreenRect(viewport.x+gateBounds.x,
                     viewport.y+gateBounds.y,gateBounds.width.toDouble(),gateBounds.height.toDouble()),
@@ -74,26 +115,6 @@ internal class MapScanRecognizer(private val context: Context, private val repos
                     allowDualGateEarlyExit = false, allowSingleGateEarlyExit = false,
                     singleGateScoreThreshold = max(GateTemplateRules.MATCH_THRESHOLD, GateTemplateRules.EARLY_EXIT_SCORE_THRESHOLD))) }
         } finally { gateInput.release(); gray.release() }
-        val sideRecognizer = SideEntranceRecognizer(context, repository, classId)
-        fun side(start: Double, span: Double) = sideRecognizer.recognize(frame, viewport, clientWidth, clientHeight,
-            progress = { progress?.invoke(start + span * it, "正在比较地图结构…") }, detectedGates = gates)
-        val maps = repository.loadCatalog().maps.filter { classId == null || it.classId == classId }
-        fun lines(start: Double, span: Double) = VpsgLineScanner(repository).recognize(frame, viewport, maps) {
-            progress?.invoke(start + span * it, "正在比较地图线图…")
-        }
-        if (gates.gates.isNotEmpty()) {
-            val anchored = SparseGateRecognizer(repository).recognize(frame, viewport, maps, gates,
-                SideEntranceScanProfiles.resolve(clientWidth, clientHeight)) {
-                progress?.invoke(.10 + .50 * it, "正在比较地图结构…")
-            } ?: side(.10, .50)
-            progress?.invoke(1.0, "正在确认结果…")
-            return anchored
-        }
-        val vpsg = lines(.10, .85)
-        // With no door the side route cannot add identity evidence; avoid preparing its templates.
-        val result = vpsg ?: side(.95, .05)
-        progress?.invoke(1.0, "正在确认结果…")
-        return result
     }
 
 }

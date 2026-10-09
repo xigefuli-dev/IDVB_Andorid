@@ -10,7 +10,7 @@ import kotlin.math.ceil
 /** A passive outline outside the saved capture viewport, with no fill or controls. */
 class CalibrationBorderView(context: Context) : View(context) {
     companion object {
-        const val OPACITY = .20f
+        const val OPACITY = .05f
     }
 
     val borderWidth = ceil(resources.displayMetrics.density.toDouble()).toInt().coerceAtLeast(1)

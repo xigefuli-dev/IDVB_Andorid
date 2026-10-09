@@ -11,6 +11,31 @@ import org.opencv.imgproc.Imgproc
 
 @RunWith(AndroidJUnit4::class)
 class VisibleWallEvidenceInstrumentedTest {
+    @Test fun optionalSourceAppearanceDoesNotBecomeMissingWallEvidence() {
+        assertTrue(OpenCvRuntime.initialize())
+        val required = Mat.zeros(220, 300, CvType.CV_8UC1)
+        Imgproc.rectangle(required, Point(20.0, 20.0), Point(280.0, 200.0), Scalar.all(255.0), 1)
+        val appearance = required.clone()
+        for (x in 45..255 step 20)
+            Imgproc.line(appearance, Point(x.toDouble(), 40.0), Point(x.toDouble(), 180.0), Scalar.all(255.0), 1)
+        val visible = Mat(220, 300, CvType.CV_8UC1, Scalar.all(255.0))
+        try {
+            VpsgLiveExtractor.Observation(required.clone(), visible.clone(), required.clone(), visible.clone()).use { live ->
+                val points = SparseGateSearch.pixels(live.edges)
+                val contours = SparseGateSearch.contours(live.edges)
+                val reverse = SparseGateSearch.ReverseObservation(live)
+                val pose = SparseGateSearch.Pose(1.0, 0.0, 0.0)
+                val conflated = SparseGateSearch.verify(SparseGateSearch.build(appearance), pose, points, contours, 300, 220, reverse = reverse)
+                val separate = SparseGateSearch.build(appearance, requiredLine = required)
+                val measured = SparseGateSearch.verify(separate, pose, points, contours, 300, 220, reverse = reverse)
+                assertEquals("visible-reference-conflict", conflated.rejectionCode)
+                assertTrue(measured.toString(), measured.supported)
+                assertEquals(0.0, separate.distance(45.0, 100.0, 1.0), .01)
+                assertEquals(Core.countNonZero(required), separate.edgePositions.size)
+            }
+        } finally { required.release(); appearance.release(); visible.release() }
+    }
+
     @Test fun fogCutIsNotAWallButVisibleStraightWallRemains() {
         assertTrue(OpenCvRuntime.initialize())
         val color = Mat.zeros(260,340,CvType.CV_8UC3)

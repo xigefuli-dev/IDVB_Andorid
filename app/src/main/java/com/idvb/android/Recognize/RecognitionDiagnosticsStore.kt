@@ -19,6 +19,10 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 import com.idvb.android.recognize.cv.OpenCvRuntime
+import com.idvb.android.BuildConfig
+import com.idvb.android.diagnostics.DiagnosticWriteTracker
+import kotlinx.serialization.json.*
+import java.security.MessageDigest
 
 data class CaptureDiagnosticsContext(
     val screenWidth: Int,
@@ -30,6 +34,12 @@ data class CaptureDiagnosticsContext(
     val classId: String?,
     val className: String?,
     val sessionId: String? = null,
+    val captureSource: String? = null,
+    val scanRequestId: String? = null,
+    val rotationAtCaptureCallback: Int? = null,
+    val calibrationRevisionAtCaptureCallback: Long? = null,
+    val captureCallbackNanos: Long? = null,
+    val workerStartedNanos: Long? = null,
 )
 
 /**
@@ -43,9 +53,15 @@ class RecognitionDiagnosticsStore(context: Context) {
     @Synchronized
     fun record(
         capturedFrame: Bitmap,
-        result: RecognitionResult,
+        result: RecognitionResult?,
         captureContext: CaptureDiagnosticsContext,
-    ): Result<File> = synchronized(com.idvb.android.diagnostics.DiagnosticHistory.lock) { runCatching {
+        replayInputs: RecognitionReplayInputs? = null,
+        failure: Throwable? = null,
+        inputCaptureFailure: String? = null,
+        scanTrace: com.idvb.android.alignment.AlignmentTrace? = null,
+    ): Result<File> = history.preservingFiles {
+        val pending = DiagnosticWriteTracker.begin(File(appContext.filesDir, "idvb/diagnostics"), "recognition-record")
+        try { runCatching {
         require(!capturedFrame.isRecycled) { "原始扫描帧已经释放" }
         val now = System.currentTimeMillis()
         val directory = captureContext.sessionId?.let { history.directoryFor(it, "recognition") }
@@ -56,28 +72,127 @@ class RecognitionDiagnosticsStore(context: Context) {
         val suffix = "$now-${java.util.UUID.randomUUID()}"
         val finalFile = File(directory, "recognition-$suffix.zip")
         val temporary = File(directory, ".recognition-$suffix.tmp")
-        temporary.delete()
+        val writeStarted = System.nanoTime()
+        val artifacts = linkedMapOf<String, Pair<Long, String>>()
+        val missing = replayInputs?.verifyUnchanged()?.toMutableList()
+            ?: mutableListOf("scan-input-snapshot-not-captured")
+        inputCaptureFailure?.let { missing += "snapshot-capture-failed:$it" }
+        if (replayInputs?.classId != captureContext.classId) missing += "snapshot-class-does-not-match-capture"
+        val recorded = result ?: RecognitionResult(capturedFrame, emptyList(), route = "unavailable")
+        var captureEncodeMs = 0.0
+        var referenceWriteMs = 0.0
+        var sourceWriteMs = 0.0
+        var sourceFingerprint: String? = null
         try {
-            ZipOutputStream(FileOutputStream(temporary)).use { zip ->
-                zip.putNextEntry(ZipEntry("captured.png"))
-                check(capturedFrame.compress(Bitmap.CompressFormat.PNG, 100, zip)) {
-                    "无法编码原始扫描帧"
+            ZipOutputStream(FileOutputStream(temporary).buffered()).use { zip ->
+                fun add(name: String, write: (java.io.OutputStream) -> Unit) {
+                    zip.putNextEntry(ZipEntry(name))
+                    val digest = MessageDigest.getInstance("SHA-256")
+                    var count = 0L
+                    val output = object : java.io.OutputStream() {
+                        override fun write(b: Int) { zip.write(b); digest.update(b.toByte()); count++ }
+                        override fun write(b: ByteArray, off: Int, len: Int) { zip.write(b, off, len); digest.update(b, off, len); count += len }
+                    }
+                    write(output); zip.closeEntry()
+                    artifacts[name] = count to digest.digest().joinToString("") { "%02x".format(it) }
                 }
-                zip.closeEntry()
+                val encodeStarted = System.nanoTime()
+                add("captured.png") { output -> check(capturedFrame.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                    "无法编码原始扫描帧"
+                } }
+                captureEncodeMs = (System.nanoTime() - encodeStarted) / 1e6
+                val referencesStarted = System.nanoTime()
+                replayInputs?.files?.forEach { (name, file) -> add(name) { output -> file.inputStream().use { it.copyTo(output, 64 * 1024) } } }
+                referenceWriteMs = (System.nanoTime() - referencesStarted) / 1e6
+                scanTrace?.let { trace ->
+                    val eventJson = Json { allowSpecialFloatingPointValues=true; encodeDefaults=true }
+                    val chunk = java.io.ByteArrayOutputStream(64*1024)
+                    var part = 0
+                    fun flushEvents() {
+                        if (chunk.size()==0) return
+                        add("scan-events-${part++}.jsonl") { chunk.writeTo(it) }; chunk.reset()
+                    }
+                    trace.forEachEvent { event ->
+                        val bytes = eventJson.encodeToString(com.idvb.android.alignment.AlignmentLogEvent.serializer(),event).encodeToByteArray()
+                        if (chunk.size()+bytes.size > 4*1024*1024) flushEvents()
+                        chunk.write(bytes); chunk.write(10)
+                    }
+                    flushEvents()
+                    val scratch = ByteArray(64*1024)
+                    trace.artifactDataSnapshot().forEach { (name,artifact) -> add("scan-evidence/$name") { artifact.writeTo(it,scratch) } }
+                }
+                val provenanceStarted = System.nanoTime()
+                runCatching {
+                    val provenanceBytes = appContext.assets.open("alignment-provenance.json").use { it.readBytes() }
+                    val provenance = Json.parseToJsonElement(provenanceBytes.decodeToString()).jsonObject
+                    add("alignment-provenance.json") { it.write(provenanceBytes) }
+                    val files = provenance.getValue("files").jsonObject
+                    check(files.isNotEmpty()) { "Empty source snapshot" }
+                    files.forEach { (path, hash) ->
+                        val name = "alignment-source/$path"
+                        add(name) { output -> appContext.assets.open(name).use { it.copyTo(output, 64 * 1024) } }
+                        check(artifacts.getValue(name).second == hash.jsonPrimitive.content) { "Source snapshot hash mismatch: $path" }
+                    }
+                    // Templates are immutable build inputs; bundle and bind their exact runtime bytes too.
+                    appContext.assets.list("recognition").orEmpty().filter { it.endsWith(".png") }.forEach { name ->
+                        add("runtime-assets/recognition/$name") { output -> appContext.assets.open("recognition/$name").use { it.copyTo(output, 64 * 1024) } }
+                    }
+                    sourceFingerprint = provenance.getValue("sourceFingerprint").jsonPrimitive.content
+                }.onFailure { missing += "source-or-runtime-assets-unavailable:${it.message}" }
+                sourceWriteMs = (System.nanoTime() - provenanceStarted) / 1e6
+                if (captureContext.captureRight - captureContext.captureLeft != capturedFrame.width ||
+                    captureContext.captureBottom - captureContext.captureTop != capturedFrame.height)
+                    missing += "capture-dimensions-do-not-match-region"
+                val replayMetadata = buildJsonObject {
+                    put("requestId", suffix); put("buildVersion", BuildConfig.BUILD_VERSION)
+                    put("scanEvidence", if (scanTrace != null) "scan-events-*.jsonl+scan-evidence; private-streamed; large-series-zlib-f64le" else "not-recorded")
+                    put("scanEvidenceRequestId",scanTrace?.id?.let(::JsonPrimitive) ?: JsonNull)
+                    put("sourceFingerprint", sourceFingerprint?.let(::JsonPrimitive) ?: JsonNull)
+                    put("replayReady", missing.isEmpty() && result != null)
+                    put("replayScope", "full-class-catalog-production-recognition")
+                    put("replayUnavailableReasons", JsonArray((missing + if (result == null) listOf("scan-has-no-result") else emptyList()).map(::JsonPrimitive)))
+                    put("inputBinding", "catalog-and-reference-bytes-snapshotted-before-scan; live-files-and-catalog-verified-unchanged-before-publication")
+                    put("terminal", if (failure is java.util.concurrent.CancellationException) "cancelled" else if (failure != null) "error" else "completed")
+                    put("failure", failure?.let { JsonPrimitive("${it.javaClass.simpleName}:${it.message}") } ?: JsonNull)
+                    put("eligibleCatalogMapCount", replayInputs?.catalog?.maps?.size ?: 0)
+                    put("artifacts", buildJsonObject { artifacts.forEach { (name, info) -> put(name, buildJsonObject {
+                        put("bytes", info.first); put("sha256", info.second)
+                    }) } })
+                    put("diagnosticTimings", buildJsonObject {
+                        put("inputSnapshotMs", replayInputs?.captureMs ?: 0.0)
+                        put("inputVerificationMs", replayInputs?.verificationMs ?: 0.0)
+                        put("captureEncodeAndWriteMs", captureEncodeMs); put("referenceWriteMs", referenceWriteMs); put("sourceWriteMs", sourceWriteMs)
+                        put("scope", "diagnostic-cost-only; encoding and archive phases are independent; total archive time is in adjacent write receipt")
+                    })
+                }
 
                 zip.putNextEntry(ZipEntry("diagnostics.json"))
-                zip.write(buildManifest(capturedFrame, result, captureContext, now).toString().encodeToByteArray())
+                zip.write(JsonObject(buildManifest(capturedFrame, recorded, captureContext, now) + replayMetadata).toString().encodeToByteArray())
                 zip.closeEntry()
             }
-            check(temporary.renameTo(finalFile) || run {
-                temporary.copyTo(finalFile, overwrite = true)
-                temporary.delete()
-            }) { "无法提交识别诊断包" }
+            check(temporary.renameTo(finalFile)) { "无法原子提交识别诊断包" }
+            File(directory, "${finalFile.name}.write.json").writeText(buildJsonObject {
+                put("archive", finalFile.name); put("archiveBytes", finalFile.length())
+                put("archiveWriteMs", (System.nanoTime() - writeStarted) / 1e6)
+                put("inputSnapshotMs", replayInputs?.captureMs ?: 0.0)
+                put("scope", "archive writer through ZIP close and publish; excludes input snapshot and later feedback export")
+            }.toString())
+            scanTrace?.releaseWrittenArtifacts()
             finalFile
         } finally {
             temporary.delete()
         }
-    } }
+    }.onFailure { error -> runCatching {
+        val folder = captureContext.sessionId?.let { history.directoryFor(it, "recognition") }
+            ?: history.directoryAt(System.currentTimeMillis(), "recognition")
+        File(folder, "recognition-${java.util.UUID.randomUUID()}.failed.json").writeText(buildJsonObject {
+            put("schemaVersion", RecognitionPortContract.DIAGNOSTICS_SCHEMA_VERSION)
+            put("replayReady", false); put("replayUnavailableReason", "archive-write-failed:${error.message}")
+            put("terminal", if (failure is java.util.concurrent.CancellationException) "cancelled" else "error")
+            put("recordedResult", buildManifest(capturedFrame, result ?: RecognitionResult(capturedFrame, emptyList()), captureContext, System.currentTimeMillis()))
+        }.toString())
+    } } } finally { scanTrace?.retainUnpublishedEvidence(); pending.close() }
+    }
 
     fun recentPackages(): List<File> = history.files("recognition").filter { file ->
         file.isFile && file.name.startsWith("recognition-") && file.extension == "zip"
@@ -145,6 +260,7 @@ class RecognitionDiagnosticsStore(context: Context) {
         put("frameWidth", frame.width)
         put("frameHeight", frame.height)
         put("processingScale", result.processingScale)
+        put("pixelPolicy", "structure-native-up-to-1440-short-side; gate-template-normalized-separately-up-to-2x")
         put("screenWidth", context.screenWidth)
         put("screenHeight", context.screenHeight)
         put("captureRegion", buildJsonObject {
@@ -155,6 +271,18 @@ class RecognitionDiagnosticsStore(context: Context) {
         })
         putNullable("classId", context.classId)
         putNullable("className", context.className)
+        put("captureContext", buildJsonObject {
+            put("captureSource", context.captureSource?.let(::JsonPrimitive) ?: JsonNull)
+            put("scanRequestId", context.scanRequestId?.let(::JsonPrimitive) ?: JsonNull)
+            put("rotationAtCaptureCallback", context.rotationAtCaptureCallback?.let(::JsonPrimitive) ?: JsonNull)
+            put("calibrationRevisionAtCaptureCallback", context.calibrationRevisionAtCaptureCallback?.let(::JsonPrimitive) ?: JsonNull)
+            put("captureCallbackNanos", context.captureCallbackNanos?.let(::JsonPrimitive) ?: JsonNull)
+            put("workerStartedNanos", context.workerStartedNanos?.let(::JsonPrimitive) ?: JsonNull)
+            val queueMs = context.captureCallbackNanos?.let { captured -> context.workerStartedNanos?.let { (it - captured) / 1e6 } }
+            put("workerQueueMs", queueMs?.let(::JsonPrimitive) ?: JsonNull)
+            put("timingScope", "host callback receipt and worker start; native frame timestamp and capture sequence are unavailable in Bitmap callback")
+            put("nativeFrameTimestampNanos", JsonNull); put("nativeFrameSequence", JsonNull)
+        })
         result.vpsgDiagnostics?.let { scan ->
             put("vpsgScan", buildJsonObject {
                 put("eligibleFloorCount", scan.eligibleFloorCount)
@@ -164,6 +292,12 @@ class RecognitionDiagnosticsStore(context: Context) {
                 put("elapsedMilliseconds", scan.elapsedMilliseconds)
                 put("identityUnique", scan.identityUnique)
                 put("algorithm", scan.algorithm)
+                put("referenceGeometryAlgorithm", com.idvb.android.alignment.VpsgReferenceGeometry.ALGORITHM_ID)
+                put("evidencePolicy", "selected-alignment-prepared-forward+required-walls-reverse+revealed-domain; complete-evaluation-includes-rejected-floors")
+                put("structuralThresholds", buildJsonObject {
+                    com.idvb.android.recognize.vpsg.VpsgAlignmentTuning.thresholds.forEach { (key,value) -> put(key,value) }
+                    put("maximumScale", com.idvb.android.recognize.vpsg.VpsgAlignmentTuning.MAX_SELECTED_SCALE)
+                })
                 put("floorTimings", buildJsonArray {
                     scan.floorTimings.forEach { floor -> add(buildJsonObject {
                         put("mapId", floor.mapId)
@@ -182,7 +316,12 @@ class RecognitionDiagnosticsStore(context: Context) {
         }
         result.sparseGateDiagnostics?.let { scan ->
             put("sparseGateScan", buildJsonObject {
-                put("referenceEvidence", "prepared-reference-only-binary+visibility-scoped-reverse-v3")
+                put("referenceEvidence", "source-appearance-forward+required-structural-reverse+visibility-scoped-v4")
+                put("candidatePolicy", "confirmed-or-structure-supported-only; rejected-fits-are-catalog-only")
+                put("referenceGeometryAlgorithm", com.idvb.android.alignment.VpsgReferenceGeometry.ALGORITHM_ID)
+                put("structuralThresholds", buildJsonObject {
+                    com.idvb.android.recognize.vpsg.VpsgAlignmentTuning.thresholds.forEach { (key, value) -> put(key, value) }
+                })
                 put("wallObservationPolicy",scan.wallObservationPolicy)
                 put("formalInputPolicy",scan.formalInputPolicy)
                 put("identitySelectionPolicy", "single-explicit-variant-family-minimum-structure-cost")

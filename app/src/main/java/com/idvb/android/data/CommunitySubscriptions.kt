@@ -19,7 +19,6 @@ import java.security.KeyFactory
 import java.security.MessageDigest
 import java.security.Signature
 import java.security.spec.X509EncodedKeySpec
-import java.time.Instant
 import java.util.Base64
 import java.util.UUID
 import javax.crypto.Cipher
@@ -188,8 +187,8 @@ class CommunitySubscriptions(private val context: Context) {
         require(handle.matches(Regex("@[\\p{L}\\p{N}_.-]{1,64}"))) { "发布者账号无效" }
         require(!handle.equals("@xigefuli", true) || link.publisherKeyId == OFFICIAL_KEY) { "官方发布密钥不匹配" }
         val publishedAt = payload.getString("publishedAtUtc")
-        val published = Instant.parse(publishedAt)
-        if (previous != null) require(!published.isBefore(Instant.parse(previous.publishedAt))) { "订阅版本回退" }
+        val published = CommunityTimestamp.parse(publishedAt)
+        if (previous != null) require(!published.isBefore(CommunityTimestamp.parse(previous.publishedAt))) { "订阅版本回退" }
         val plainLength = payload.getLong("plaintextLength")
         val encryptedLength = payload.getLong("encryptedLength")
         require(plainLength in 1..MAX_PACKAGE && encryptedLength == plainLength + 92) { "加密包长度无效" }

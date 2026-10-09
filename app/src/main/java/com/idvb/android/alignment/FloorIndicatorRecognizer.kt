@@ -8,7 +8,6 @@ import org.opencv.core.Core
 import org.opencv.core.Mat
 import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
-import java.io.ByteArrayOutputStream
 import kotlin.math.roundToInt
 
 data class FloorIndicatorTemplate(val name: String, val floorKey: String, val png: ByteArray)
@@ -137,15 +136,8 @@ class FloorIndicatorRecognizer(private val templates: List<FloorIndicatorTemplat
 
         private fun retain(bitmap: Bitmap, name: String, log: AlignmentLogSink) {
             if (log is AlignmentTrace && !log.captureArtifacts || !log.enabled) return
-            val width = bitmap.width; val height = bitmap.height
-            val pixels = log.measure("diagnostics.copy-floor-indicator") {
-                IntArray(width * height).also { bitmap.getPixels(it, 0, width, 0, 0, width, height) }
-            }
-            log.attachOwned(name) {
-                val owned = Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
-                try { ByteArrayOutputStream().use { output ->
-                    check(owned.compress(Bitmap.CompressFormat.PNG, 100, output)); output.toByteArray()
-                } } finally { owned.recycle() }
+            log.attachStream(name) { output ->
+                AlignmentFrameSpool.writePng(bitmap, output)
             }
         }
     }

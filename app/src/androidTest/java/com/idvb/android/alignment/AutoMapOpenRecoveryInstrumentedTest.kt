@@ -49,7 +49,7 @@ class AutoMapOpenRecoveryInstrumentedTest {
         var owned: PreparedMapFrame? = null
         var transferred: Bitmap? = null
         var calls = 0
-        val trace = AlignmentTrace(captureArtifacts = true)
+        val trace = AlignmentTrace(captureArtifacts = true, spoolDirectory = java.io.File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "readiness-spool"))
         try {
             instrumentation.runOnMainSync {
                 AutoMapOpenFrameSampler(main, executor, captureMethod = "MEDIA_PROJECTION", captureFrame = { _, callback ->

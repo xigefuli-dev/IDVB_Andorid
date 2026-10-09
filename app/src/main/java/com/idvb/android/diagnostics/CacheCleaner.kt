@@ -49,6 +49,7 @@ class CacheCleaner(
 
         // 1. 日志与诊断数据（识别与贴合记录、日志流、截图帧与中间产物）
         synchronized(DiagnosticHistory.lock) {
+            DiagnosticHistory.requireIdle(diagnosticsDir)
             freedBytes += deleteDirectoryContents(diagnosticsDir)
             if (testEvidenceDir.exists()) {
                 freedBytes += directorySize(testEvidenceDir)

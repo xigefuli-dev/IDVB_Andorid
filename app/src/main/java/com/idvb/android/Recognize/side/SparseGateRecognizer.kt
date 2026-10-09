@@ -21,10 +21,11 @@ import kotlin.math.*
 
 /** Gate position removes the full-image translation search. Every map retains independent
  * scale basins; all visible pixels, variants and the final registered transform are checked. */
-internal class SparseGateRecognizer(private val repository: MapRepository) {
+internal class SparseGateRecognizer(private val repository: MapRepository,
+    private val log: AlignmentLogSink = AlignmentLogSink.NONE) {
     companion object {
         const val ROUTE = "side-gate-sparse-structure-v3"
-        const val FORMAL_INPUT_POLICY = "prepared-and-resolved-binary-walls-v1"
+        const val FORMAL_INPUT_POLICY = "required-structural-and-resolved-binary-walls-v2"
     }
     private data class Input(val map: MapRecord, val floor: FloorRecord, val assets: FloorRecognitionAssets,
         val anchor: NormalizedRect) {
@@ -59,7 +60,7 @@ internal class SparseGateRecognizer(private val repository: MapRepository) {
 
     private fun indexGeneration(input: Input): String {
         val line = input.assets.prebuiltStructureLine!!.file
-        return "side-bidirectional-prepared-v4|${VpsgReferenceGeometry.ALGORITHM_ID}|${input.map.mapVersion}|${input.floor}|${input.assets.recognitionRegion}|${line.canonicalPath}|${line.length()}|${line.lastModified()}"
+        return "side-bidirectional-prepared-v5|${VpsgReferenceGeometry.ALGORITHM_ID}|${input.map.mapVersion}|${input.floor}|${input.assets.recognitionRegion}|${line.canonicalPath}|${line.length()}|${line.lastModified()}"
     }
 
     private fun prepareIndex(input: Input): SparseGateSearch.Index {
@@ -71,12 +72,15 @@ internal class SparseGateRecognizer(private val repository: MapRepository) {
                     input.assets.prebuiltStructureLine!!,AlignmentLogSink.NONE)
                 val line = CvImages.loadGray(prepared.file)
                 try {
-                    val excluded = referenceAnnotations(reference)
+                    val required = CvImages.loadGray(VpsgReferenceGeometry.structuralLine(prepared).file)
                     try {
-                        SparseGateSearch.build(line,excluded).also {
-                            check(indexGeneration(input) == generation) { "Reference changed during preparation" }
-                        }
-                    } finally { excluded.release() }
+                        val excluded = referenceAnnotations(reference)
+                        try {
+                            SparseGateSearch.build(line,excluded,required).also {
+                                check(indexGeneration(input) == generation) { "Reference changed during preparation" }
+                            }
+                        } finally { excluded.release() }
+                    } finally { required.release() }
                 } finally { line.release() }
             } finally { reference.release() }
         }
@@ -114,7 +118,7 @@ internal class SparseGateRecognizer(private val repository: MapRepository) {
         try {
             // Recognition and selected-map alignment classify the same resolved walls.
             // Weak semantic reveal edges remain unknown in valid/revealed masks too.
-            VpsgLiveExtractor.extract(color,visibilityScopedReverse=true).use { live ->
+            VpsgLiveExtractor.extract(color,log,visibilityScopedReverse=true).use { live ->
                 maskAnnotations(color,live)
                 // Shared exclusion across all maps, including authored boxes larger than icons.
                 for (gate in gates.gates) {
@@ -126,6 +130,11 @@ internal class SparseGateRecognizer(private val repository: MapRepository) {
                     mask(live,gate.screenBounds.centerX-viewport.x-width/2,
                         gate.screenBounds.centerY-viewport.y-height/2,width,height)
                 }
+                log.record(com.idvb.android.alignment.AlignmentLogEvent("scan.observation.dimensions",measurements=mapOf(
+                    "width" to live.edges.cols().toDouble(),"height" to live.edges.rows().toDouble())))
+                for ((name,mask) in listOf("observed-edges.gray8" to live.edges,"valid-mask.gray8" to live.valid,
+                    "revealed-domain.gray8" to requireNotNull(live.revealed),"proposal.gray8" to live.proposal))
+                    com.idvb.android.recognize.vpsg.VpsgMaskEvidence.attach(log,name,mask)
                 val dense = SparseGateSearch.pixels(live.edges)
                 val contours = SparseGateSearch.contours(live.edges)
                 if (dense.size < 80 || contours.isEmpty()) {
@@ -149,7 +158,9 @@ internal class SparseGateRecognizer(private val repository: MapRepository) {
                 // two workers, and cap retrieval at four available CPU cores.
                 val executor = Executors.newFixedThreadPool(minOf(4,
                     Runtime.getRuntime().availableProcessors().coerceAtLeast(1),inputs.size))
+                val cancellation = com.idvb.android.alignment.AlignmentCancellation.current()
                 val futures = inputs.map { input -> executor.submit(Callable {
+                    com.idvb.android.alignment.AlignmentCancellation.withContext(cancellation) {
                     runCatching {
                         val indexStarted = System.nanoTime()
                         // Use the same full-reference evidence policy for EVERY identity.
@@ -190,7 +201,11 @@ internal class SparseGateRecognizer(private val repository: MapRepository) {
                         }
                         fitNanos.addAndGet(System.nanoTime()-indexFinished)
                         if (hypotheses.isEmpty()) null else Fit(input,index,hypotheses)
-                    }.onFailure { Log.w("IDVB-Scan","Sparse gate floor failed: ${input.map.id}",it) }.getOrNull()
+                    }.onFailure {
+                        if (it is java.util.concurrent.CancellationException) throw it
+                        Log.w("IDVB-Scan","Sparse gate floor failed: ${input.map.id}",it)
+                    }.getOrNull()
+                    }
                 }) }
                 val retrievedFits = try {
                     futures.mapIndexedNotNull { i,future ->
@@ -279,7 +294,11 @@ internal class SparseGateRecognizer(private val repository: MapRepository) {
                         " decision=${fit.formalReason.ifEmpty { evidence.rejectionCode }.ifEmpty { if (confirmed) "confirmed" else "identity-not-unique" }}"+
                         " details=${evidence.conflictDetail}")
                     RecognitionCandidate(map=fit.input.map,floorKey=fit.input.floor.key,
-                        disposition=if (confirmed) CandidateDisposition.RELIABLE else CandidateDisposition.NEEDS_VERIFICATION,
+                        disposition=when {
+                            confirmed -> CandidateDisposition.RELIABLE
+                            fit.supported -> CandidateDisposition.NEEDS_VERIFICATION
+                            else -> CandidateDisposition.CATALOG_ONLY
+                        },
                         templateScore=pose.score, chamferPixels=evidence.mean,edgeCoverage=evidence.support,
                         structureCompositeCost=formalBest?.compositeCost ?: evidence.cost,
                         structureCandidateMargin=registration?.candidateMargin ?: 0.0,

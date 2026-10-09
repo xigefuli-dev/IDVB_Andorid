@@ -6,16 +6,22 @@ package com.idvb.android.alignment
 internal object AlignmentLogcat {
     fun write(trace: AlignmentTrace, methodId: String, mapId: String, floorKey: String,
         tag: String = "IDVB-Align") {
-        val events = trace.snapshot()
+        var eventCount = 0
+        var calculation: AlignmentLogEvent? = null
+        var terminal: AlignmentLogEvent? = null
+        trace.forEachEvent { event ->
+            eventCount++
+            if (event.stage == "finish" || event.stage == "cancelled" || event.stage == "error") calculation = event
+            if (event.stage == "request.total") terminal = event
+        }
+        if (terminal == null) terminal = calculation
         val started = System.nanoTime()
         var written = 0
         var failure: Exception? = null
         try {
-            val calculation = events.lastOrNull { it.stage == "finish" || it.stage == "cancelled" || it.stage == "error" }
-            val terminal = events.lastOrNull { it.stage == "request.total" } ?: calculation
             val writeResult = android.util.Log.i(tag, "request=${trace.id} method=$methodId map=$mapId floor=$floorKey" +
                 " outcome=${terminal?.detail} computationMs=${calculation?.durationNanos?.div(1e6)}" +
-                " terminalMs=${terminal?.durationNanos?.div(1e6)} eventCount=${events.size}" +
+                " terminalMs=${terminal?.durationNanos?.div(1e6)} eventCount=$eventCount" +
                 " eventTimestampNanos=${terminal?.timestampNanos} details=complete-structured-diagnostic-events")
             check(writeResult >= 0) { "Logcat receipt write failed: $writeResult" }
             written = 1
@@ -23,7 +29,7 @@ internal object AlignmentLogcat {
         finally {
             val ended = System.nanoTime()
             trace.emit(AlignmentLogEvent("diagnostics.logcat-write", failure?.message ?: "completed",
-                measurements = mapOf("eventCount" to events.size.toDouble(), "summaryLinesWritten" to written.toDouble()),
+                measurements = mapOf("eventCount" to eventCount.toDouble(), "summaryLinesWritten" to written.toDouble()),
                 labels = mapOf("costScope" to "deferred-text-format-and-logcat-ipc; excluded-from-computation-and-first-draw",
                     "detailLocation" to "complete-structured-diagnostic-events; parameters-series-gates-and-rejections-retained",
                     "eventTimestamp" to "original-monotonic-event-time", "status" to if (failure == null) "complete" else "failed"),

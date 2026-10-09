@@ -145,8 +145,9 @@ internal object SparseGateSearch {
             synchronized(cache) { if (building[buildKey] === task && task.isDone) building.remove(buildKey) }
         }
     }
-    fun build(line: Mat, excluded: Mat? = null): Index {
+    fun build(line: Mat, excluded: Mat? = null, requiredLine: Mat = line): Index {
         require(!line.empty() && line.channels() == 1)
+        require(requiredLine.type() == CvType.CV_8UC1 && requiredLine.size() == line.size())
         require(excluded == null || excluded.type() == CvType.CV_8UC1 && excluded.size() == line.size())
         val inverse = Mat(); val distances = Mat(); val encoded = Mat(); val coarse = Mat(); val mask = Mat()
         try {
@@ -159,7 +160,9 @@ internal object SparseGateSearch {
             coarse.copyTo(encoded, mask)
             return Index(line.cols(), line.rows(), ByteArray(line.cols()*line.rows()).also { encoded.get(0,0,it) },
                 excluded?.let { source -> ByteArray(line.cols()*line.rows()).also { source.get(0,0,it) } },
-                ByteArray(line.cols()*line.rows()).also { line.get(0,0,it) }.let { bytes ->
+                // Source appearance explains observed contours in the forward distance
+                // index. Only mandatory walls can be evidence of a missing live wall.
+                ByteArray(line.cols()*line.rows()).also { requiredLine.get(0,0,it) }.let { bytes ->
                     val positions=IntArray(bytes.count { (it.toInt() and 255) > 128 }); var at=0
                     for (i in bytes.indices) if ((bytes[i].toInt() and 255) > 128) positions[at++]=i
                     positions

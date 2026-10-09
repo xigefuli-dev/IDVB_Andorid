@@ -66,13 +66,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.idvb.android.data.CommunityEntry
 import com.idvb.android.data.CommunitySubscriptions
+import com.idvb.android.data.CommunityTimestamp
 import com.idvb.android.data.CommunityJobStatus
 import com.idvb.android.AppServices
 import com.idvb.android.ui.theme.Deep
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
@@ -214,5 +214,5 @@ private fun SubscriptionCard(
 }
 
 private fun formatUpdatedAt(value: String): String = runCatching {
-    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").format(Instant.parse(value).atZone(ZoneId.systemDefault()))
+    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").format(CommunityTimestamp.parse(value).atZone(ZoneId.systemDefault()))
 }.getOrElse { value.take(16).replace('T', ' ') }

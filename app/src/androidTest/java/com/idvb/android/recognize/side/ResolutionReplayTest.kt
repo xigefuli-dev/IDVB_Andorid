@@ -59,7 +59,7 @@ class ResolutionReplayTest {
                                 assertSame("Preview must retain the original capture",frame,result.capturedRegion)
                                 assertFalse("Scanner must not recycle the capture",frame.isRecycled)
                                 assertEquals(viewport,result.viewportBounds)
-                                assertEquals(minOf(2.0,1440.0/minOf(width,height)),result.processingScale,1e-9)
+                                assertEquals(minOf(1.0,1440.0/minOf(width,height)),result.processingScale,1e-9)
                                 if (selected != null && result.sparseGateDiagnostics != null) {
                                     val map=selected.map
                                     val floor=map.floors.first { it.key == selected.floorKey }

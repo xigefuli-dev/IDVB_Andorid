@@ -66,20 +66,27 @@ class UnconfirmedScanSettingInstrumentedTest {
             val handle=OverlayService::class.java.getDeclaredMethod("handleScanResult",RecognitionResult::class.java).apply { isAccessible=true }
             val close=OverlayService::class.java.getDeclaredMethod("closeCandidates",Boolean::class.javaPrimitiveType).apply { isAccessible=true }
             try {
-                for(background in listOf(false,true)) for(enabled in listOf(false,true)) {
+                for(background in listOf(false,true)) for(enabled in listOf(false,true))
+                    for(disposition in listOf(null, com.idvb.android.recognize.CandidateDisposition.CATALOG_ONLY,
+                        com.idvb.android.recognize.CandidateDisposition.NEEDS_VERIFICATION)) {
                     AppServices.prefs.backgroundScanEnabled=background
                     AppServices.prefs.showUnconfirmedCandidates=enabled
                     val frame=Bitmap.createBitmap(32,32,Bitmap.Config.ARGB_8888)
                     try {
-                        handle.invoke(service,RecognitionResult(frame,emptyList()))
-                        assertEquals("Candidate window visibility",enabled && !background,field("candidateView").get(service)!=null)
-                        assertEquals("Capture ownership",!enabled,frame.isRecycled)
-                        if (enabled && background) {
+                        val map = com.idvb.android.idvm.MapRecord("candidate-fixture", "fixture", "Fixture", "fixture", 1, emptyList())
+                        val candidates = disposition?.let { listOf(com.idvb.android.recognize.RecognitionCandidate(
+                            map, "1f", it, evidenceLabel = "fixture")) }.orEmpty()
+                        val show = enabled && disposition == com.idvb.android.recognize.CandidateDisposition.NEEDS_VERIFICATION
+                        handle.invoke(service,RecognitionResult(frame,candidates))
+                        assertEquals("Candidate window visibility",show && !background,field("candidateView").get(service)!=null)
+                        assertEquals("Capture ownership",!show,frame.isRecycled)
+                        if (show && background) {
                             assertNotNull(field("candidateResult").get(service))
-                            OverlayService::class.java.getDeclaredMethod("toggleGuide").apply {
+                            val opened = OverlayService::class.java.getDeclaredMethod("showPendingCandidates").apply {
                                 isAccessible=true
                             }.invoke(service)
-                            assertNotNull("Eye button opens pending candidates",field("candidateView").get(service))
+                            assertEquals(true, opened)
+                            assertNotNull("Pending-candidate handler opens the candidate window",field("candidateView").get(service))
                             assertFalse(frame.isRecycled)
                         }
                         assertEquals("Unconfirmed scan must not lock a map",previousMap,AppServices.prefs.lastMapId)

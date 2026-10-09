@@ -57,19 +57,33 @@ class SparseGateFailureCorpusInstrumentedTest {
                 SparseGateSearch.clear()
                 repeat(2) { run ->
                     val started=System.nanoTime()
-                    val result=MapScanRecognizer(context,repository).recognize(frame,viewport,
+                    val trace=AlignmentTrace(captureArtifacts=true,spoolDirectory=File(context.filesDir,"idvb/diagnostics/spool"))
+                    val snapshot=RecognitionReplayInputs.capture(context,repository,repository.loadCatalog(),classId)
+                    val result=MapScanRecognizer(context,repository,trace).recognize(frame,viewport,
                         original.getInt("screenWidth"),original.getInt("screenHeight"),classId)
                     val algorithmMs=(System.nanoTime()-started)/1e6
                     val confirmed=result.automaticallyConfirmedCandidate()
                     val required=expectation.optBoolean("requireAutomaticConfirmation",false)
-                    val passed=(confirmed==null || expected.isEmpty() || confirmed.map.id in expected) && (!required || confirmed!=null)
+                    val candidateCount=result.candidates.count { it.disposition==CandidateDisposition.NEEDS_VERIFICATION }
+                    val catalogCount=result.candidates.count { it.disposition==CandidateDisposition.CATALOG_ONLY }
+                    val passed=(confirmed==null || expected.isEmpty() || confirmed.map.id in expected) && (!required || confirmed!=null) && (!expectation.optBoolean("forbidAutomaticConfirmation",false) || confirmed==null) &&
+                        (!expectation.has("expectedCandidateCount") || candidateCount==expectation.getInt("expectedCandidateCount")) &&
+                        (!expectation.has("expectedCatalogOnlyCount") || catalogCount==expectation.getInt("expectedCatalogOnlyCount"))
                     val diagnostic=RecognitionDiagnosticsStore(context).record(frame,result,CaptureDiagnosticsContext(
                         original.getInt("screenWidth"),original.getInt("screenHeight"),region.getInt("left"),region.getInt("top"),
-                        region.getInt("right"),region.getInt("bottom"),classId,original.optString("className"))).getOrThrow()
+                        region.getInt("right"),region.getInt("bottom"),classId,original.optString("className")),snapshot,scanTrace=trace).getOrThrow()
+                    snapshot.close()
+                    val roundTrip = if (run==1) RecognitionPackageReplay.open(context,diagnostic).use { replay ->
+                        assertEquals(replay.recordedSourceFingerprint,replay.runningSourceFingerprint)
+                        val again=replay.run()
+                        result.route==again.route && result.candidates.map { it.map.id to it.disposition }==again.candidates.map { it.map.id to it.disposition }
+                    } else true
+                    if (!roundTrip) failures += "${archive.name}: scan archive round-trip mismatch"
                     reports.put(JSONObject().put("archive",archive.name).put("run",run).put("phase",if (run==0) "cold" else "warm")
                         .put("algorithmMs",algorithmMs).put("confirmedMapId",confirmed?.map?.id ?: JSONObject.NULL)
                         .put("expectedMapIds",JSONArray(expected)).put("requiresAutomaticConfirmation",required)
-                        .put("expectationPassed",passed).put("diagnostics",diagnostic.relativeTo(isolated).path))
+                        .put("candidateCount",candidateCount).put("catalogOnlyCount",catalogCount)
+                        .put("expectationPassed",passed).put("roundTripPassed",roundTrip).put("roundTripRun",run==1).put("diagnostics",diagnostic.relativeTo(isolated).path))
                     if (!passed) failures += "${archive.name} run=$run confirmed=${confirmed?.map?.id}; expected=$expected required=$required"
                 }
                 val probes=expectation.optJSONArray("probeMapIds") ?: JSONArray()

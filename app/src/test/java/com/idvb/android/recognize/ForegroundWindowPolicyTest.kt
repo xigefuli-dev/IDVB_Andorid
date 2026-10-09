@@ -4,6 +4,21 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ForegroundWindowPolicyTest {
+    @Test fun lenovoGenericSystemWidgetsDoNotBecomeTheUnderlyingApp() {
+        for (window in listOf("android.widget.FrameLayout", "android.widget.LinearLayout", "android.view.View")) {
+            assertEquals("transient-system-widget", ForegroundWindowPolicy.ignoredWindowReason(
+                "com.android.systemui", window, fullScreen = false))
+            assertNull(ForegroundWindowPolicy.ignoredWindowReason("com.android.systemui", window, fullScreen = true))
+            assertNull(ForegroundWindowPolicy.ignoredWindowReason("another.app", window))
+        }
+        assertEquals("transient-zui-tool-window", ForegroundWindowPolicy.ignoredWindowReason(
+            "com.zui.freeform.sidebar", "android.widget.FrameLayout"))
+        assertEquals("transient-zui-tool-window", ForegroundWindowPolicy.ignoredWindowReason(
+            "com.zui.game.service", "android.widget.LinearLayout"))
+        assertNull(ForegroundWindowPolicy.ignoredWindowReason("com.zui.launcher", "android.widget.FrameLayout"))
+        assertNull(ForegroundWindowPolicy.ignoredWindowReason("com.zui.game.service", "com.zui.game.MainActivity"))
+    }
+
     @Test fun latestMatchVolumeWindowRetainsGameWithoutRequiringADismissalEvent() {
         var foreground: String? = "com.netease.dwrg"
         val updated = "com.android.systemui"

@@ -6,6 +6,50 @@ import org.junit.Test
 import kotlin.random.Random
 
 class VpsgFastSolverTest {
+    @Test fun streamedTranslationGridPreservesLittleEndianReplayInputAcrossChunks() {
+        val width = 641; val height = 513
+        val words = LongArray((width + 63) / 64 * height) { -1L }
+        val index = VpsgFastSolver.Index(width, height, words, words, VpsgFastSolver.Peak(20.0, 3.0), 300)
+        val points = listOf(VpsgFastSolver.Point(0, 0), VpsgFastSolver.Point(16, 24),
+            VpsgFastSolver.Point(36, 40), VpsgFastSolver.Point(56, 72))
+        val trace = com.idvb.android.alignment.AlignmentTrace(captureArtifacts = true)
+        VpsgFastSolver.translate(points, index, 1.0, trace)
+        val bounds = trace.snapshot().single { it.stage == "vpsg.translation.search" }.measurements
+        val expected = VpsgFastSolver.scoreGrid(points, index, bounds.getValue("minX").toInt(),
+            bounds.getValue("maxX").toInt(), bounds.getValue("minY").toInt(), bounds.getValue("maxY").toInt())
+        val bytes = trace.artifactSnapshot().getValue("translation-scores.i32le")
+        assertTrue(bytes.size > 64 * 1024)
+        val actual = IntArray(bytes.size / 4)
+        java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN).asIntBuffer().get(actual)
+        assertArrayEquals(expected, actual)
+    }
+
+    @Test fun alternativeScalesUseEachAxesReferencePitchAndSearchDomain() {
+        // Unequal reference periods make an X denominator visibly wrong for Y.
+        val horizontal = VpsgFastSolver.Correlation(DoubleArray(900) { if (it % 60 <= 1) 1.0 else 0.0 })
+        val vertical = VpsgFastSolver.Correlation(DoubleArray(900) { if (it % 90 <= 1) 1.0 else 0.0 })
+        val trace = com.idvb.android.alignment.AlignmentTrace()
+        val x = VpsgFastSolver.scaleAlternatives(horizontal, VpsgFastSolver.Peak(40.0, 3.0), 1000, "horizontal", 2.0, trace)
+        val y = VpsgFastSolver.scaleAlternatives(vertical, VpsgFastSolver.Peak(60.0, 3.0), 1000, "vertical", 2.0, trace)
+        assertTrue(x.any { kotlin.math.abs(it.scale - 1.5) < .01 })
+        assertTrue(y.any { kotlin.math.abs(it.scale - 1.5) < .01 })
+        assertTrue("Y=90 must be searched in the Y domain, beyond X's max pitch=80", y.any { it.pitch > 80 })
+        val events = trace.snapshot().filter { it.stage == "vpsg.scale.axis-alternatives" }
+        assertEquals(listOf("horizontal", "vertical"), events.map { it.labels["scaleAxis"] })
+        assertEquals(120.0, events.last().measurements.getValue("maximumSearchPitch"), 0.0)
+        assertEquals(y.flatMap { listOf(it.pitch, it.ratio, it.scale) }, events.last().series["livePitchRatioScale"])
+    }
+
+    @Test fun alternativeScalesRequireMeasuredReferenceEvidenceOnTheirOwnAxis() {
+        val live = VpsgFastSolver.Correlation(DoubleArray(900) { if (it % 60 <= 1) 1.0 else 0.0 })
+        for (prior in listOf(VpsgFastSolver.Peak(0.0, 3.0), VpsgFastSolver.Peak(40.0, 1.0))) {
+            val trace = com.idvb.android.alignment.AlignmentTrace()
+            assertTrue(VpsgFastSolver.scaleAlternatives(live, prior, 1000, "vertical", 4.0, trace).isEmpty())
+            assertTrue(trace.snapshot().single { it.stage == "vpsg.scale.axis-alternatives" }.gates.any { !it.passed })
+        }
+        assertTrue(VpsgFastSolver.scaleAlternatives(live, VpsgFastSolver.Peak(40.0, 3.0), 20, "vertical", 4.0).isEmpty())
+    }
+
     @Test fun sharedCoordinateRefinementExactlyMatchesScalarSearch() {
         val random = Random(58091)
         repeat(30) { iteration ->

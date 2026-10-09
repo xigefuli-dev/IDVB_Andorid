@@ -218,9 +218,16 @@ fun ClearCacheDialog(
                             onClick = {
                                 coroutineScope.launch {
                                     state = ClearCacheState.Cleaning
-                                    val freed = withContext(Dispatchers.IO) {
-                                        cacheCleaner.clearCache()
+                                    val clearing = withContext(Dispatchers.IO) {
+                                        runCatching { cacheCleaner.clearCache() }
                                     }
+                                    if (clearing.isFailure) {
+                                        state = currentState
+                                        Toast.makeText(context, clearing.exceptionOrNull()?.message ?: "缓存清理失败",
+                                            Toast.LENGTH_SHORT).show()
+                                        return@launch
+                                    }
+                                    val freed = clearing.getOrThrow()
                                     Toast.makeText(
                                         context,
                                         "已清理 ${CacheCleaner.formatBytes(freed)} 缓存",

@@ -53,6 +53,7 @@ class Vpsg(private val repository: MapRepository) : AlignmentMethod {
             override fun attach(name: String, bytes: () -> ByteArray) = log.attach(name, bytes)
             override fun attachOwned(name: String, bytes: () -> ByteArray) = log.attachOwned(name, bytes)
             override fun attachDirect(name: String, capture: () -> java.nio.ByteBuffer) = log.attachDirect(name, capture)
+            override fun attachStream(name: String, encode: (java.io.OutputStream) -> Unit) = log.attachStream(name, encode)
         }
         val selected = VpsgLineScanner(repository).alignSelected(
             request.frame, request.viewport, request.map, request.floor, lines, decisionLog,
@@ -101,6 +102,7 @@ class Vpsg(private val repository: MapRepository) : AlignmentMethod {
                 override fun attach(name: String, bytes: () -> ByteArray) = log.attach("floor-$index-$name", bytes)
                 override fun attachOwned(name: String, bytes: () -> ByteArray) = log.attachOwned("floor-$index-$name", bytes)
                 override fun attachDirect(name: String, capture: () -> java.nio.ByteBuffer) = log.attachDirect("floor-$index-$name", capture)
+                override fun attachStream(name: String, encode: (java.io.OutputStream) -> Unit) = log.attachStream("floor-$index-$name", encode)
             }
             val preparedReference = VpsgReferenceGeometry.prepare(repository, request.map, floor, reference, branch)
             branch.attach("reference.png") { preparedReference.file.readBytes() }
