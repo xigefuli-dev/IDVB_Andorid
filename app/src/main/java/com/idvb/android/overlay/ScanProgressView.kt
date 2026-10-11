@@ -16,6 +16,7 @@ internal enum class ScanOutcome(val label: String, val status: String, val color
     LOCKED("已识别并锁定地图", "成功", Color.rgb(0, 186, 28)),
     CANDIDATES("尚未确认地图，请选择候选", "待选择", Color.rgb(184, 112, 0)),
     NO_RESULT("未识别到地图，请调整后重扫", "未识别", Color.rgb(184, 112, 0)),
+    MAP_CLOSED("请打开游戏地图后重扫", "未开图", Color.rgb(184, 112, 0)),
     FAILED("扫描失败，请重试", "失败", Color.rgb(179, 38, 30)),
 }
 

@@ -33,13 +33,22 @@ internal object SparseGateSearch {
         val cost get() = mean + (1 - bidirectionalSupport) * 5
     }
     class Index(val width: Int, val height: Int, private val distances: ByteArray,
-        private val excluded: ByteArray? = null, val edgePositions: IntArray = intArrayOf()) {
+        excluded: ByteArray? = null, val edgePositions: IntArray = intArrayOf()) {
         companion object {
             private val decoded = DoubleArray(256) { value ->
                 if (value <= 128) value/16.0 else (value-112)/2.0
             }
         }
-        val bytes get() = distances.size + (excluded?.size ?: 0) + edgePositions.size*4
+        // The exclusion domain is binary. Retaining a byte per pixel doubled
+        // the catalog's index footprint and evicted prepared peers on every scan.
+        private val excludedBits = excluded?.let { source ->
+            require(source.size == width*height)
+            LongArray((source.size+63)/64).also { bits ->
+                for (i in source.indices) if (source[i].toInt() != 0)
+                    bits[i ushr 6] = bits[i ushr 6] or (1L shl (i and 63))
+            }
+        }
+        val bytes get() = distances.size + (excludedBits?.size ?: 0)*8 + edgePositions.size*4
         fun copyEdgesTo(target: Mat) {
             target.create(height,width,CvType.CV_8UC1)
             val bytes=ByteArray(width*height)
@@ -48,7 +57,9 @@ internal object SparseGateSearch {
         }
         fun observable(x: Double, y: Double): Boolean {
             if (x < 0 || y < 0 || x >= width || y >= height) return true
-            return excluded?.get(y.toInt()*width+x.toInt())?.toInt() == 0 || excluded == null
+            val bits = excludedBits ?: return true
+            val at = y.toInt()*width+x.toInt()
+            return bits[at ushr 6] and (1L shl (at and 63)) == 0L
         }
         private fun decode(at: Int): Double {
             val value = distances[at].toInt() and 255
@@ -293,20 +304,35 @@ internal object SparseGateSearch {
         return if (reverse == null) evidence else reverseEvidence(index,pose,reverse,evidence)
     }
     fun search(index: Index, points: List<Pixel>, ax: Double, ay: Double, gx: Double, gy: Double,
-        minimum: Double, maximum: Double, gate: Int): List<Pose> {
+        minimum: Double, maximum: Double, gate: Int,
+        log: com.idvb.android.alignment.AlignmentLogSink = com.idvb.android.alignment.AlignmentLogSink.NONE,
+        maximumGateResidual: Double = 42.0): List<Pose> {
+        val started = System.nanoTime()
+        val coarseEvidence = if (log.enabled) ArrayList<Double>() else null
+        val refinedEvidence = if (log.enabled) ArrayList<Double>() else null
         val retained = ArrayList<Pose>()
         // Balanced includes the complete Fast search, preserving its basins.
-        for ((step,fine,count) in listOf(Triple(.08,.02,1), Triple(.04,.01,2))) {
+        // A local forward alias may beat the true scale and later fail reverse
+        // verification. Preserve independent scale basins until the dense verifier.
+        for ((step,fine,count) in listOf(Triple(.08,.02,1), Triple(.04,.01,4))) {
             com.idvb.android.alignment.AlignmentCancellation.checkpoint("scan.side.search-pass")
             val scales = sortedSetOf(minimum,maximum,1.0.coerceIn(minimum,maximum))
             var scale = minimum
             while (scale <= maximum) { scales += scale; scale *= 1+step }
             val peaks = ArrayList<Pose>()
-            for (s in scales) for (dx in -3..3 step 3) for (dy in -3..3 step 3) {
+            val extent = if (step == .08) 3 else (floor(maximumGateResidual/12)*12).toInt()
+            val stride = if (step == .08) 3 else 12
+            for (s in scales) for (dx in -extent..extent step stride) for (dy in -extent..extent step stride) {
                 com.idvb.android.alignment.AlignmentCancellation.checkpoint("scan.side.search-pose")
+                if (hypot(dx.toDouble(),dy.toDouble()) > maximumGateResidual) continue
                 val x = gx+dx-ax*s; val y = gy+dy-ay*s
-                val pose = Pose(s,x,y,index.score(points,s,x,y),gate)
                 val duplicate = peaks.indexOfFirst { abs(ln(it.scale/s)) < step*2 }
+                val bound = if (duplicate >= 0) peaks[duplicate].score else
+                    if (peaks.size == count) peaks.last().score else Double.NEGATIVE_INFINITY
+                val score = index.score(points,s,x,y,if (coarseEvidence == null) bound else Double.NEGATIVE_INFINITY)
+                coarseEvidence?.addAll(listOf(step,s,x,y,score))
+                if (score < bound) continue
+                val pose = Pose(s,x,y,score,gate)
                 if (duplicate >= 0 && peaks[duplicate].score >= pose.score) continue
                 if (duplicate >= 0) peaks.removeAt(duplicate)
                 peaks += pose; peaks.sortByDescending { it.score }
@@ -319,7 +345,11 @@ internal object SparseGateSearch {
                 for (i in -n..n) {
                     val s = seed.scale*(1+i*fine); if (s !in minimum..maximum) continue
                     for (dx in -3..3) for (dy in -3..3) {
-                        val x = gx+dx-ax*s; val y = gy+dy-ay*s; val score = index.score(points,s,x,y,best.score)
+                        val x = seed.x+ax*(seed.scale-s)+dx
+                        val y = seed.y+ay*(seed.scale-s)+dy
+                        if (hypot(x+ax*s-gx,y+ay*s-gy) > maximumGateResidual) continue
+                        val score = index.score(points,s,x,y,if (refinedEvidence == null) best.score else Double.NEGATIVE_INFINITY)
+                        refinedEvidence?.addAll(listOf(step,s,x,y,score))
                         if (score > best.score) best = Pose(s,x,y,score,gate)
                     }
                 }
@@ -329,8 +359,25 @@ internal object SparseGateSearch {
         val unique = ArrayList<Pose>()
         for (pose in retained.sortedByDescending { it.score }) {
             if (unique.none { abs(ln(it.scale/pose.scale)) < .01 }) unique += pose
-            if (unique.size == 2) break
+            if (unique.size == 4) break
         }
+        if (log.enabled) log.record(com.idvb.android.alignment.AlignmentLogEvent("scan.side.proposal-search",
+            "gate-residual-domain-before-basin-selection; dense-and-formal-verification-required",
+            durationNanos = System.nanoTime() - started,
+            measurements = mapOf("minimumScale" to minimum,"maximumScale" to maximum,
+                "gateX" to gx,"gateY" to gy,"anchorX" to ax,"anchorY" to ay,
+                "samplePoints" to points.size.toDouble(),"gateIndex" to gate.toDouble()),
+            thresholds = mapOf("maximumBasins" to 4.0,"sameBasinLogScale" to .01,
+                "maximumGateResidual" to maximumGateResidual),
+            labels = mapOf("coarseColumns" to "step,scale,x,y,score",
+                "selectedColumns" to "scale,x,y,score,gate","scoringPolicy" to "unchanged-forward-128-spatial-sample-v1",
+                "coarseOffsets" to "fast=-3,0,3; balanced=12-pixel-grid-inside-gate-residual-radius",
+                "refineOffsets" to "seed-residual-preserved; -3..3",
+                "passes" to "0.08/0.02/1;0.04/0.01/4",
+                "pruning" to "exact-remaining-score-upper-bound; full-coarse-scores-recorded-when-diagnostics-enabled"),
+            series = mapOf("coarse" to requireNotNull(coarseEvidence),
+                "refined" to requireNotNull(refinedEvidence),
+                "selected" to unique.flatMap { listOf(it.scale,it.x,it.y,it.score,it.gate.toDouble()) })))
         return unique
     }
     fun refine(index: Index, seed: Pose, sample: List<Pixel>, dense: List<Pixel>, contours: List<List<Pixel>>,
@@ -371,11 +418,15 @@ internal object SparseGateSearch {
             }
             proposals += scaleProposals
         }
+        var best: Pair<Pose,Evidence>? = null
         for (p in proposals.sortedWith(compareByDescending<Proposal> { it.hits }.thenBy { it.distance })) {
+            com.idvb.android.alignment.AlignmentCancellation.checkpoint("scan.side.refine-verification")
             val evidence = verify(index,p.pose,dense,contours,width,height,acceptanceOnly=true,reverse=reverse)
-            if (evidence.supported) return p.pose to evidence
+            if (evidence.supported && (best == null || evidence.bidirectionalSupport > best.second.bidirectionalSupport ||
+                evidence.bidirectionalSupport == best.second.bidirectionalSupport && evidence.mean < best.second.mean))
+                best = p.pose to evidence
         }
-        return null
+        return best
     }
 
     /** Android gate boxes can differ from the authored anchor by more than desktop's

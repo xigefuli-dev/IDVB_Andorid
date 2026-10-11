@@ -22,7 +22,8 @@ class OverlayButtonLayout(
     private fun buttonSize(id: String) = (size * (scales[id] ?: 1f)).toInt()
     private val positions = linkedMapOf<String, Pair<Float, Float>>()
     private var actionPanel: View? = null
-    private val editor = OverlayWindowManager(context)
+    // This root only receives gestures. It has no background or drawn pixels.
+    private val editor = OverlayWindowManager(context, occludesCapture = false)
     private var editorView: View? = null
     private val actions = OverlayWindowManager(context)
     private val size get() = (48 * context.resources.displayMetrics.density).toInt()

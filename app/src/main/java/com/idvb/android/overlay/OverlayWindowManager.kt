@@ -18,7 +18,7 @@ import android.view.WindowManager
  * - WS_EX_TRANSPARENT  → FLAG_NOT_TOUCHABLE（锁定态点击穿透到游戏）
  * - WS_EX_TOOLWINDOW   → FLAG_NOT_FOCUSABLE + 前台服务常驻（不占任务栏/最近任务）
  */
-class OverlayWindowManager(private val context: Context) {
+class OverlayWindowManager(private val context: Context, val occludesCapture: Boolean = true) {
 
     companion object {
         // All callers run on the main thread. Include hidden windows conservatively so
@@ -26,7 +26,7 @@ class OverlayWindowManager(private val context: Context) {
         private val attached = mutableSetOf<OverlayWindowManager>()
 
         data class VisibleRoot(val viewClass: String, val bounds: android.graphics.RectF,
-            val viewAlpha: Float, val windowAlpha: Float)
+            val viewAlpha: Float, val windowAlpha: Float, val occludesCapture: Boolean)
 
         /** Actual root coordinates also explain why an automatic sample was occluded. */
         fun visibleScreenRoots(excluding: Set<OverlayWindowManager> = emptySet()): List<VisibleRoot> =
@@ -39,12 +39,14 @@ class OverlayWindowManager(private val context: Context) {
                     val h = root.height.takeIf { it > 0 } ?: manager.height.takeIf { it > 0 }
                         ?: manager.context.resources.displayMetrics.heightPixels
                     VisibleRoot(root.javaClass.name, android.graphics.RectF(location[0].toFloat(), location[1].toFloat(),
-                        (location[0] + w).toFloat(), (location[1] + h).toFloat()), root.alpha, manager.opacity)
+                        (location[0] + w).toFloat(), (location[1] + h).toFloat()), root.alpha,
+                        (root.layoutParams as? WindowManager.LayoutParams)?.alpha ?: manager.opacity,
+                        manager.occludesCapture)
                 }
 
         /** Conservative bounds of visible independent overlay roots, in screen coordinates. */
         fun visibleScreenBounds(excluding: Set<OverlayWindowManager> = emptySet()): List<android.graphics.RectF> =
-            visibleScreenRoots(excluding).map { it.bounds }
+            visibleScreenRoots(excluding).filter { it.occludesCapture && it.windowAlpha > 0f }.map { it.bounds }
 
         private fun refreshTouchOpacity() {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return

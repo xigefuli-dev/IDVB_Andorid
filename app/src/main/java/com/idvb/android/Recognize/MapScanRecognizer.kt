@@ -23,6 +23,26 @@ internal class MapScanRecognizer(private val context: Context, private val repos
     fun recognize(frame: Bitmap, viewport: ScreenRect, clientWidth: Int, clientHeight: Int,
         classId: String?, progress: ((Double, String) -> Unit)? = null): RecognitionResult {
         require(clientWidth > 0 && clientHeight > 0)
+        val presenceStarted = System.nanoTime()
+        val sample = Bitmap.createScaledBitmap(frame, ScanFramePresence.WIDTH, ScanFramePresence.HEIGHT, true)
+        val presence = try {
+            val pixels = IntArray(ScanFramePresence.WIDTH * ScanFramePresence.HEIGHT)
+            sample.getPixels(pixels, 0, ScanFramePresence.WIDTH, 0, 0, ScanFramePresence.WIDTH, ScanFramePresence.HEIGHT)
+            ScanFramePresence.evaluate(pixels)
+        } finally { if (sample !== frame) sample.recycle() }
+        log.record(com.idvb.android.alignment.AlignmentLogEvent("scan.frame-presence",
+            if (presence.obviousScene) "obvious-game-scene; no-catalog-search" else "map-or-unknown; continue-structural-verification",
+            durationNanos = System.nanoTime() - presenceStarted,
+            measurements = mapOf("sceneFraction" to presence.sceneFraction, "mapFraction" to presence.mapFraction,
+                "unknownFraction" to presence.unknownFraction),
+            thresholds = mapOf("minimumSceneFraction" to ScanFramePresence.MINIMUM_SCENE_FRACTION,
+                "maximumMapFraction" to ScanFramePresence.MAXIMUM_MAP_FRACTION),
+            labels = mapOf("policy" to ScanFramePresence.ROUTE,
+                "input" to "captured.png; bilinear-160x100; neutral-and-dark-pixels-unknown")))
+        if (presence.obviousScene) {
+            progress?.invoke(1.0, "未检测到打开的地图，请打开地图后重扫")
+            return RecognitionResult(frame, emptyList(), viewport, route = ScanFramePresence.ROUTE)
+        }
         // Preserve native wall strokes on phone captures. Enlarging an already
         // resolved wall changes Canny/reveal boundaries without adding evidence.
         // Only reduce oversized frames to bound the extraction/search cost.

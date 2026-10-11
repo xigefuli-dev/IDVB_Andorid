@@ -852,14 +852,16 @@ class OverlayService : Service() {
     private fun showScanProgress(region: RectF, size: Pair<Int, Int>, generation: Int) {
         if (generation != scanGeneration || !scanning) return
         val density = overlayContext.resources.displayMetrics.density
-        val barWidth = minOf((340 * density).toInt(), size.first - (32 * density).toInt()).coerceAtLeast(1)
-        val barHeight = (56 * density).toInt()
-        scanProgressWindow.width = barWidth
-        scanProgressWindow.height = barHeight
-        scanProgressWindow.x = (region.centerX() - barWidth / 2f).toInt()
-            .coerceIn(0, (size.first - barWidth).coerceAtLeast(0))
-        scanProgressWindow.y = (region.top + region.height() * .85f - barHeight / 2f).toInt()
-            .coerceIn(0, (size.second - barHeight).coerceAtLeast(0))
+        val detectionLeft = autoReference?.takeIf {
+            AppServices.prefs.autoDetectMapOpenEnabled && it.screenWidth == size.first && it.screenHeight == size.second
+        }?.let { autoReferenceBounds(it).left.toDouble() }
+        val placement = ScanProgressPlacement.place(region.left.toDouble(), region.top.toDouble(),
+            region.right.toDouble(), region.bottom.toDouble(), size.first, size.second,
+            (340 * density).toInt(), (56 * density).toInt(), detectionLeft) ?: return
+        scanProgressWindow.width = placement.width
+        scanProgressWindow.height = placement.height
+        scanProgressWindow.x = placement.x
+        scanProgressWindow.y = placement.y
         val view = ScanProgressView(overlayContext)
         scanProgressView = view
         view.report(.08, "正在扫描地图…")
@@ -985,9 +987,11 @@ class OverlayService : Service() {
         }
         closeCandidates(recycleCapture = true)
         if (!result.capturedRegion.isRecycled) result.capturedRegion.recycle()
-        finishScanProgress(scanGeneration, ScanOutcome.NO_RESULT)
+        val mapClosed = result.route == com.idvb.android.recognize.ScanFramePresence.ROUTE
+        finishScanProgress(scanGeneration, if (mapClosed) ScanOutcome.MAP_CLOSED else ScanOutcome.NO_RESULT)
         val retainedMap = if (currentMap != null) "；仍保留原地图" else ""
-        notifyOverlay("未识别到地图：当前可见结构不足以确认，请调整后重扫$retainedMap", 6_000L)
+        notifyOverlay(if (mapClosed) "未检测到打开的地图：请打开游戏地图后重扫$retainedMap"
+            else "未识别到地图：当前可见结构不足以确认，请调整后重扫$retainedMap", 6_000L)
     }
 
     private fun toggleMapClassSubmenu() {
@@ -2603,7 +2607,8 @@ class OverlayService : Service() {
                 autoDiagnostics.captureEvent(AlignmentLogEvent("auto-map.reference-occluded", "unknown-observation; sample-paused",
                     labels = mapOf("referenceBounds" to region.toShortString(),
                         "independentRoots" to OverlayWindowManager.visibleScreenRoots(setOf(guideWindow, calibrationBorderWindow))
-                            .joinToString(";") { "${it.viewClass}:${it.bounds.toShortString()}:viewAlpha=${it.viewAlpha}:windowAlpha=${it.windowAlpha}" },
+                            .joinToString(";") { "${it.viewClass}:${it.bounds.toShortString()}:viewAlpha=${it.viewAlpha}:windowAlpha=${it.windowAlpha}:occludesCapture=${it.occludesCapture}" },
+                        "occlusionPolicy" to "visual-roots-only; transparent-layout-editor-excluded; progress-inside-map-crop",
                         "guideVisibleParts" to guideView?.visibleAlignedParts()?.joinToString(";") { it.toShortString() }.orEmpty(),
                         "calibratedBounds" to calibrated.toShortString(), "displayRotation" to rotation.toString(),
                         "calibrationRevision" to sampleCalibrationRevision.toString())))

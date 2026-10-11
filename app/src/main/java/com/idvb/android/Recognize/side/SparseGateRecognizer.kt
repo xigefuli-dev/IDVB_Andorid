@@ -24,7 +24,7 @@ import kotlin.math.*
 internal class SparseGateRecognizer(private val repository: MapRepository,
     private val log: AlignmentLogSink = AlignmentLogSink.NONE) {
     companion object {
-        const val ROUTE = "side-gate-sparse-structure-v3"
+        const val ROUTE = "side-gate-sparse-structure-v4"
         const val FORMAL_INPUT_POLICY = "required-structural-and-resolved-binary-walls-v2"
     }
     private data class Input(val map: MapRecord, val floor: FloorRecord, val assets: FloorRecognitionAssets,
@@ -166,16 +166,29 @@ internal class SparseGateRecognizer(private val repository: MapRepository,
                         // Use the same full-reference evidence policy for EVERY identity.
                         // Supplementing only the apparent winner could hide a competing map
                         // whose imported outer-wall layer also omitted internal structure.
+                        val indexCached = SparseGateSearch.isCached(indexSource(input),indexGeneration(input))
                         val index = prepareIndex(input)
                         require(index.width == input.assets.recognitionWidth && index.height == input.assets.recognitionHeight)
                         val indexFinished = System.nanoTime()
+                        if (log.enabled) log.record(com.idvb.android.alignment.AlignmentLogEvent("scan.side.reference-index",
+                            if (indexCached) "hit" else "miss", durationNanos=indexFinished-indexStarted,
+                            measurements=mapOf("width" to index.width.toDouble(),"height" to index.height.toDouble(),
+                                "bytes" to index.bytes.toDouble(),"retainedBytes" to SparseGateSearch.retainedBytes.toDouble()),
+                            thresholds=mapOf("cacheBudgetBytes" to (64.0*1024*1024)),
+                            labels=mapOf("mapId" to input.map.id,"floorKey" to input.floor.key,
+                                "generation" to indexGeneration(input),"exclusionEncoding" to "one-bit-per-source-pixel",
+                                "timingScope" to "independent-worker-stage; nested-in-searchAndVerification")))
                         indexNanos.addAndGet(indexFinished-indexStarted)
                         val hypotheses = ArrayList<Pair<SparseGateSearch.Pose,SparseGateSearch.Evidence>>()
                         for ((gateIndex,gate) in gates.gates.withIndex()) {
                             if (!gate.screenBounds.isValid) continue
                             val gx = gate.screenBounds.centerX-viewport.x; val gy = gate.screenBounds.centerY-viewport.y
+                            val proposalLog = if (!log.enabled) AlignmentLogSink.NONE else AlignmentLogSink { event ->
+                                log.record(event.copy(labels = event.labels + mapOf("mapId" to input.map.id,
+                                    "floorKey" to input.floor.key,"indexGeneration" to indexGeneration(input))))
+                            }
                             val seeds = SparseGateSearch.search(index,sample,input.ax,input.ay,gx,gy,
-                                config.minimumScale,config.maximumScale,gateIndex)
+                                config.minimumScale,config.maximumScale,gateIndex,proposalLog,config.maximumGateSpatialResidualPixels)
                             for (seed in seeds) {
                                 val evidence = SparseGateSearch.verify(index,seed,dense,contours,frame.width,frame.height,reverse=reverseObservation)
                                 hypotheses += seed to evidence
@@ -184,7 +197,7 @@ internal class SparseGateRecognizer(private val repository: MapRepository,
                                         config.maximumGateSpatialResidualPixels,config.minimumScale,config.maximumScale)
                                     val expandedEvidence = SparseGateSearch.verify(index,expanded,dense,contours,frame.width,frame.height,reverse=reverseObservation)
                                     hypotheses += expanded to expandedEvidence
-                                    if (!expandedEvidence.supported && expandedEvidence.support >= .80) {
+                                    if (expandedEvidence.support >= .80) {
                                         SparseGateSearch.refine(index,expanded,refineSample,dense,contours,frame.width,frame.height,
                                             input.ax,input.ay,gx,gy,config.minimumScale,config.maximumScale,
                                             config.maximumGateSpatialResidualPixels,reverse=reverseObservation)?.let { hypotheses += it }
@@ -192,7 +205,7 @@ internal class SparseGateRecognizer(private val repository: MapRepository,
                                     Log.i("IDVB-Scan","sparse expanded map=${input.map.title} support=${expandedEvidence.support}"+
                                         " scale=${expanded.scale} x=${expanded.x} y=${expanded.y} ax=${input.ax} ay=${input.ay}")
                                 }
-                                if (!evidence.supported && evidence.support >= .80) {
+                                if (evidence.support >= .80) {
                                     SparseGateSearch.refine(index,seed,refineSample,dense,contours,frame.width,frame.height,
                                         input.ax,input.ay,gx,gy,config.minimumScale,config.maximumScale,
                                         config.maximumGateSpatialResidualPixels,reverse=reverseObservation)?.let { hypotheses += it }
