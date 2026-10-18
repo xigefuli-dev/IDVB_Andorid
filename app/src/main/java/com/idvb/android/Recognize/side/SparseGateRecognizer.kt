@@ -200,7 +200,7 @@ internal class SparseGateRecognizer(private val repository: MapRepository,
                                     if (expandedEvidence.support >= .80) {
                                         SparseGateSearch.refine(index,expanded,refineSample,dense,contours,frame.width,frame.height,
                                             input.ax,input.ay,gx,gy,config.minimumScale,config.maximumScale,
-                                            config.maximumGateSpatialResidualPixels,reverse=reverseObservation)?.let { hypotheses += it }
+                                            config.maximumGateSpatialResidualPixels,reverse=reverseObservation,log=proposalLog)?.let { hypotheses += it }
                                     }
                                     Log.i("IDVB-Scan","sparse expanded map=${input.map.title} support=${expandedEvidence.support}"+
                                         " scale=${expanded.scale} x=${expanded.x} y=${expanded.y} ax=${input.ax} ay=${input.ay}")
@@ -208,7 +208,7 @@ internal class SparseGateRecognizer(private val repository: MapRepository,
                                 if (evidence.support >= .80) {
                                     SparseGateSearch.refine(index,seed,refineSample,dense,contours,frame.width,frame.height,
                                         input.ax,input.ay,gx,gy,config.minimumScale,config.maximumScale,
-                                        config.maximumGateSpatialResidualPixels,reverse=reverseObservation)?.let { hypotheses += it }
+                                        config.maximumGateSpatialResidualPixels,reverse=reverseObservation,log=proposalLog)?.let { hypotheses += it }
                                 }
                             }
                         }

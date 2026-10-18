@@ -27,6 +27,7 @@ import org.junit.Test
 
 /** Synthetic inputs are explicit; attached-window and Bitmap behavior run on Android. */
 class AutoMapOpenNegativeInstrumentedTest {
+    @get:org.junit.Rule val usageRules = com.idvb.android.consent.AcceptedUsageRulesFixture()
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val main = Handler(Looper.getMainLooper())
     private val fullRegion = floatArrayOf(0f, 0f, 1f, 1f)

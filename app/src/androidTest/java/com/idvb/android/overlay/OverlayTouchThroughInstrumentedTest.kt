@@ -21,6 +21,7 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class OverlayTouchThroughInstrumentedTest {
+    @get:org.junit.Rule val usageRules = com.idvb.android.consent.AcceptedUsageRulesFixture()
     @Test fun foreignUidReceivesTouchesUnderThreeOverlappingWindows() {
         assumeTrue(Build.VERSION.SDK_INT >= 31)
         val instrumentation = InstrumentationRegistry.getInstrumentation()

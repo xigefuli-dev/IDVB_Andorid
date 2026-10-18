@@ -20,6 +20,7 @@ import java.io.File
 import java.util.UUID
 
 class AlignmentLifecycleInstrumentedTest {
+    @get:org.junit.Rule val usageRules = com.idvb.android.consent.AcceptedUsageRulesFixture()
     @Test fun captureHidesEveryControlIncludingMoreWithoutDisablingHitTargets() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         instrumentation.runOnMainSync {

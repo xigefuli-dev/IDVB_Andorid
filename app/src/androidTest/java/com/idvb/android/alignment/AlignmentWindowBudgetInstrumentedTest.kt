@@ -21,6 +21,7 @@ import java.util.zip.ZipFile
 /** Saved input -> complete calculation -> attached hardware-rendered window frame commit.
  * Does not simulate capture, claim game acceptance, or modify the installed main app. */
 class AlignmentWindowBudgetInstrumentedTest {
+    @get:org.junit.Rule val usageRules = com.idvb.android.consent.AcceptedUsageRulesFixture()
     @Test fun originalInputsReachTheWindowFrameCommitWithin270Milliseconds() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext

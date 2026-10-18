@@ -34,6 +34,15 @@ import com.idvb.android.recognize.RecognitionResult
 import com.idvb.android.recognize.automaticallyConfirmedCandidate
 import com.idvb.android.recognize.ScreenCaptureGrant
 import com.idvb.android.recognize.ScreenCaptureSession
+import com.idvb.android.recognize.CaptureHealthMonitor
+import com.idvb.android.recognize.CaptureAvailability
+import com.idvb.android.recognize.CaptureException
+import com.idvb.android.recognize.CaptureFailure
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import com.idvb.android.recognize.vpsg.VpsgLineScanner
 import com.idvb.android.recognize.CandidateDisposition
 import com.idvb.android.data.MapIdentitySource
@@ -85,6 +94,7 @@ class OverlayService : Service() {
                     service.autoPollLoop.stop()
                     service.stopAutoMapGuide("host-foreground")
                     service.autoDetector?.reset()
+                    service.scheduleCaptureProbe("host-resumed")
                 } else service.scheduleAutoMapOpen(0L)
             }
         }
@@ -108,7 +118,7 @@ class OverlayService : Service() {
         }
 
         fun start(context: Context) {
-            if (!com.idvb.android.UsageConsent.isAccepted(context) ||
+            if (!com.idvb.android.StartupRequirements.isAccepted(context) ||
                 !com.idvb.android.tutorial.TutorialStore.get(context).state.value.completed) return
             context.startForegroundService(Intent(context, OverlayService::class.java))
         }
@@ -181,9 +191,9 @@ class OverlayService : Service() {
         post = { task, delay -> mainHandler.postDelayed(task, delay); Unit },
         remove = { task -> mainHandler.removeCallbacks(task) },
         canSchedule = { !destroyed && !mapResources.pending && !mapResourceReleaseFailed && AppServices.prefs.autoDetectMapOpenEnabled &&
-            com.idvb.android.UsageConsent.isAccepted(this) && com.idvb.android.tutorial.TutorialStore.get(this).state.value.completed },
+            com.idvb.android.StartupRequirements.isAccepted(this) && com.idvb.android.tutorial.TutorialStore.get(this).state.value.completed },
         canRecover = { !destroyed && !mapResources.pending && !mapResourceReleaseFailed && AppServices.prefs.autoDetectMapOpenEnabled &&
-            com.idvb.android.UsageConsent.isAccepted(this) && com.idvb.android.tutorial.TutorialStore.get(this).state.value.completed && !hostForeground && !practiceForeground &&
+            com.idvb.android.StartupRequirements.isAccepted(this) && com.idvb.android.tutorial.TutorialStore.get(this).state.value.completed && !hostForeground && !practiceForeground &&
             OverlayState.state.value.visible },
         sampleInFlight = { autoCaptureBusy },
         poll = { pollAutoMapOpen() },
@@ -205,6 +215,11 @@ class OverlayService : Service() {
     private var candidateResult: RecognitionResult? = null
     private var candidateManualSelection = false
     private var captureSession: ScreenCaptureSession? = null
+    private val healthScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val healthWarnings = com.idvb.android.recognize.CaptureHealthWarnings()
+    private var abortHealthProbe: (() -> Unit)? = null
+    private var healthProbeGeneration = 0L
+    private var pendingHealthProbe: Runnable? = null
     private var captureMethod = AppServices.prefs.screenCaptureMethod
     private var lastCaptureScreen: Pair<Int, Int>? = null
     private var lastCaptureRotation: Int? = null
@@ -227,6 +242,8 @@ class OverlayService : Service() {
                 stopAutoMapGuide("capture-method-changed")
                 autoDetector = null; autoContext = ""
                 synchronizeCaptureSession()
+                balls?.captureHealth = CaptureHealthMonitor.state.value.getValue(AppServices.prefs.screenCaptureMethod)
+                scheduleCaptureProbe("capture-method-changed")
                 scheduleAutoMapOpen(0L)
             }
         }
@@ -265,7 +282,7 @@ class OverlayService : Service() {
     }
 
     private fun synchronizeCaptureSession() {
-        if (!com.idvb.android.UsageConsent.isAccepted(this) || !com.idvb.android.tutorial.TutorialStore.get(this).state.value.completed) return
+        if (!com.idvb.android.StartupRequirements.isAccepted(this) || !com.idvb.android.tutorial.TutorialStore.get(this).state.value.completed) return
         val method = AppServices.prefs.screenCaptureMethod
         val changed = captureMethod != method
         val renewed = captureSession?.let { it.grantRevision != ScreenCaptureGrant.revision } == true
@@ -285,8 +302,11 @@ class OverlayService : Service() {
                         if (!autoCaptureBusy && !destroyed) scheduleAutoMapOpen(0L)
                     }
                 }
-                session.onStopped = { mainHandler.post {
-                    if (!destroyed) stopAutoMapGuide("screen-capture-authorization-expired")
+                session.onStopped = { error -> mainHandler.post {
+                    if (!destroyed && captureSession === session) {
+                        stopAutoMapGuide("screen-capture-${(error as? CaptureException)?.failure?.name ?: "stopped"}")
+                        scheduleCaptureProbe("projection-stopped")
+                    }
                 } }
                 session.start(size.first, size.second)
             }
@@ -326,7 +346,7 @@ class OverlayService : Service() {
     override fun onCreate() {
         super.onCreate()
         currentService = this
-        if (com.idvb.android.UsageConsent.isAccepted(this)) {
+        if (com.idvb.android.StartupRequirements.isAccepted(this)) {
             sessionLogs.begin()
             AppServices.scanPreparation.request()
         }
@@ -346,11 +366,24 @@ class OverlayService : Service() {
         alignmentNotifications = OverlayNotifications(overlayContext, alignmentStyle = true, screenSize = ::screenSize)
         getSystemService(DisplayManager::class.java).registerDisplayListener(displayListener, Handler(Looper.getMainLooper()))
         AccessibilityScreenCaptureService.foregroundChangedListener = ::handleAutoForegroundChanged
+        healthScope.launch {
+            CaptureHealthMonitor.state.collect { states ->
+                val source = AppServices.prefs.screenCaptureMethod
+                val health = states.getValue(source)
+                balls?.captureHealth = health
+                if (!com.idvb.android.StartupRequirements.isAccepted(this@OverlayService) ||
+                    !com.idvb.android.tutorial.TutorialStore.get(this@OverlayService).state.value.completed) return@collect
+                if (healthWarnings.shouldWarn(health)) {
+                    notifications?.show("${health.description}\n点此回到 IDVB 检查截图 / 重新授权", 8_000L,
+                        NotificationTone.WARNING, onClick = ::openCaptureRecovery)
+                }
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         ensureChannel(); startForegroundCompat()
-        if (!com.idvb.android.UsageConsent.isAccepted(this)) {
+        if (!com.idvb.android.StartupRequirements.isAccepted(this)) {
             stopSelf()
             return START_NOT_STICKY
         }
@@ -401,6 +434,7 @@ class OverlayService : Service() {
             com.idvb.android.tutorial.TutorialStore.get(this).update { it.copy(serviceStarted = true) }
         }
         applyPracticeVisibility()
+        if (intent?.action == null) scheduleCaptureProbe(if (intent == null) "sticky-restart" else "service-start")
         scheduleAutoMapOpen(0L)
         return if (tutorial.completed) START_STICKY else START_NOT_STICKY
     }
@@ -461,6 +495,66 @@ class OverlayService : Service() {
         }
     }
 
+    private fun openCaptureRecovery() {
+        startActivity(Intent(this, MainActivity::class.java).apply {
+            action = MainActivity.ACTION_RECOVER_CAPTURE
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        })
+    }
+
+    /** Source validation works even after a process restart, when no projection token can survive. */
+    private fun captureSourceFailure(): CaptureException? {
+        val source = AppServices.prefs.screenCaptureMethod
+        if (source == ScreenCaptureMethod.ACCESSIBILITY) return if (AccessibilityScreenCaptureService.available) null
+            else CaptureException(CaptureFailure.SERVICE_UNAVAILABLE, "IDVB 无障碍服务未连接，请返回 IDVB 检查")
+        if (captureSession?.isActive == true && ScreenCaptureGrant.available) return null
+        val previous = CaptureHealthMonitor.state.value.getValue(source)
+        return if (previous.lastFailure == CaptureFailure.SYSTEM_STOPPED)
+            CaptureException(CaptureFailure.SYSTEM_STOPPED, previous.lastFailureReason ?: "屏幕共享已停止，请重新授权")
+        else CaptureException(CaptureFailure.NO_GRANT, "截图授权已失效，请返回 IDVB 重新授权")
+    }
+
+    private fun recordCaptureUnavailable(error: CaptureException, trigger: String) {
+        val source = AppServices.prefs.screenCaptureMethod
+        val previous = CaptureHealthMonitor.state.value.getValue(source)
+        if (previous.availability == CaptureAvailability.UNAVAILABLE && previous.lastFailure == error.failure &&
+            previous.lastFailureReason == error.message && autoPauseReason == "capture-${error.failure.name.lowercase()}") return
+        CaptureHealthMonitor.failure(source, error)
+        autoDiagnostics.captureEvent(AlignmentLogEvent("capture.source-unavailable", error.failure.name,
+            labels = mapOf("trigger" to trigger, "source" to source.name, "reason" to error.message.orEmpty(),
+                "sessionId" to sessionLogs.sessionId.orEmpty(), "replay" to "not-replayable-no-capture-input")))
+    }
+
+    /** At most one lifecycle probe; ordinary scan/auto/alignment captures supply the same evidence. */
+    private fun scheduleCaptureProbe(trigger: String) {
+        pendingHealthProbe?.let(mainHandler::removeCallbacks)
+        abortHealthProbe?.invoke(); abortHealthProbe = null
+        val generation = ++healthProbeGeneration
+        pendingHealthProbe = Runnable {
+            pendingHealthProbe = null
+            if (destroyed || !com.idvb.android.StartupRequirements.isAccepted(this) ||
+                !com.idvb.android.tutorial.TutorialStore.get(this).state.value.completed) return@Runnable
+            captureSourceFailure()?.let { recordCaptureUnavailable(it, trigger); return@Runnable }
+            if (scanning || aligning || autoCaptureBusy || alignmentCapturing || scanCapturing) {
+                Log.i("IDVBCapture", "probe=$trigger deferred-to-real-capture")
+                return@Runnable
+            }
+            val source = AppServices.prefs.screenCaptureMethod
+            val size = screenSize()
+            val region = Rect(0, 0, size.first, size.second)
+            val log = AlignmentLogSink { event -> autoDiagnostics.captureEvent(event.copy(labels = event.labels +
+                mapOf("probeTrigger" to trigger, "probeGeneration" to generation.toString(), "inputStorage" to "memory-only; no-images-saved"))) }
+            val callback: (Result<Bitmap>) -> Unit = { result ->
+                result.getOrNull()?.recycle()
+                mainHandler.post { if (generation == healthProbeGeneration) abortHealthProbe = null }
+                Unit
+            }
+            abortHealthProbe = if (source == ScreenCaptureMethod.MEDIA_PROJECTION)
+                captureSession!!.capture(region, callback, log)
+            else AccessibilityScreenCaptureService.capture(region, accessibilityCaptureExecutor, callback, log)
+        }.also { mainHandler.postDelayed(it, 200L) }
+    }
+
     private fun showAlignmentNotice(message: String, durationMs: Long = 4_000L): Long {
         if (destroyed) return -1L
         return alignmentNotifications?.show(message, durationMs) ?: -1L
@@ -494,6 +588,7 @@ class OverlayService : Service() {
         window.x = if (AppServices.prefs.autoDetectMapOpenEnabled) 0 else (screen.first - window.width).coerceAtLeast(0)
         window.y = (screen.second * .28f).toInt()
         balls = OverlayBallView(overlayContext).apply {
+            captureHealth = CaptureHealthMonitor.state.value.getValue(AppServices.prefs.screenCaptureMethod)
             ballMenu = OverlayBallMenuWindow(overlayContext, window, morePanel, ::screenSize)
             mapLocked = currentMap != null
             automaticMapOpen = AppServices.prefs.autoDetectMapOpenEnabled
@@ -524,6 +619,7 @@ class OverlayService : Service() {
                 override fun onScreenTouch(x: Float, y: Float) = handleOutsideTouch()
                 override fun onResetMap() = resetMapIdentity()
                 override fun onChooseMapClass() = toggleMapClassSubmenu()
+                override fun onCaptureHealth() = openCaptureRecovery()
                 override fun onClose() = stopSelf()
                 override fun onMenuExpanded(expanded: Boolean) {
                     if (expanded) {
@@ -588,7 +684,7 @@ class OverlayService : Service() {
 
     private fun startForegroundScan() {
         if (!requireTutorialCompleted()) return
-        if (destroyed || !com.idvb.android.UsageConsent.isAccepted(this)) return
+        if (destroyed || !com.idvb.android.StartupRequirements.isAccepted(this)) return
         val diagnosticSessionId = sessionLogs.sessionId
         if (AppServices.prefs.debugMode) {
             if (AppServices.prefs.manualMapSelectionEnabled) showManualMapSelection() else showDebugCandidates()
@@ -605,9 +701,11 @@ class OverlayService : Service() {
         val method = AppServices.prefs.screenCaptureMethod
         val session = captureSession
         if (method == ScreenCaptureMethod.MEDIA_PROJECTION && (session == null || !session.start(size.first, size.second))) {
+            captureSourceFailure()?.let { recordCaptureUnavailable(it, "manual-scan") }
             notifyOverlay("屏幕捕获授权已失效，请返回 IDVB 重新授权", 6_000L); return
         }
         if (method == ScreenCaptureMethod.ACCESSIBILITY && !AccessibilityScreenCaptureService.available) {
+            captureSourceFailure()?.let { recordCaptureUnavailable(it, "manual-scan") }
             notifyOverlay("IDVB 无障碍服务未启用，请返回应用授权", 6_000L); return
         }
         scanning = true
@@ -635,9 +733,11 @@ class OverlayService : Service() {
                 Unit
             }
             if (method == ScreenCaptureMethod.ACCESSIBILITY) {
-                abortScanCapture = AccessibilityScreenCaptureService.capture(bounds, accessibilityCaptureExecutor, callback)
+                abortScanCapture = AccessibilityScreenCaptureService.capture(bounds, accessibilityCaptureExecutor, callback,
+                    AlignmentLogSink { event -> autoDiagnostics.captureEvent(event.copy(labels = event.labels + ("scanRequest" to generation.toString()))) })
             } else {
-                abortScanCapture = session!!.capture(bounds, callback)
+                abortScanCapture = session!!.capture(bounds, callback,
+                    AlignmentLogSink { event -> autoDiagnostics.captureEvent(event.copy(labels = event.labels + ("scanRequest" to generation.toString()))) })
             }
         }, 140L)
     }
@@ -1478,7 +1578,7 @@ class OverlayService : Service() {
         val requestDetector = autoDetector
         val requestAutoContext = autoContext
         val requestAutoReference = autoReference
-        if (mapResources.pending || mapResourceReleaseFailed || !com.idvb.android.UsageConsent.isAccepted(this) || practiceForeground || scanning || aligning) return
+        if (mapResources.pending || mapResourceReleaseFailed || !com.idvb.android.StartupRequirements.isAccepted(this) || practiceForeground || scanning || aligning) return
         val map = currentMap ?: return
         var floor = map.floors.sortedBy { it.sortOrder }.getOrNull(floorIndex) ?: run {
             recordAlignmentPreflightFailure(clicked, "floor-unavailable", "当前楼层不存在"); return
@@ -1637,10 +1737,12 @@ class OverlayService : Service() {
                 session != null && session.start(screen.first, screen.second)
             }) {
             val reason = "屏幕捕获授权已失效，请返回 IDVB 重新授权"
+            captureSourceFailure()?.let { recordCaptureUnavailable(it, "alignment:${trace.id}") }
             unavailable(reason); complete(AlignmentResult.Unavailable(reason, "capture-permission"), "unavailable"); return
         }
         if (method == ScreenCaptureMethod.ACCESSIBILITY && !AccessibilityScreenCaptureService.available) {
             val reason = "IDVB 无障碍服务未启用，请返回应用授权"
+            captureSourceFailure()?.let { recordCaptureUnavailable(it, "alignment:${trace.id}") }
             unavailable(reason); complete(AlignmentResult.Unavailable(reason, "capture-permission"), "unavailable"); return
         }
         val generation = ++alignmentGeneration
@@ -1661,7 +1763,7 @@ class OverlayService : Service() {
                     else android.os.SystemClock.uptimeMillis() - lastAutoFrameMs <= 1_500L)) &&
             AppServices.prefs.alignmentMethodId == methodId && AppServices.prefs.screenCaptureMethod == method &&
             AppServices.prefs.autoFloorEnabled == autoFloor &&
-            com.idvb.android.UsageConsent.isAccepted(this)
+            com.idvb.android.StartupRequirements.isAccepted(this)
         // Independent control/notification roots that are shown need their own receipt.
         // An attached guide also needs one after immediate close/reopen: its last visible
         // surface buffer can outlive the current INVISIBLE view flag.
@@ -1901,7 +2003,7 @@ class OverlayService : Service() {
                     onReadyIndicator = { readyIndicator?.recycle(); readyIndicator = it },
                 ).start(bounds, ownedPreparedFrames.toList().also { ownedPreparedFrames.clear() })
             } else {
-                session!!.capture(captureBounds, callback)
+                session!!.capture(captureBounds, callback, trace)
                 abortAlignmentCapture = { session.cancelPending() }
             }
         }
@@ -2101,7 +2203,7 @@ class OverlayService : Service() {
     }
 
     private fun prewarmGuideFloor() {
-        if (destroyed || mapResources.pending || mapResourceReleaseFailed || scanning || !com.idvb.android.UsageConsent.isAccepted(this)) return
+        if (destroyed || mapResources.pending || mapResourceReleaseFailed || scanning || !com.idvb.android.StartupRequirements.isAccepted(this)) return
         val (key, render) = guideFloorPreparation() ?: return
         if (guideBitmap?.isRecycled == false && guideBitmapKey == key || guidePreparationKey == key || guidePreparationFailedKey == key) return
         guidePreparationKey = key
@@ -2313,7 +2415,7 @@ class OverlayService : Service() {
     }
 
     private fun commitBlueprintCalibration(view: BlueprintCalibrationView, region: RectF) {
-        if (!com.idvb.android.UsageConsent.isAccepted(this) || !requireTutorialCompleted()) return
+        if (!com.idvb.android.StartupRequirements.isAccepted(this) || !requireTutorialCompleted()) return
         val size = screenSize()
         val origin = IntArray(2).also(view::getLocationOnScreen)
         val started = System.nanoTime()
@@ -2420,7 +2522,9 @@ class OverlayService : Service() {
         if (name != null && autoExternalPackage() == name) scheduleAutoMapOpen(0L)
         else {
             autoPollLoop.stop()
-            stopAutoMapGuide("game-not-foreground-or-capture-unavailable")
+            val sourceError = captureSourceFailure()
+            if (sourceError != null) recordCaptureUnavailable(sourceError, "foreground-changed")
+            stopAutoMapGuide(if (sourceError != null) "capture-${sourceError.failure.name.lowercase()}" else "game-not-foreground")
             autoDetector?.reset()
             // Recheck recoverable prerequisites without taking screenshots of blocked apps.
             scheduleAutoMapOpen(350L)
@@ -2444,7 +2548,9 @@ class OverlayService : Service() {
                 state = mapOf("foregroundPackage" to AccessibilityScreenCaptureService.foregroundPackage.orEmpty(),
                     "foregroundEvidence" to AccessibilityScreenCaptureService.foregroundEvidence,
                     "targetPackage" to autoReference?.targetPackage.orEmpty(),
-                    "captureAvailable" to AccessibilityScreenCaptureService.available.toString(),
+                    "captureAvailable" to (captureSourceFailure() == null).toString(),
+                    "captureMethod" to AppServices.prefs.screenCaptureMethod.name,
+                    "captureHealth" to CaptureHealthMonitor.state.value.getValue(AppServices.prefs.screenCaptureMethod).description,
                     "detectionEnabled" to AppServices.prefs.autoDetectMapOpenEnabled.toString(),
                     "mapId" to currentMap?.id.orEmpty(), "floorIndex" to floorIndex.toString(),
                     "hostForeground" to hostForeground.toString(), "practiceForeground" to practiceForeground.toString(),
@@ -2508,7 +2614,7 @@ class OverlayService : Service() {
         }
         if (destroyed || mapResources.pending || mapResourceReleaseFailed) return
         val now = android.os.SystemClock.uptimeMillis()
-        if (!com.idvb.android.UsageConsent.isAccepted(this) || hostForeground || practiceForeground || !OverlayState.state.value.visible) {
+        if (!com.idvb.android.StartupRequirements.isAccepted(this) || hostForeground || practiceForeground || !OverlayState.state.value.visible) {
             stopAutoMapGuide("not-visible-or-consented")
             return
         }
@@ -2518,8 +2624,21 @@ class OverlayService : Service() {
         }
         // Static screens do not start a long screenshot wait. The next distinct image
         // resumes observation directly, so opening latency begins at that frame.
+        captureSourceFailure()?.let {
+            recordCaptureUnavailable(it, "auto-map-open")
+            stopAutoMapGuide("capture-${it.failure.name.lowercase()}")
+            return
+        }
         if (AppServices.prefs.screenCaptureMethod == ScreenCaptureMethod.MEDIA_PROJECTION &&
-            captureSession?.hasFreshAutoFrame() != true && !autoStaticResume) return
+            captureSession?.hasFreshAutoFrame() != true && !autoStaticResume) {
+            if (autoPauseReason != "capture-waiting-for-fresh-frame") {
+                autoDiagnostics.captureEvent(AlignmentLogEvent("auto-map.capture-wait", "no-fresh-frame",
+                    labels = mapOf("health" to CaptureHealthMonitor.state.value.getValue(ScreenCaptureMethod.MEDIA_PROJECTION).description,
+                        "policy" to "static-frame-is-not-capture-failure; await-next-frame")))
+                autoPauseReason = "capture-waiting-for-fresh-frame"
+            }
+            return
+        }
 
         val screen = screenSize()
         val rotation = screenRotation()
@@ -2581,11 +2700,9 @@ class OverlayService : Service() {
         val currentPkg = AccessibilityScreenCaptureService.foregroundPackage
         val home = packageManager.resolveActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0)?.activityInfo?.packageName
         val isBlockedPkg = currentPkg != null && (currentPkg == packageName || currentPkg == "com.idvb.android" || currentPkg == home || currentPkg == "android" || currentPkg.startsWith("com.android."))
-        val sourceAvailable = if (method == ScreenCaptureMethod.MEDIA_PROJECTION)
-            captureSession != null && ScreenCaptureGrant.available else AccessibilityScreenCaptureService.available
-        if (isBlockedPkg || !sourceAvailable) {
+        if (isBlockedPkg) {
             detector.observe(null, now)
-            stopAutoMapGuide("game-not-foreground-or-capture-unavailable")
+            stopAutoMapGuide("game-not-foreground")
             return
         }
 
@@ -2682,7 +2799,7 @@ class OverlayService : Service() {
         abortAutoCapture = sampler.sampleWithFrame(referenceRegion, captureBounds, mapRegion,
             isCurrent = { !destroyed && generation == autoCaptureGeneration && autoContext == context &&
                 !scanning && blueprintView == null && adjustView == null && candidateView == null &&
-                AppServices.prefs.autoDetectMapOpenEnabled && com.idvb.android.UsageConsent.isAccepted(this) &&
+                AppServices.prefs.autoDetectMapOpenEnabled && com.idvb.android.StartupRequirements.isAccepted(this) &&
                 !practiceForeground && OverlayState.state.value.visible && screenSize() == screen && screenRotation() == rotation &&
                 calibrationRevision == sampleCalibrationRevision && captureRegionPixels(screen.first, screen.second) == calibrated &&
                 autoExternalPackage() == targetPackage && AppServices.prefs.screenCaptureMethod == method },
@@ -2788,6 +2905,9 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
+        pendingHealthProbe?.let(mainHandler::removeCallbacks); pendingHealthProbe = null
+        healthProbeGeneration++; abortHealthProbe?.invoke(); abortHealthProbe = null
+        healthScope.cancel()
         AccessibilityScreenCaptureService.foregroundChangedListener = null
         autoPreviousMapFrame?.recycle(); autoPreviousMapFrame = null
         autoPollLoop.stop()

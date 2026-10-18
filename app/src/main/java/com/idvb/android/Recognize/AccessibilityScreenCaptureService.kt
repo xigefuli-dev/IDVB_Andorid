@@ -16,7 +16,10 @@ import com.idvb.android.alignment.emit
 
 /** 提供截图与用户配置位置的单次点击，不读取界面节点。 */
 class AccessibilityScreenCaptureService : AccessibilityService() {
+    private var healthEpoch = 0L
     override fun onServiceConnected() {
+        CaptureHealthMonitor.beginSession(com.idvb.android.data.ScreenCaptureMethod.ACCESSIBILITY)
+        healthEpoch = CaptureHealthMonitor.ticket(com.idvb.android.data.ScreenCaptureMethod.ACCESSIBILITY).epoch
         instance = this
         foregroundPackage = null
         foregroundChangedListener?.invoke(null)
@@ -45,6 +48,8 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
     override fun onInterrupt() { foregroundPackage = null; foregroundChangedListener?.invoke(null) }
 
     override fun onDestroy() {
+        if (instance === this) CaptureHealthMonitor.failure(com.idvb.android.data.ScreenCaptureMethod.ACCESSIBILITY,
+            CaptureException(CaptureFailure.SERVICE_UNAVAILABLE, "IDVB 无障碍服务已断开，请重新开启"), invalidate = true)
         if (instance === this) { instance = null; foregroundPackage = null; foregroundChangedListener?.invoke(null) }
         super.onDestroy()
     }
@@ -64,7 +69,7 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
 
         fun click(x: Float, y: Float, callback: (Boolean) -> Unit) {
             val service = instance
-            if (service == null || (!com.idvb.android.UsageConsent.isAccepted(service) || !com.idvb.android.tutorial.TutorialStore.get(service).state.value.completed) || !x.isFinite() || !y.isFinite() || x < 0 || y < 0) {
+            if (service == null || (!com.idvb.android.StartupRequirements.isAccepted(service) || !com.idvb.android.tutorial.TutorialStore.get(service).state.value.completed) || !x.isFinite() || !y.isFinite() || x < 0 || y < 0) {
                 callback(false); return
             }
             val path = android.graphics.Path().apply { moveTo(x, y) }
@@ -88,14 +93,17 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
             log: AlignmentLogSink = AlignmentLogSink.NONE): () -> Unit {
             val service = instance
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || service == null) {
-                callback(Result.failure(IllegalStateException("无障碍截图服务未启用")))
+                val error = CaptureException(CaptureFailure.SERVICE_UNAVAILABLE, "无障碍截图服务未启用或系统不支持，请检查 IDVB 无障碍服务")
+                CaptureHealthMonitor.failure(com.idvb.android.data.ScreenCaptureMethod.ACCESSIBILITY, error)
+                callback(Result.failure(error))
                 return {}
             }
-            if ((!com.idvb.android.UsageConsent.isAccepted(service) || !com.idvb.android.tutorial.TutorialStore.get(service).state.value.completed)) {
+            if ((!com.idvb.android.StartupRequirements.isAccepted(service) || !com.idvb.android.tutorial.TutorialStore.get(service).state.value.completed)) {
                 callback(Result.failure(IllegalStateException("请先打开 IDVB，确认使用责任声明并完成新手教程")))
                 return {}
             }
             val completed = AtomicBoolean(false)
+            val healthTicket = CaptureHealthMonitor.ticket(com.idvb.android.data.ScreenCaptureMethod.ACCESSIBILITY).copy(epoch = service.healthEpoch)
             val handler = Handler(Looper.getMainLooper())
             val retries = CaptureRetryController { delay, action ->
                 val runnable = Runnable(action)
@@ -106,7 +114,8 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
             val timeout = Runnable {
                 if (completed.compareAndSet(false, true)) {
                     retries.stop()
-                    callback(Result.failure(IllegalStateException("无障碍截图响应超时，请检查无障碍服务")))
+                    callback(CaptureHealthMonitor.assess(com.idvb.android.data.ScreenCaptureMethod.ACCESSIBILITY, healthTicket,
+                        Result.failure(CaptureException(CaptureFailure.TIMEOUT, "无障碍截图响应超时，请检查无障碍服务")), log))
                 }
             }
             var scheduledAttempt: Runnable? = null
@@ -116,7 +125,7 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
                     scheduledAttempt?.let(handler::removeCallbacks)
                     scheduledAttempt = null
                     handler.removeCallbacks(timeout)
-                    callback(result)
+                    callback(CaptureHealthMonitor.assess(com.idvb.android.data.ScreenCaptureMethod.ACCESSIBILITY, healthTicket, result, log))
                 } else result.getOrNull()?.recycle()
             }
             handler.postDelayed(timeout, 3_000L)
@@ -191,7 +200,7 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
                             return
                         }
                     }
-                    finish(Result.failure(IllegalStateException("无障碍截图失败（$errorCode）")))
+                    finish(Result.failure(accessibilityCaptureException(errorCode)))
                 }
             }
             attempt = {
@@ -213,7 +222,7 @@ class AccessibilityScreenCaptureService : AccessibilityService() {
                     attemptStartUptimeMs = now
                     attemptStarted = System.nanoTime(); attemptNumber++
                     runCatching {
-                        if ((!com.idvb.android.UsageConsent.isAccepted(service) || !com.idvb.android.tutorial.TutorialStore.get(service).state.value.completed)) error("请先打开 IDVB，确认使用责任声明并完成新手教程")
+                        if ((!com.idvb.android.StartupRequirements.isAccepted(service) || !com.idvb.android.tutorial.TutorialStore.get(service).state.value.completed)) error("请先打开 IDVB，确认使用责任声明、使用规则并完成新手教程")
                         service.takeScreenshot(Display.DEFAULT_DISPLAY, executor, screenshotCallback)
                     }.onFailure { finish(Result.failure(it)) }
                     }

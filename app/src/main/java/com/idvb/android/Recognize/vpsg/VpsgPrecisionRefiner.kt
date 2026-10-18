@@ -57,6 +57,7 @@ internal object VpsgPrecisionRefiner {
                     "improvementEpsilon" to 1e-9, "observabilityMargin" to 1e-4),
                 series = mapOf("partitionCounts" to counts.map(Int::toDouble), "probesScaleDxDyLoss" to probes.asList().subList(0, probeValues)),
                 labels = mapOf("calibrated" to (result != null).toString(),
+                    "lossEvaluationPolicy" to "same-full-losses-and-arithmetic; native-batch-reuses-bit-identical-scale-axis-shift-coordinates",
                     "pivotDomain" to "observed-point-bounds; unseen-viewport-regions-do-not-center-scale-or-partitions",
                     "translationBoundUnits" to "six-reference-pixels-scaled-to-live-pixels; minimum-six-live-pixels"),
                 durationNanos = System.nanoTime() - started))

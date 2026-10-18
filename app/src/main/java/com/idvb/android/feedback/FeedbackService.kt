@@ -8,7 +8,7 @@ import android.os.Build
 import android.os.Process
 import androidx.core.content.FileProvider
 import com.idvb.android.BuildConfig
-import com.idvb.android.UsageConsent
+import com.idvb.android.StartupRequirements
 import com.idvb.android.diagnostics.HistoryArchive
 import org.json.JSONObject
 import java.io.File
@@ -25,7 +25,7 @@ import java.util.zip.ZipOutputStream
 /** Only explicitly selected attachments leave private app storage. No account or device ID. */
 class FeedbackService(private val context: Context) {
     fun submit(description: String, includeLogs: Boolean = true, includeDiagnostics: Boolean = true): String {
-        check(UsageConsent.isAccepted(context)) { "请先确认软件性质及使用责任声明。" }
+        check(StartupRequirements.isAccepted(context)) { "请先确认软件性质及使用责任声明和 IDVB 使用规则。" }
         require(FeedbackText.isValid(description)) { "问题描述需超过 10 个加权字符，且不超过 4000 字符。" }
         val directory = File(context.cacheDir, "feedback-${UUID.randomUUID()}")
         check(directory.mkdirs()) { "无法创建反馈临时目录。" }
@@ -48,7 +48,7 @@ class FeedbackService(private val context: Context) {
      * 以及用户填写的问题描述统一打包至单个 ZIP，供用户直接分享给其他应用。
      */
     fun createExportPackage(description: String = ""): File {
-        check(UsageConsent.isAccepted(context)) { "请先确认软件性质及使用责任声明。" }
+        check(StartupRequirements.isAccepted(context)) { "请先确认软件性质及使用责任声明和 IDVB 使用规则。" }
         val exportDir = File(context.cacheDir, "feedback-export")
         if (exportDir.exists()) {
             exportDir.listFiles()?.forEach { it.deleteRecursively() }

@@ -46,7 +46,7 @@ object AppServices {
     private var preparationStarted = false
 
     internal fun startRecognitionPreparation() {
-        if (!UsageConsent.isAccepted(context) || preparationStarted) return
+        if (!StartupRequirements.isAccepted(context) || preparationStarted) return
         preparationStarted = true
         repository.onCatalogChanged = { scanPreparation.request() }
         context.getSharedPreferences("overlay",Context.MODE_PRIVATE)

@@ -17,6 +17,7 @@ import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class AlignmentOutputSettingInstrumentedTest {
+    @get:org.junit.Rule val usageRules = com.idvb.android.consent.AcceptedUsageRulesFixture()
 
     @Test
     fun showAlignmentOutputAlwaysEnabledIncludingLegacyFalseAndPresetChanges() {

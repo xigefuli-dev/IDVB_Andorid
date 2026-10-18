@@ -10,6 +10,7 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class OverlayNotificationsInstrumentedTest {
+    @get:org.junit.Rule val usageRules = com.idvb.android.consent.AcceptedUsageRulesFixture()
     @Test fun newestStaysAboveLateUpdatesAndOldExpiryCannotRemoveNewCard() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val base = instrumentation.targetContext

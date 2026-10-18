@@ -45,6 +45,7 @@ import org.opencv.imgproc.Imgproc
 
 @RunWith(AndroidJUnit4::class)
 class NavigationInstrumentedTest {
+    @get:org.junit.Rule val usageRules = com.idvb.android.consent.AcceptedUsageRulesFixture()
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val context = instrumentation.targetContext
     private val automation get() = instrumentation.uiAutomation

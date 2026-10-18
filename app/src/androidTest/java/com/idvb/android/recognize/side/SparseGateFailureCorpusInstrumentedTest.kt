@@ -32,7 +32,9 @@ class SparseGateFailureCorpusInstrumentedTest {
         val target=InstrumentationRegistry.getInstrumentation().targetContext
         val corpus=File(target.cacheDir,relative!!).canonicalFile
         require(corpus.toPath().startsWith(target.cacheDir.canonicalFile.toPath()))
-        val cases=File(corpus,"recognition").listFiles { file -> file.extension=="zip" }!!.sortedBy { it.name }
+        val selectedCases=args.getString("recognitionCases")?.split(',')?.toSet()
+        val cases=File(corpus,"recognition").listFiles { file -> file.extension=="zip" &&
+            (selectedCases==null || file.name in selectedCases) }!!.sortedBy { it.name }
         assertTrue("Empty recognition corpus",cases.isNotEmpty())
         val expectations=JSONObject(File(corpus,"expectations.json").readText())
         val isolated=File(target.filesDir,"test-evidence/recognition-${UUID.randomUUID()}").apply { mkdirs() }
@@ -62,6 +64,7 @@ class SparseGateFailureCorpusInstrumentedTest {
                     val result=MapScanRecognizer(context,repository,trace).recognize(frame,viewport,
                         original.getInt("screenWidth"),original.getInt("screenHeight"),classId)
                     val algorithmMs=(System.nanoTime()-started)/1e6
+                    android.util.Log.i("IDVB-RecognitionCorpus","input=${archive.name} run=$run algorithmMs=$algorithmMs")
                     val confirmed=result.automaticallyConfirmedCandidate()
                     val required=expectation.optBoolean("requireAutomaticConfirmation",false)
                     val candidateCount=result.candidates.count { it.disposition==CandidateDisposition.NEEDS_VERIFICATION }

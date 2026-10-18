@@ -31,6 +31,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * Reliable results are constructed to isolate lifecycle consumption from recognition quality. */
 @RunWith(AndroidJUnit4::class)
 class OverlaySelectionScanLifecycleInstrumentedTest {
+    @get:org.junit.Rule val usageRules = com.idvb.android.consent.AcceptedUsageRulesFixture()
     @Test fun resetWaitsForOldWorkerBeforeEvictingMapResourcesAndRejectsLateIdentity() {
         Fixture().use { f ->
             val cache = com.idvb.android.resources.MapBitmapCaches.previews

@@ -44,14 +44,16 @@ class OverlayNotifications(
         message: String,
         durationMs: Long = 4_000L,
         tone: NotificationTone = NotificationTone.DEFAULT,
+        onClick: (() -> Unit)? = null,
     ): Long {
         check(Looper.myLooper() == Looper.getMainLooper())
-        if (closed || !com.idvb.android.UsageConsent.isAccepted(context)) return -1
+        if (closed || !com.idvb.android.StartupRequirements.isAccepted(context)) return -1
         val text = TextView(context).apply {
             textSize = 13f * sizeScale; setTextColor(Color.WHITE)
             setPadding(dp(14), dp(10), dp(14), dp(10))
             background = backgroundFor(tone)
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+            if (onClick != null) setOnClickListener { onClick() }
         }
         val card = Card(++sequence, text, tone)
         cards.add(0, card)
@@ -62,9 +64,9 @@ class OverlayNotifications(
         // Reattach only if not already attached, putting it above older application windows.
         applyVisibility()
         if (!window.isAdded()) {
-            window.add(column, locked = true)
+            window.add(column, locked = cards.none { it.view.hasOnClickListeners() })
         } else {
-            window.update(locked = true)
+            window.update(locked = cards.none { it.view.hasOnClickListeners() })
         }
         return card.id
     }
@@ -122,6 +124,7 @@ class OverlayNotifications(
         if (!cards.remove(card)) return
         column.removeView(card.view)
         if (cards.isEmpty()) window.remove()
+        else window.update(locked = cards.none { it.view.hasOnClickListeners() })
     }
 
     fun close() {

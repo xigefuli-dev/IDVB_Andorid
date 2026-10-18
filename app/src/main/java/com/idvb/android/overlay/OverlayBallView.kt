@@ -21,6 +21,7 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
         fun onOutsideTouch() {}
         fun onResetMap() {}
         fun onChooseMapClass() {}
+        fun onCaptureHealth() {}
         fun onOpenGuide() {}
         fun onCloseGuide() {}
         fun onSearch(); fun onToggleGuide(); fun onNextFloor(); fun onNextVariant(); fun onFreeAdjust(); fun onCalibrate(); fun onClose()
@@ -39,6 +40,12 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
     private var menuExpanded = false
     private val operationPrefs = com.idvb.android.data.OverlayPrefs(context)
     private var eyeHeld = false
+    var captureHealth: com.idvb.android.recognize.CaptureHealthSnapshot? = null
+        set(value) {
+            field = value
+            moreButton.contentDescription = "更多选项，截图状态：${value?.description ?: "尚未实测"}"
+            moreButton.invalidate()
+        }
 
     private fun releaseEye() {
         if (!eyeHeld) return
@@ -148,6 +155,7 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
             orientation = VERTICAL; gravity = Gravity.END; setPadding(0, dp(6), 0, 0)
             isMotionEventSplittingEnabled = true
             addView(menuItem("▤", "选择地图包", closeOnClick = false) { listener?.onChooseMapClass() })
+            addView(menuItem("●", "截图状态 / 重新授权") { listener?.onCaptureHealth() })
             addView(menuItem("✥", "小抄显示调整") { listener?.onFreeAdjust() })
             addView(menuItem("⚙", "悬浮窗布局调整") { customLayout?.begin("search") })
             addView(menuItem("▣", "校准显示区域") { listener?.onCalibrate() })
@@ -186,7 +194,20 @@ class OverlayBallView(context: Context) : LinearLayout(context) {
         }
     }
 
-    private fun ball(id: String, label: String, description: String, click: () -> Unit) = TextView(context).apply {
+    private fun ball(id: String, label: String, description: String, click: () -> Unit) = object : TextView(context) {
+        private val statusPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        override fun onDraw(canvas: android.graphics.Canvas) {
+            super.onDraw(canvas)
+            if (id == "more") {
+                statusPaint.color = when (captureHealth?.availability) {
+                    com.idvb.android.recognize.CaptureAvailability.HEALTHY -> Color.rgb(112, 226, 157)
+                    com.idvb.android.recognize.CaptureAvailability.UNAVAILABLE -> Color.rgb(255, 107, 107)
+                    else -> Color.rgb(255, 198, 75)
+                }
+                canvas.drawCircle(width - dp(7).toFloat(), dp(7).toFloat(), dp(3).toFloat(), statusPaint)
+            }
+        }
+    }.apply {
         text = label; contentDescription = description; gravity = Gravity.CENTER; textSize = 18f; setTextColor(Color.WHITE)
         background = GradientDrawable().apply {
             shape = GradientDrawable.OVAL; setColor(Color.argb(238, 31, 35, 38)); setStroke(dp(1), Color.argb(190, 112, 226, 157))

@@ -25,6 +25,8 @@ data class ProjectionCaptureFrame(val bitmap: Bitmap, val sequence: Long,
 
 /** All projection, reader and retained-frame operations share this session's monitor. */
 class ScreenCaptureSession(private val context: Context) {
+    init { CaptureHealthMonitor.beginSession(com.idvb.android.data.ScreenCaptureMethod.MEDIA_PROJECTION) }
+    private val healthEpoch = CaptureHealthMonitor.ticket(com.idvb.android.data.ScreenCaptureMethod.MEDIA_PROJECTION).epoch
     val grantRevision = ScreenCaptureGrant.revision
     private val thread = HandlerThread("idvb-screen-capture").apply { start() }
     private val handler = Handler(thread.looper)
@@ -43,14 +45,16 @@ class ScreenCaptureSession(private val context: Context) {
     private var deliveredAutoSequence = -1L
     private var packedPixels: java.nio.ByteBuffer? = null
     @Volatile var onFrameAvailable: (() -> Unit)? = null
-    @Volatile var onStopped: (() -> Unit)? = null
+    @Volatile var onStopped: ((Throwable) -> Unit)? = null
+    val isActive: Boolean @Synchronized get() = !closed && failure == null && reader != null
 
     private inner class Request(val region: Rect, val minimumSequence: Long, val auto: Boolean,
         val log: AlignmentLogSink, val callback: (Result<ProjectionCaptureFrame>) -> Unit) : Runnable {
         val started = System.nanoTime()
+        val healthTicket = CaptureHealthMonitor.ticket(com.idvb.android.data.ScreenCaptureMethod.MEDIA_PROJECTION).copy(epoch = healthEpoch)
         val deadline = SystemClock.uptimeMillis() + 3_000L
         val timeout = Runnable { synchronized(this@ScreenCaptureSession) {
-            if (this in pending) finish(Result.failure(IllegalStateException("等待屏幕画面超时（屏幕捕获未收到新帧）")))
+            if (this in pending) finish(Result.failure(CaptureException(CaptureFailure.TIMEOUT, "等待屏幕画面超时（屏幕捕获未收到新帧）")))
         } }
         override fun run() = synchronized(this@ScreenCaptureSession) {
             if (this !in pending) return@synchronized
@@ -75,7 +79,7 @@ class ScreenCaptureSession(private val context: Context) {
                         labels = mapOf("captureMethod" to "MEDIA_PROJECTION", "distinctFrame" to (minimumSequence >= 0).toString())))
                     finish(result)
                 }
-                SystemClock.uptimeMillis() >= deadline -> finish(Result.failure(IllegalStateException("等待屏幕画面超时（屏幕捕获未收到新帧）")))
+                SystemClock.uptimeMillis() >= deadline -> finish(Result.failure(CaptureException(CaptureFailure.TIMEOUT, "等待屏幕画面超时（屏幕捕获未收到新帧）")))
                 else -> Unit // Image arrival wakes pending requests; no polling sleep.
             }
         }
@@ -90,13 +94,15 @@ class ScreenCaptureSession(private val context: Context) {
                     "frameReceivedNanos" to latestReceivedNanos.toDouble()),
                 labels = mapOf("reason" to result.exceptionOrNull()?.message.orEmpty())))
             result.exceptionOrNull()?.let { Log.e("IDVBCapture", "MediaProjection capture failed", it) }
-            callback(result)
+            val checked = CaptureHealthMonitor.assess(com.idvb.android.data.ScreenCaptureMethod.MEDIA_PROJECTION,
+                healthTicket, result.map { it.bitmap }, log)
+            callback(checked.map { result.getOrThrow() })
         }
     }
 
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() = synchronized(this@ScreenCaptureSession) {
-            stop(IllegalStateException("屏幕捕获授权已失效，请重新授权"))
+            stop(CaptureException(CaptureFailure.SYSTEM_STOPPED, "屏幕共享已被系统停止，请返回 IDVB 重新授权"))
         }
         override fun onCapturedContentResize(newWidth: Int, newHeight: Int) = synchronized(this@ScreenCaptureSession) {
             if (!closed && newWidth > 0 && newHeight > 0) {
@@ -113,7 +119,9 @@ class ScreenCaptureSession(private val context: Context) {
             val rotationChanged = displayRotation != null && displayRotation != rotation
             if (rotationChanged) Log.i("IDVBCapture", "capture-rotation-changed from=$displayRotation to=$rotation width=$screenWidth height=$screenHeight")
             if (projection == null) {
-                val data = ScreenCaptureGrant.consume(grantRevision) ?: return false
+                val data = ScreenCaptureGrant.consume(grantRevision) ?: run {
+                    stop(CaptureException(CaptureFailure.NO_GRANT, "截图授权已失效，请返回 IDVB 重新授权")); return false
+                }
                 projection = (context.getSystemService(MediaProjectionManager::class.java)
                     .getMediaProjection(Activity.RESULT_OK, data) ?: error("屏幕捕获授权无效"))
                     .also { it.registerCallback(projectionCallback, handler) }
@@ -157,7 +165,11 @@ class ScreenCaptureSession(private val context: Context) {
 
     @Synchronized
     fun capture(region: Rect, callback: (Result<Bitmap>) -> Unit): () -> Unit =
-        request(region, -1L, false, AlignmentLogSink.NONE, callback)
+        capture(region, callback, AlignmentLogSink.NONE)
+
+    @Synchronized
+    fun capture(region: Rect, callback: (Result<Bitmap>) -> Unit, log: AlignmentLogSink): () -> Unit =
+        request(region, -1L, false, log, callback)
 
     /** Each detector sample owns a distinct frame; readiness awaits a new frame after its seed. */
     @Synchronized
@@ -190,7 +202,11 @@ class ScreenCaptureSession(private val context: Context) {
     private fun requestFrame(region: Rect, minimumSequence: Long, auto: Boolean, log: AlignmentLogSink,
         callback: (Result<ProjectionCaptureFrame>) -> Unit): () -> Unit {
         if (closed || failure != null || reader == null) {
-            callback(Result.failure(failure ?: IllegalStateException("屏幕捕获会话未启动")))
+            val error = failure ?: CaptureException(CaptureFailure.NO_GRANT, "屏幕捕获会话未启动，请返回 IDVB 重新授权")
+            CaptureHealthMonitor.assess(com.idvb.android.data.ScreenCaptureMethod.MEDIA_PROJECTION,
+                CaptureHealthMonitor.ticket(com.idvb.android.data.ScreenCaptureMethod.MEDIA_PROJECTION).copy(epoch = healthEpoch),
+                Result.failure(error), log)
+            callback(Result.failure(error))
             return {}
         }
         val request = Request(Rect(region), minimumSequence, auto, log, callback)
@@ -244,7 +260,9 @@ class ScreenCaptureSession(private val context: Context) {
     }
 
     private fun stop(error: Throwable) {
+        if (failure != null) return
         failure = error
+        if (!closed) CaptureHealthMonitor.failure(com.idvb.android.data.ScreenCaptureMethod.MEDIA_PROJECTION, error, invalidate = true)
         ScreenCaptureGrant.invalidate(grantRevision)
         pending.toList().forEach { it.finish(Result.failure(error)) }
         latest?.close(); latest = null
@@ -253,7 +271,7 @@ class ScreenCaptureSession(private val context: Context) {
         packedPixels = null
         projection?.unregisterCallback(projectionCallback)
         projection?.stop(); projection = null
-        onStopped?.invoke()
+        onStopped?.invoke(error)
         Log.w("IDVBCapture", "MediaProjection session stopped: ${error.message}")
     }
 

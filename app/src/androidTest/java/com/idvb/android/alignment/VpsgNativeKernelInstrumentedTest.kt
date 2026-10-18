@@ -63,8 +63,14 @@ class VpsgNativeKernelInstrumentedTest {
         val distances = FloatArray(width * height) { random.nextDouble(0.0, 8.0).toFloat() }
         val points = IntArray(256 * 2) { random.nextInt(-10, 150) }
         val cx = 70.0; val cy = 65.0; val rcx = 50.25; val rcy = 51.5
-        val poses = DoubleArray(27 * 3) { when (it % 3) { 0 -> .55 + it / 3 * .01; 1 -> (it / 3 % 3 - 1).toDouble(); else -> (it / 3 / 3 % 3 - 1).toDouble() } }
-        val expected = DoubleArray(27) { i ->
+        val batches = listOf(
+            DoubleArray(27 * 3) { when (it % 3) { 0 -> .55 + it / 3 * .01; 1 -> (it / 3 % 3 - 1).toDouble(); else -> (it / 3 / 3 % 3 - 1).toDouble() } },
+            // The real refinement and observability batches repeat axis vectors.
+            DoubleArray(27 * 3) { when (it % 3) { 0 -> .55 + (it / 3 / 9 - 1) * .00275; 1 -> (it / 3 / 3 % 3 - 1).toDouble(); else -> (it / 3 % 3 - 1).toDouble() } },
+            DoubleArray(25 * 3) { when (it % 3) { 0 -> .553125; 1 -> (it / 3 / 5 - 2) * .5; else -> (it / 3 % 5 - 2) * .5 } },
+            doubleArrayOf(.55, -0.0, +0.0))
+        for (poses in batches) {
+        val expected = DoubleArray(poses.size / 3) { i ->
             val scale = poses[i * 3]; val dx = poses[i * 3 + 1]; val dy = poses[i * 3 + 2]
             val counts = IntArray(4); val sums = DoubleArray(4)
             for (p in 0 until points.size / 2) {
@@ -84,6 +90,7 @@ class VpsgNativeKernelInstrumentedTest {
             (0..3).filter { counts[it] >= 15 }.map { sums[it] / counts[it] }.average()
         }
         assertArrayEquals(expected, VpsgNativeKernel.precisionLosses(points, poses, VpsgNativeKernel.direct(distances), width, height, cx, cy, rcx, rcy), 0.0)
+        }
     }
     @Test fun nativeReversePreservesVisibilitySamplesResidualsAndCounts() {
         assertTrue(VpsgNativeKernel.available)

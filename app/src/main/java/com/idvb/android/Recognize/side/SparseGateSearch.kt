@@ -3,6 +3,9 @@ package com.idvb.android.recognize.side
 import com.idvb.android.recognize.cv.CvImages
 import com.idvb.android.recognize.vpsg.VpsgAlignmentTuning
 import com.idvb.android.recognize.vpsg.VpsgLiveExtractor
+import com.idvb.android.alignment.AlignmentLogSink
+import com.idvb.android.alignment.AlignmentLogEvent
+import com.idvb.android.alignment.emit
 import org.opencv.core.*
 import org.opencv.imgproc.Imgproc
 import java.io.File
@@ -73,7 +76,7 @@ internal object SparseGateSearch {
                 (decode(at+width)*(1-fx) + decode(at+width+1)*fx)*fy)*scale
         }
         fun score(points: List<Pixel>, scale: Double, x: Double, y: Double,
-            mustBeat: Double = Double.NEGATIVE_INFINITY): Double {
+            mustBeat: Double = Double.NEGATIVE_INFINITY, evaluated: DoubleArray? = null): Double {
             var sum = 0.0
             val inverseScale = 1.0/scale
             val minimumTotal = mustBeat * points.size - 1e-9
@@ -83,9 +86,12 @@ internal object SparseGateSearch {
                 sum += if (d <= .8) 1.0 else if (d <= 2.5) .7 else if (d <= 5.5) .4 else 0.0
                 // Exact upper bound, not a weaker acceptance threshold. Even if
                 // every remaining point scores 1, this pose cannot replace best.
-                if ((i and 15) == 15 && sum + points.size - i - 1 < minimumTotal)
+                if ((i and 15) == 15 && sum + points.size - i - 1 < minimumTotal) {
+                    evaluated?.let { it[0] = sum; it[1] = (i+1).toDouble() }
                     return Double.NEGATIVE_INFINITY
+                }
             }
+            evaluated?.let { it[0] = sum; it[1] = points.size.toDouble() }
             return if (points.isEmpty()) 0.0 else sum/points.size
         }
     }
@@ -185,6 +191,8 @@ internal object SparseGateSearch {
     class ReverseObservation(live: VpsgLiveExtractor.Observation) {
         val width = live.edges.cols(); val height = live.edges.rows()
         val domain = ByteArray(width*height).also { requireNotNull(live.revealed).get(0,0,it) }
+        val firstRevealedRow = domain.indexOfFirst { (it.toInt() and 255) > 128 }.let { if (it < 0) height else it/width }
+        val lastRevealedRow = domain.indexOfLast { (it.toInt() and 255) > 128 }.let { if (it < 0) -1 else it/width }
         private val distances: FloatArray
         init {
             val inverse = Mat(); val distance = Mat()
@@ -201,9 +209,26 @@ internal object SparseGateSearch {
                 (distances[at+width]*(1-fx)+distances[at+width+1]*fx)*fy
         }
     }
-    private fun reverseEvidence(index: Index,pose: Pose,live: ReverseObservation,evidence: Evidence): Evidence {
-        val eligible=IntArray(index.edgePositions.size); var count=0
-        for (position in index.edgePositions) {
+    private fun reverseEvidence(index: Index,pose: Pose,live: ReverseObservation,evidence: Evidence,
+        eligible: IntArray = IntArray(index.edgePositions.size)): Evidence {
+        var count=0
+        // Prepared edge positions are row-major. Rows outside the captured
+        // revealed domain cannot contribute to the existing exact predicate.
+        // Pad rounding bounds by one reference row; preserve point/sample order.
+        val firstRow = (ceil((live.firstRevealedRow-.5-pose.y)/pose.scale).toInt()-1).coerceIn(0,index.height)
+        val endRow = (floor((live.lastRevealedRow+.5-pose.y)/pose.scale).toInt()+2).coerceIn(0,index.height)
+        fun lowerBound(position: Int): Int {
+            var left=0; var right=index.edgePositions.size
+            while (left<right) {
+                val middle=(left+right) ushr 1
+                if (index.edgePositions[middle]<position) left=middle+1 else right=middle
+            }
+            return left
+        }
+        val first=lowerBound(firstRow*index.width); val end=lowerBound(endRow*index.width)
+        for (i in first until end) {
+            if (i and 1023 == 0) com.idvb.android.alignment.AlignmentCancellation.checkpoint("scan.side.reverse-reference-row")
+            val position=index.edgePositions[i]
             val rx=position%index.width; val ry=position/index.width
             if (!index.observable(rx.toDouble(),ry.toDouble())) continue
             val x=rx*pose.scale+pose.x; val y=ry*pose.scale+pose.y
@@ -253,10 +278,11 @@ internal object SparseGateSearch {
         } finally { raw.forEach { it.release() }; hierarchy.release(); copy.release() }
     }
     fun verify(index: Index, pose: Pose, points: List<Pixel>, contours: List<List<Pixel>>, width: Int, height: Int,
-        acceptanceOnly: Boolean = false, reverse: ReverseObservation? = null): Evidence {
+        acceptanceOnly: Boolean = false, reverse: ReverseObservation? = null, competitive: Evidence? = null): Evidence {
         if (!pose.scale.isFinite() || pose.scale <= 0 || !pose.x.isFinite() || !pose.y.isFinite() || width <= 0 || height <= 0)
             return Evidence(0.0,50.0,0.0,true,0,0,"invalid-transform")
         var hits = 0; var sum = 0.0; var evaluated = 0
+        val supportBound = max(.88,competitive?.bidirectionalSupport ?: .88)
         val totals = IntArray(16); val supported = IntArray(16)
         fun distance(x: Int,y: Int) = index.distance((x-pose.x)/pose.scale,(y-pose.y)/pose.scale,pose.scale)
         for ((pointIndex,p) in points.withIndex()) {
@@ -269,10 +295,19 @@ internal object SparseGateSearch {
                 val remaining = points.size-pointIndex-1
                 // Excluded reference pixels can only reduce the remaining hits.
                 // Even the all-observable/all-supported upper bound cannot pass.
-                if (hits+remaining < .88*(evaluated+remaining))
-                    return Evidence(hits.toDouble()/evaluated,sum/evaluated,0.0,true,evaluated,0,"support-upper-bound")
+                if (hits+remaining < supportBound*(evaluated+remaining))
+                    return Evidence(hits.toDouble()/evaluated,sum/evaluated,0.0,true,evaluated,0,
+                        if (competitive == null) "support-upper-bound" else "incumbent-support-upper-bound")
             }
         }
+        val support = if (evaluated == 0) 0.0 else hits.toDouble()/evaluated
+        val mean = if (evaluated == 0) 50.0 else sum/evaluated
+        // Reverse support cannot exceed forward support. A pose that cannot
+        // improve the existing support/mean ordering needs no contour or reverse
+        // pass. This is the same winner objective, including its strict tie rule.
+        if (acceptanceOnly && competitive != null && (support < competitive.bidirectionalSupport ||
+                support == competitive.bidirectionalSupport && mean >= competitive.mean))
+            return Evidence(support,mean,0.0,true,evaluated,0,"incumbent-forward-dominance")
         val spatial = totals.indices.any { totals[it] >= 30 && supported[it] < totals[it]*.70 }
         if (acceptanceOnly && (spatial || contours.isEmpty() || evaluated < points.size*.5))
             return Evidence(if (evaluated == 0) 0.0 else hits.toDouble()/evaluated,
@@ -310,6 +345,18 @@ internal object SparseGateSearch {
         val started = System.nanoTime()
         val coarseEvidence = if (log.enabled) ArrayList<Double>() else null
         val refinedEvidence = if (log.enabled) ArrayList<Double>() else null
+        val evaluated = if (log.enabled) DoubleArray(2) else null
+        var scoredPoints = 0.0
+        var possiblePoints = 0.0
+        fun remember(target: ArrayList<Double>?, step: Double, scale: Double, x: Double, y: Double, bound: Double) {
+            if (target == null) return
+            val values = requireNotNull(evaluated)
+            val count = points.size.coerceAtLeast(1).toDouble()
+            target.add(step); target.add(scale); target.add(x); target.add(y)
+            target.add(values[0]/count); target.add((values[0]+points.size-values[1])/count)
+            target.add(values[1]); target.add(bound.coerceAtLeast(0.0))
+            scoredPoints += values[1]; possiblePoints += points.size
+        }
         val retained = ArrayList<Pose>()
         // Balanced includes the complete Fast search, preserving its basins.
         // A local forward alias may beat the true scale and later fail reverse
@@ -329,8 +376,8 @@ internal object SparseGateSearch {
                 val duplicate = peaks.indexOfFirst { abs(ln(it.scale/s)) < step*2 }
                 val bound = if (duplicate >= 0) peaks[duplicate].score else
                     if (peaks.size == count) peaks.last().score else Double.NEGATIVE_INFINITY
-                val score = index.score(points,s,x,y,if (coarseEvidence == null) bound else Double.NEGATIVE_INFINITY)
-                coarseEvidence?.addAll(listOf(step,s,x,y,score))
+                val score = index.score(points,s,x,y,bound,evaluated)
+                remember(coarseEvidence,step,s,x,y,bound)
                 if (score < bound) continue
                 val pose = Pose(s,x,y,score,gate)
                 if (duplicate >= 0 && peaks[duplicate].score >= pose.score) continue
@@ -348,8 +395,8 @@ internal object SparseGateSearch {
                         val x = seed.x+ax*(seed.scale-s)+dx
                         val y = seed.y+ay*(seed.scale-s)+dy
                         if (hypot(x+ax*s-gx,y+ay*s-gy) > maximumGateResidual) continue
-                        val score = index.score(points,s,x,y,if (refinedEvidence == null) best.score else Double.NEGATIVE_INFINITY)
-                        refinedEvidence?.addAll(listOf(step,s,x,y,score))
+                        val score = index.score(points,s,x,y,best.score,evaluated)
+                        remember(refinedEvidence,step,s,x,y,best.score)
                         if (score > best.score) best = Pose(s,x,y,score,gate)
                     }
                 }
@@ -361,20 +408,22 @@ internal object SparseGateSearch {
             if (unique.none { abs(ln(it.scale/pose.scale)) < .01 }) unique += pose
             if (unique.size == 4) break
         }
-        if (log.enabled) log.record(com.idvb.android.alignment.AlignmentLogEvent("scan.side.proposal-search",
+        if (log.enabled) log.emit(com.idvb.android.alignment.AlignmentLogEvent("scan.side.proposal-search",
             "gate-residual-domain-before-basin-selection; dense-and-formal-verification-required",
             durationNanos = System.nanoTime() - started,
             measurements = mapOf("minimumScale" to minimum,"maximumScale" to maximum,
                 "gateX" to gx,"gateY" to gy,"anchorX" to ax,"anchorY" to ay,
-                "samplePoints" to points.size.toDouble(),"gateIndex" to gate.toDouble()),
+                "samplePoints" to points.size.toDouble(),"gateIndex" to gate.toDouble(),
+                "scoredPoints" to scoredPoints,"unprunedPoints" to possiblePoints),
             thresholds = mapOf("maximumBasins" to 4.0,"sameBasinLogScale" to .01,
                 "maximumGateResidual" to maximumGateResidual),
-            labels = mapOf("coarseColumns" to "step,scale,x,y,score",
+            labels = mapOf("coarseColumns" to "step,scale,x,y,scoreLowerBound,scoreUpperBound,evaluatedPoints,incumbentScore",
+                "refinedColumns" to "step,scale,x,y,scoreLowerBound,scoreUpperBound,evaluatedPoints,incumbentScore",
                 "selectedColumns" to "scale,x,y,score,gate","scoringPolicy" to "unchanged-forward-128-spatial-sample-v1",
                 "coarseOffsets" to "fast=-3,0,3; balanced=12-pixel-grid-inside-gate-residual-radius",
                 "refineOffsets" to "seed-residual-preserved; -3..3",
                 "passes" to "0.08/0.02/1;0.04/0.01/4",
-                "pruning" to "exact-remaining-score-upper-bound; full-coarse-scores-recorded-when-diagnostics-enabled"),
+                "pruning" to "exact-remaining-score-upper-bound-including-diagnostics; equal-bounds-are-full-scores; pruned-upper-bound-below-incumbent"),
             series = mapOf("coarse" to requireNotNull(coarseEvidence),
                 "refined" to requireNotNull(refinedEvidence),
                 "selected" to unique.flatMap { listOf(it.scale,it.x,it.y,it.score,it.gate.toDouble()) })))
@@ -383,7 +432,8 @@ internal object SparseGateSearch {
     fun refine(index: Index, seed: Pose, sample: List<Pixel>, dense: List<Pixel>, contours: List<List<Pixel>>,
         width: Int, height: Int, ax: Double, ay: Double, gx: Double, gy: Double,
         minimum: Double, maximum: Double, maximumGateResidual: Double = 42.0,
-        reverse: ReverseObservation? = null): Pair<Pose,Evidence>? {
+        reverse: ReverseObservation? = null, log: AlignmentLogSink = AlignmentLogSink.NONE): Pair<Pose,Evidence>? {
+        val started = System.nanoTime()
         data class Proposal(val pose: Pose, val hits: Int, val distance: Double)
         val proposals = ArrayList<Proposal>()
         val ordering = compareByDescending<Proposal> { it.hits }.thenBy { it.distance }
@@ -418,14 +468,58 @@ internal object SparseGateSearch {
             }
             proposals += scaleProposals
         }
+        val proposalNanos = System.nanoTime()-started
+        var forwardNanos = 0L; var reverseNanos = 0L; var reversePasses = 0
+        val scratch = if (reverse == null) null else IntArray(index.edgePositions.size)
+        val recorded = if (log.enabled) ArrayList<Double>() else null
         var best: Pair<Pose,Evidence>? = null
         for (p in proposals.sortedWith(compareByDescending<Proposal> { it.hits }.thenBy { it.distance })) {
             com.idvb.android.alignment.AlignmentCancellation.checkpoint("scan.side.refine-verification")
-            val evidence = verify(index,p.pose,dense,contours,width,height,acceptanceOnly=true,reverse=reverse)
+            val incumbent = best?.second
+            val forwardStarted = System.nanoTime()
+            val forward = verify(index,p.pose,dense,contours,width,height,acceptanceOnly=true,competitive=incumbent)
+            forwardNanos += System.nanoTime()-forwardStarted
+            val evidence = if (forward.supported && reverse != null) {
+                val reverseStarted = System.nanoTime()
+                reversePasses++
+                reverseEvidence(index,p.pose,reverse,forward,requireNotNull(scratch)).also {
+                    reverseNanos += System.nanoTime()-reverseStarted
+                }
+            } else forward
+            recorded?.apply {
+                add(p.pose.scale); add(p.pose.x); add(p.pose.y); add(p.hits.toDouble()); add(p.distance)
+                add(max(.88,incumbent?.bidirectionalSupport ?: .88)); add(evidence.support); add(evidence.mean)
+                add(evidence.total.toDouble()); add(evidence.longest); add(evidence.reverseSupport); add(evidence.reversePoints.toDouble())
+                add(evidence.reverseEligiblePoints.toDouble()); add(evidence.cells.toDouble()); add(if (evidence.spatialConflict) 1.0 else 0.0)
+                add(when (evidence.conflictDetail) {
+                    "incumbent-support-upper-bound" -> 1.0
+                    "incumbent-forward-dominance" -> 2.0
+                    else -> if (!forward.supported) 3.0 else if (!evidence.supported) 4.0 else 0.0
+                })
+            }
             if (evidence.supported && (best == null || evidence.bidirectionalSupport > best.second.bidirectionalSupport ||
                 evidence.bidirectionalSupport == best.second.bidirectionalSupport && evidence.mean < best.second.mean))
                 best = p.pose to evidence
         }
+        if (log.enabled) log.emit(AlignmentLogEvent("scan.side.refine",if (best == null) "no-supported-refinement" else "supported",
+            durationNanos=System.nanoTime()-started,
+            measurements=mapOf("proposalMs" to proposalNanos/1e6,"forwardMs" to forwardNanos/1e6,"reverseMs" to reverseNanos/1e6,
+                "proposals" to proposals.size.toDouble(),"reversePasses" to reversePasses.toDouble(),
+                "seedScale" to seed.scale,"seedX" to seed.x,"seedY" to seed.y,
+                "samplePoints" to sample.size.toDouble(),"densePoints" to dense.size.toDouble(),
+                "reverseFirstRevealedRow" to (reverse?.firstRevealedRow ?: -1).toDouble(),
+                "reverseLastRevealedRow" to (reverse?.lastRevealedRow ?: -1).toDouble(),
+                "anchorX" to ax,"anchorY" to ay,"gateX" to gx,"gateY" to gy),
+            thresholds=mapOf("minimumScale" to minimum,"maximumScale" to maximum,"maximumGateResidual" to maximumGateResidual,
+                "minimumSupport" to .88,"scaleRadius" to .015,"scaleStep" to .001,"translationRadius" to 3.0,"proposalsPerScale" to 8.0),
+            series=mapOf("candidates" to requireNotNull(recorded),"selected" to best?.let { listOf(it.first.scale,it.first.x,it.first.y,
+                it.second.bidirectionalSupport,it.second.mean) }.orEmpty()),
+            labels=mapOf("columns" to "scale,x,y,sampleHits,sampleDistance,incumbentSupport,forwardSupport,mean,evaluatedForwardPoints,longestConflict,reverseSupport,reversePoints,reverseEligiblePoints,supportedCells,spatialConflict,decision",
+                "decisions" to "0=supported;1=remaining-forward-support-upper-bound;2=full-forward-dominated;3=forward-gates-rejected;4=reverse-gates-rejected",
+                "gateThresholds" to "sparseGateScan.structuralThresholds; forward-distance=5.5; forward-support=0.88; cells=30/0.70; conflict-length<30; reverse-points>=80; reverse-support>=0.65",
+                "reverseIteration" to "row-major-reference-edges; inverse-revealed-row-bounds-with-one-reference-row-padding; unchanged-observable-and-round-to-live-domain-predicate; unchanged-uniform-2048-sample-order",
+                "pruning" to "unchanged-support-then-mean-winner-objective; reverse-never-improves-forward-upper-bound; strict-ties-retain-incumbent",
+                "timingScope" to "proposal-forward-reverse-independent; nested-in-refine-total; event-format-and-append-outside-stage")))
         return best
     }
 

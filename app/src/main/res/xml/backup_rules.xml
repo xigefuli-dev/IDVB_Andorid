@@ -7,6 +7,7 @@
 -->
 <full-backup-content>
     <exclude domain="sharedpref" path="mandatory_usage_consent.xml" />
+    <exclude domain="sharedpref" path="mandatory_usage_rules.xml" />
     <!--
    <include domain="sharedpref" path="."/>
    <exclude domain="sharedpref" path="device.xml"/>

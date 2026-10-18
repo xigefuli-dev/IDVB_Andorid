@@ -28,6 +28,7 @@ import kotlinx.serialization.json.*
 import java.util.zip.ZipFile
 
 class VpsgAlignmentInstrumentedTest {
+    @get:org.junit.Rule val usageRules = com.idvb.android.consent.AcceptedUsageRulesFixture()
     @Test fun selectedSecondFloorAlignsInScreenCoordinatesWithoutScanningOtherIdentities() {
         val target = InstrumentationRegistry.getInstrumentation().targetContext
         val isolated = File(target.cacheDir, "alignment-${UUID.randomUUID()}").apply { mkdirs() }

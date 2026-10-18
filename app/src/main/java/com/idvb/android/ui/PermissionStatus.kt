@@ -14,6 +14,7 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -29,6 +30,9 @@ import com.idvb.android.recognize.ScreenCaptureGrant
 import com.idvb.android.recognize.AccessibilityScreenCaptureService
 import com.idvb.android.data.ScreenCaptureMethod
 import com.idvb.android.AppServices
+import com.idvb.android.recognize.CaptureHealthMonitor
+import com.idvb.android.recognize.CaptureHealthSnapshot
+import com.idvb.android.recognize.CaptureAvailability
 
 data class PermissionSnapshot(
     val overlay: Boolean,
@@ -39,7 +43,16 @@ data class PermissionSnapshot(
     val batteryOptimization: Boolean,
     val captureMethod: ScreenCaptureMethod,
     val batteryOptimizationSkipped: Boolean = false,
+    val captureHealth: CaptureHealthSnapshot = CaptureHealthSnapshot(captureMethod),
 ) {
+    val captureVerified: Boolean get() = screenCapture && captureHealth.source == captureMethod &&
+        captureHealth.availability == CaptureAvailability.HEALTHY
+    val captureStatusText: String get() = when {
+        captureHealth.availability == CaptureAvailability.UNAVAILABLE ->
+            (if (screenCapture) "开关已开，但实测失败：" else "截图不可用：") + captureHealth.description
+        !screenCapture -> "尚未授权或服务未连接"
+        else -> captureHealth.description
+    }
     val batteryRequirementSatisfied: Boolean
         get() = batteryOptimization || batteryOptimizationSkipped
 
@@ -109,9 +122,11 @@ fun rememberPermissionController(): PermissionController {
 
     val screenCaptureAvailable = ScreenCaptureGrant.available
     val captureMethod = AppServices.prefs.screenCaptureMethod
-    val snapshot = remember(context, refreshTick, screenCaptureAvailable, captureMethod, batterySkippedForSession) {
+    val health by CaptureHealthMonitor.state.collectAsState()
+    val snapshot = remember(context, refreshTick, screenCaptureAvailable, captureMethod, batterySkippedForSession, health) {
         permissionSnapshot(context, screenCaptureAvailable, captureMethod).copy(
             batteryOptimizationSkipped = batterySkippedForSession || AppServices.prefs.skipBatteryOptimization,
+            captureHealth = health.getValue(captureMethod),
         )
     }
     val requestNextMissing = {

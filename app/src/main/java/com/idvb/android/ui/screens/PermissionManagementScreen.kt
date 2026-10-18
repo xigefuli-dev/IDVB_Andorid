@@ -53,7 +53,8 @@ private fun SkipOption(label: String, checked: Boolean, onChange: (Boolean) -> U
 }
 
 @Composable
-fun PermissionManagementScreen(permissions: PermissionSnapshot, onBack: () -> Unit, onChanged: () -> Unit) {
+fun PermissionManagementScreen(permissions: PermissionSnapshot, onBack: () -> Unit, onChanged: () -> Unit,
+    onCaptureRecovery: () -> Unit = {}) {
     val context = LocalContext.current
     var permanent by remember { mutableStateOf(AppServices.prefs.skipBatteryOptimization) }
     var hideDialog by remember { mutableStateOf(AppServices.prefs.hideBatterySkipDialog) }
@@ -62,6 +63,20 @@ fun PermissionManagementScreen(permissions: PermissionSnapshot, onBack: () -> Un
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回") }
             Text("权限管理", style = MaterialTheme.typography.headlineSmall)
         }
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp)) {
+                Text("截图实测状态", style = MaterialTheme.typography.titleMedium)
+                Text(permissions.captureStatusText, color = if (permissions.captureVerified)
+                    MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                Text("状态点：绿色为最近实测正常，黄色为未实测，红色为不可用。")
+                permissions.captureHealth.lastSuccessElapsedMs?.let { last ->
+                    val seconds = ((android.os.SystemClock.elapsedRealtime() - last) / 1_000).coerceAtLeast(0)
+                    Text("最近真实截图成功：约 $seconds 秒前", style = MaterialTheme.typography.bodySmall)
+                }
+                TextButton(onClick = onCaptureRecovery) { Text("检查截图 / 重新授权") }
+            }
+        }
+        Spacer(Modifier.height(16.dp))
         Text("跳过的权限", style = MaterialTheme.typography.titleMedium)
         Spacer(Modifier.height(12.dp))
         Card(Modifier.fillMaxWidth()) {

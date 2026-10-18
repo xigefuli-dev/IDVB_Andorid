@@ -7,6 +7,7 @@
 #include <chrono>
 #include <atomic>
 #include <new>
+#include <cstring>
 #ifdef __aarch64__
 #include <arm_neon.h>
 #endif
@@ -511,17 +512,68 @@ Java_com_idvb_android_recognize_vpsg_VpsgNativeKernel_precisionLossesNative(
     }
     Cancellation cancellation(env, token);
     std::vector<double> output(size);
+    // The existing 3 x 3 x 3 refinement grid repeats each (scale, axis shift)
+    // vector. Preserve the exact division and interpolation arithmetic while
+    // computing these repeated coordinates once per JNI batch. A single-use
+    // axis stays scalar, including the initial one-pose loss evaluation.
+    struct Axis {
+        double scale, shift;
+        int uses = 1;
+        std::vector<int> indices;
+        std::vector<double> fractions;
+    };
+    std::vector<Axis> axesX, axesY;
+    std::vector<int> poseX(size), poseY(size);
+    auto sameBits = [](double a, double b) {
+        return std::memcmp(&a, &b, sizeof(double)) == 0;
+    };
+    auto axisFor = [&](std::vector<Axis>& axes, double scale, double shift) {
+        for (int a = 0; a < static_cast<int>(axes.size()); ++a)
+            if (sameBits(axes[a].scale, scale) && sameBits(axes[a].shift, shift)) {
+                ++axes[a].uses; return a;
+            }
+        axes.push_back(Axis{scale, shift, 1, {}, {}});
+        return static_cast<int>(axes.size()) - 1;
+    };
+    for (int pose = 0; pose < size; ++pose) {
+        poseX[pose] = axisFor(axesX, poses.data[pose * 3], poses.data[pose * 3 + 1]);
+        poseY[pose] = axisFor(axesY, poses.data[pose * 3], poses.data[pose * 3 + 2]);
+    }
+    auto prepareAxes = [&](std::vector<Axis>& axes, int dimension, double center, double referenceCenter, int limit) {
+        for (auto& axis : axes) if (axis.uses > 1) {
+            axis.indices.resize(count, -1); axis.fractions.resize(count);
+            for (int i = 0; i < count; ++i) {
+                if ((i & 1023) == 0 && cancellation.cancelled()) return false;
+                const double value = referenceCenter + (points.data[2 * i + dimension] - center - axis.shift) / axis.scale;
+                if (std::isfinite(value) && value >= 0 && value < limit - 1) {
+                    axis.indices[i] = static_cast<int>(value);
+                    axis.fractions[i] = value - axis.indices[i];
+                }
+            }
+        }
+        return true;
+    };
+    if (!prepareAxes(axesX, 0, cx, rcx, width) || !prepareAxes(axesY, 1, cy, rcy, height)) return nullptr;
     for (int pose = 0; pose < size; ++pose) {
         if (cancellation.cancelled()) return nullptr;
         const double scale = poses.data[pose * 3], dx = poses.data[pose * 3 + 1], dy = poses.data[pose * 3 + 2];
+        const auto& axisX = axesX[poseX[pose]]; const auto& axisY = axesY[poseY[pose]];
         std::array<double, 4> sums{};
         for (int i = 0; i < count; ++i) {
-            const double x = rcx + (points.data[2 * i] - cx - dx) / scale;
-            const double y = rcy + (points.data[2 * i + 1] - cy - dy) / scale;
+            if ((i & 1023) == 0 && cancellation.cancelled()) return nullptr;
+            int ix = -1, iy = -1; double fx = 0, fy = 0;
+            if (axisX.uses > 1) { ix = axisX.indices[i]; fx = axisX.fractions[i]; }
+            else {
+                const double x = rcx + (points.data[2 * i] - cx - dx) / scale;
+                if (std::isfinite(x) && x >= 0 && x < width - 1) { ix = static_cast<int>(x); fx = x - ix; }
+            }
+            if (axisY.uses > 1) { iy = axisY.indices[i]; fy = axisY.fractions[i]; }
+            else {
+                const double y = rcy + (points.data[2 * i + 1] - cy - dy) / scale;
+                if (std::isfinite(y) && y >= 0 && y < height - 1) { iy = static_cast<int>(y); fy = y - iy; }
+            }
             double d = 50.0;
-            if (std::isfinite(x) && std::isfinite(y) && x >= 0 && y >= 0 && x < width - 1 && y < height - 1) {
-                const int ix = static_cast<int>(x), iy = static_cast<int>(y);
-                const double fx = x - ix, fy = y - iy;
+            if (ix >= 0 && iy >= 0) {
                 const double top = distances[iy * width + ix] * (1 - fx) + distances[iy * width + ix + 1] * fx;
                 const double bottom = distances[(iy + 1) * width + ix] * (1 - fx) + distances[(iy + 1) * width + ix + 1] * fx;
                 d = (top * (1 - fy) + bottom * fy) * scale;

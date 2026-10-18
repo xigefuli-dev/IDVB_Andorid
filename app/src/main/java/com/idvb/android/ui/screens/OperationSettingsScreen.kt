@@ -35,7 +35,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.idvb.android.AppServices
-import com.idvb.android.UsageConsent
 import com.idvb.android.alignment.AutoMapOpenReferenceStore
 import com.idvb.android.overlay.OverlayService
 import com.idvb.android.data.EyeButtonAction

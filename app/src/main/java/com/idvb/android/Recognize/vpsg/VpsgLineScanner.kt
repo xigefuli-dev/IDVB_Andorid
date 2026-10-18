@@ -93,7 +93,8 @@ internal class VpsgLineScanner(private val repository: MapRepository,
     private data class Pixel(val x: Int, val y: Int)
     private data class PoseKey(val scale: Double, val x: Double, val y: Double)
     /** Request-owned evidence only. Different source indices cannot share a verification. */
-    private class PoseVerificationCache(val index: VpsgFastSolver.Index, pixels: List<Pixel>, contours: List<List<Pixel>>) {
+    private class PoseVerificationCache(val index: VpsgFastSolver.Index, pixels: List<Pixel>, contours: List<List<Pixel>>,
+        val sourceIndices: MutableMap<String,VpsgFastSolver.Index>) {
         val points = IntArray(pixels.size * 2) { if (it and 1 == 0) pixels[it / 2].x else pixels[it / 2].y }
         val segments = IntArray(contours.filter { it.size >= 2 }.sumOf { it.size } * 4).also { data ->
             var at = 0
@@ -472,16 +473,31 @@ internal class VpsgLineScanner(private val repository: MapRepository,
         enforceConflictLength: Boolean = true): Fit? {
         val stageStarted = System.nanoTime()
         val generation = "${floor.map.mapVersion}|${floor.record.prebuiltStructureLine}"
-        val prepared = log.measure("vpsg.prepare-index.total") { VpsgPreparedIndex.load(floor.proposalFile, generation, log) }
+        // Alternative scales belong to the same floor/request. The bounded global
+        // LRU may evict this active floor while other workers prepare their floors;
+        // keep its immutable indices with the existing pose evidence instead of
+        // rebuilding them and thereby invalidating the exact-pose cache.
+        val sourceIndices = verificationCache?.sourceIndices ?: linkedMapOf()
+        fun loadIndex(file: java.io.File, stage: String): VpsgFastSolver.Index = log.measure(stage) {
+            val key = "${file.canonicalPath}|$generation|${file.length()}|${file.lastModified()}"
+            sourceIndices[key]?.let {
+                log.emit(AlignmentLogEvent("vpsg.prepare-index.request-cache", "same-request-source-hit",
+                    measurements = mapOf("bytes" to it.bytes.toDouble()),
+                    labels = mapOf("sourceKey" to key,"scope" to "same-floor-request; immutable-index; metadata-generation-checked")))
+                return@measure it
+            }
+            VpsgPreparedIndex.load(file,generation,log).also { sourceIndices[key] = it }
+        }
+        val prepared = loadIndex(floor.proposalFile,"vpsg.prepare-index.total")
         val verificationPrepared = if (floor.file == floor.proposalFile) prepared else
-            log.measure("vpsg.prepare-verification-index.total") { VpsgPreparedIndex.load(floor.file, generation, log) }
+            loadIndex(floor.file,"vpsg.prepare-verification-index.total")
         val structuralPrepared = when (floor.structuralFile) {
             floor.file -> verificationPrepared
             floor.proposalFile -> prepared
-            else -> log.measure("vpsg.prepare-structural-index.total") { VpsgPreparedIndex.load(floor.structuralFile, generation, log) }
+            else -> loadIndex(floor.structuralFile,"vpsg.prepare-structural-index.total")
         }
         val evidenceCache = verificationCache?.takeIf { it.index === verificationPrepared }
-            ?: PoseVerificationCache(verificationPrepared, livePixels, contours)
+            ?: PoseVerificationCache(verificationPrepared, livePixels, contours,sourceIndices)
         val maximumScale = if (precision) VpsgAlignmentTuning.MAX_SELECTED_SCALE else VpsgAlignmentTuning.MAX_SCALE
         // Measured only when Y recovery/search is needed, shared by the two paths.
         val verticalReference by lazy {
@@ -558,17 +574,17 @@ internal class VpsgLineScanner(private val repository: MapRepository,
         val refined = selected.map { refine(it) }
         val verificationStarted = System.nanoTime()
                 val index = DistanceIndex(verificationPrepared.width, verificationPrepared.height, verificationPrepared.distance,
-                    if (VpsgNativeKernel.available) verificationPrepared.nativeDistance else null)
+                    if (VpsgNativeKernel.available) log.measure("vpsg.prepare-verification-distance.total") { verificationPrepared.nativeDistance } else null)
                 // Precision must not punish real interior boundaries omitted by proposal geometry.
                 // Search stays on the sparse wall model; refinement uses complete measured source evidence.
                 val precisionPrepared = when (floor.precisionFile) {
                     floor.file -> verificationPrepared
                     floor.proposalFile -> prepared
-                    else -> log.measure("vpsg.prepare-precision-index.total") { VpsgPreparedIndex.load(floor.precisionFile, generation, log) }
+                    else -> loadIndex(floor.precisionFile,"vpsg.prepare-precision-index.total")
                 }
                 val precisionIndex = if (precisionPrepared === verificationPrepared) index else
                     DistanceIndex(precisionPrepared.width, precisionPrepared.height, precisionPrepared.distance,
-                        if (VpsgNativeKernel.available) precisionPrepared.nativeDistance else null)
+                        if (VpsgNativeKernel.available) log.measure("vpsg.prepare-precision-distance.total") { precisionPrepared.nativeDistance } else null)
                 val referenceEdges = ReferenceEdges(structuralPrepared.width, requireNotNull(structuralPrepared.edgePositions),
                     if (VpsgNativeKernel.available) structuralPrepared.nativeEdges else null)
                 log.emit(AlignmentLogEvent("vpsg.verify.reference-index", "shared-prepared-immutable-index",

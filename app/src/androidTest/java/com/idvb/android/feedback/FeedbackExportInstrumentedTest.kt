@@ -10,6 +10,7 @@ import java.io.File
 import java.util.zip.ZipFile
 
 class FeedbackExportInstrumentedTest {
+    @get:org.junit.Rule val usageRules = com.idvb.android.consent.AcceptedUsageRulesFixture()
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
 
     @Test

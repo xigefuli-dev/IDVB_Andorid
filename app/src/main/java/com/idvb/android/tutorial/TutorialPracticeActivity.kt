@@ -26,7 +26,7 @@ class TutorialPracticeActivity : ComponentActivity() {
     private val store by lazy { TutorialStore.get(this) }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (!com.idvb.android.UsageConsent.isAccepted(this)) {
+        if (!com.idvb.android.StartupRequirements.isAccepted(this)) {
             startActivity(android.content.Intent(this, com.idvb.android.MainActivity::class.java))
             finish()
             return

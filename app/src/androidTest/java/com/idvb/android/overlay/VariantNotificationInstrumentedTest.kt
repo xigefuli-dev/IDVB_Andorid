@@ -22,6 +22,7 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class VariantNotificationInstrumentedTest {
+    @get:org.junit.Rule val usageRules = com.idvb.android.consent.AcceptedUsageRulesFixture()
     @Test
     fun selectingVariantCandidateAndSwitchingVariantsShowAmberWarningNotifications() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()

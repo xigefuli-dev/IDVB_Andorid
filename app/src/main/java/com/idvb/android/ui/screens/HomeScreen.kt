@@ -22,7 +22,7 @@ import com.idvb.android.ui.theme.SignalGreenDeep
 import com.idvb.android.ui.theme.SignalGreen
 import com.idvb.android.data.ScreenCaptureMethod
 
-private data class PermissionItem(val title: String, val detail: String, val granted: Boolean)
+private data class PermissionItem(val title: String, val detail: String, val granted: Boolean, val status: String? = null)
 
 @Composable
 fun HomeScreen(
@@ -35,15 +35,20 @@ fun HomeScreen(
         PermissionItem("悬浮窗", "在其他应用上层显示地图", permissions.overlay),
         PermissionItem(
             if (permissions.captureMethod == ScreenCaptureMethod.ACCESSIBILITY) "无障碍" else "屏幕捕获",
-            if (permissions.captureMethod == ScreenCaptureMethod.ACCESSIBILITY) "通过 IDVB 无障碍服务截取识别画面" else "读取当前屏幕画面以进行识别",
-            permissions.screenCapture,
+            permissions.captureStatusText,
+            permissions.captureVerified,
+            when (permissions.captureHealth.availability) {
+                com.idvb.android.recognize.CaptureAvailability.HEALTHY -> if (permissions.screenCapture) "实测正常" else "未连接"
+                com.idvb.android.recognize.CaptureAvailability.UNAVAILABLE -> "实测失败"
+                else -> "未实测"
+            },
         ),
         PermissionItem("通知", "显示服务运行状态与控制入口", permissions.notifications),
         PermissionItem("前台服务", "FOREGROUND_SERVICE", permissions.foregroundService),
         if (permissions.captureMethod == ScreenCaptureMethod.MEDIA_PROJECTION) {
             PermissionItem("媒体投影服务", "FOREGROUND_SERVICE_MEDIA_PROJECTION", permissions.mediaProjectionService)
         } else {
-            PermissionItem("截图服务", "AccessibilityService.takeScreenshot", permissions.screenCapture)
+            PermissionItem("截图服务", permissions.captureStatusText, permissions.captureVerified)
         },
         PermissionItem("电池优化白名单", "允许忽略后台高耗电限制", permissions.batteryOptimization),
     )
@@ -57,6 +62,7 @@ fun HomeScreen(
         Text(
             text = when {
                 !hasMaps -> "需先导入地图包并完成权限设置后才能运行。"
+                permissions.captureHealth.availability == com.idvb.android.recognize.CaptureAvailability.UNAVAILABLE -> permissions.captureStatusText
                 permissions.readyToStart -> "准备就绪，可以启动服务。"
                 else -> "请完成权限设置；无法获取电池优化白名单时可以跳过并运行。"
             },
@@ -95,8 +101,8 @@ fun HomeScreen(
                             if (permissions.batteryOptimizationSkipped && !permissions.batteryOptimization) " · 电池权限已跳过" else "",
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    Box(Modifier.size(42.dp).background(if (permissions.readyToStart) SignalGreenDeep else Color(0xFF34373B), RoundedCornerShape(2.dp)), contentAlignment = Alignment.Center) {
-                        Icon(if (permissions.readyToStart) Icons.Rounded.Check else Icons.Rounded.Close, null, tint = if (permissions.readyToStart) Color.White else SignalGreen)
+                    Box(Modifier.size(42.dp).background(if (permissions.readyToStart && permissions.captureVerified) SignalGreenDeep else Color(0xFF34373B), RoundedCornerShape(2.dp)), contentAlignment = Alignment.Center) {
+                        Icon(if (permissions.readyToStart && permissions.captureVerified) Icons.Rounded.Check else Icons.Rounded.Close, null, tint = if (permissions.readyToStart && permissions.captureVerified) Color.White else SignalGreen)
                     }
                 }
                 Spacer(Modifier.height(18.dp))
@@ -130,7 +136,7 @@ private fun PermissionRow(item: PermissionItem) {
             Text(item.title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
             Text(item.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Text(if (item.granted) "已获得" else "未获得", style = MaterialTheme.typography.labelMedium, color = if (item.granted) SignalGreenDeep else MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(item.status ?: if (item.granted) "已获得" else "未获得", style = MaterialTheme.typography.labelMedium, color = if (item.granted) SignalGreenDeep else MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

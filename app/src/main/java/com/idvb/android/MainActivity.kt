@@ -132,13 +132,15 @@ class MainActivity : ComponentActivity() {
 
     private var catalogTick by mutableIntStateOf(0)
     private var openHomeRequest by mutableIntStateOf(0)
+    private var captureRecoveryRequest by mutableIntStateOf(0)
     private var tutorialEntryConfirmed by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (!UsageConsent.isAccepted(this)) {
-            UsageConsent.show(this)
-            return
+        if (StartupRequirements.showIfRequired(this)) return
+        if (intent?.action == ACTION_RECOVER_CAPTURE) {
+            captureRecoveryRequest++
+            intent.action = ACTION_OPEN_HOME
         }
         AppServices.startRecognitionPreparation()
         enableEdgeToEdge()
@@ -210,6 +212,15 @@ class MainActivity : ComponentActivity() {
                     if (page == "main") showExitConfirmation = true else navigateUp()
                 }
                 val permissions = rememberPermissionController()
+                LaunchedEffect(captureRecoveryRequest) {
+                    if (captureRecoveryRequest > 0 && tutorial.completed && StartupRequirements.isAccepted(this@MainActivity)) {
+                        page = "main"; tab = 0
+                        permissions.refresh()
+                        if (AppServices.prefs.screenCaptureMethod == ScreenCaptureMethod.MEDIA_PROJECTION)
+                            permissions.requestScreenCapture { OverlayService.start(this@MainActivity) }
+                        else com.idvb.android.ui.openAccessibilityServiceSettings(this@MainActivity)
+                    }
+                }
                 var showTutorialStartNotice by remember { mutableStateOf(false) }
                 val tutorialBlocksStart = {
                     val current = tutorialStore.state.value
@@ -415,6 +426,7 @@ class MainActivity : ComponentActivity() {
                                             permissions = permissions.snapshot,
                                             onBack = navigateUp,
                                             onChanged = permissions.restoreBatteryRequirement,
+                                            onCaptureRecovery = { captureRecoveryRequest++ },
                                         )
                                         "vision-settings" -> VisionSettingsScreen(onBack = navigateUp)
                                         "operation-settings" -> OperationSettingsScreen(onBack = navigateUp)
@@ -613,16 +625,21 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         if (intent.action == ACTION_OPEN_HOME) openHomeRequest++
+        if (intent.action == ACTION_RECOVER_CAPTURE) {
+            captureRecoveryRequest++
+            intent.action = ACTION_OPEN_HOME
+        }
         handleFileIntent(intent)
     }
 
     companion object {
         /** 通知栏进入应用时始终落在首页，不能遗留在外部设置跳转前的子页。 */
         const val ACTION_OPEN_HOME = "com.idvb.android.OPEN_HOME"
+        const val ACTION_RECOVER_CAPTURE = "com.idvb.android.RECOVER_CAPTURE"
     }
 
     private fun handleFileIntent(intent: Intent?) {
-        if (!UsageConsent.isAccepted(this)) return
+        if (!StartupRequirements.isAccepted(this)) return
         if (com.idvb.android.onboarding.FeatureGuideRegistry.pending(AppServices.prefs.completedFeatureGuides).isNotEmpty()) return
         val progress = TutorialStore.get(this).state.value
         if (!progress.completed && !tutorialEntryConfirmed) return

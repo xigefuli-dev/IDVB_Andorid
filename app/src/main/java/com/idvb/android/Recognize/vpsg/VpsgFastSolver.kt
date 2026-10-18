@@ -20,16 +20,20 @@ internal object VpsgFastSolver {
     data class Index(val width: Int, val height: Int, val k3: LongArray, val k5: LongArray,
         val prior: Peak, val edgeCount: Int,
         val distance: FloatArray? = null, val edgePositions: IntArray? = null,
-        private val nativeDistanceStorage: java.nio.ByteBuffer? = null) {
+        private val nativeDistanceStorage: java.nio.ByteBuffer? = null,
+        private val nativeDistanceFactory: (() -> java.nio.ByteBuffer)? = null) {
         val wordsPerRow = (width + 63) / 64
         val stride4: LongArray by lazy { VpsgNativeKernel.prepareStride4(k3, width, height) }
         val nativeK3 by lazy { VpsgNativeKernel.direct(k3) }
         val nativeK5 by lazy { VpsgNativeKernel.direct(k5) }
         val nativeStride4 by lazy { VpsgNativeKernel.direct(stride4) }
         val nativeEdges by lazy { VpsgNativeKernel.direct(requireNotNull(edgePositions)) }
-        val nativeDistance by lazy { nativeDistanceStorage ?: VpsgNativeKernel.direct(requireNotNull(distance)) }
+        private val distanceStorage = lazy { nativeDistanceStorage ?: nativeDistanceFactory?.invoke()
+            ?: VpsgNativeKernel.direct(requireNotNull(distance)) }
+        val nativeDistance get() = distanceStorage.value
+        val nativeDistanceReady get() = distanceStorage.isInitialized()
         val bytes: Long get() = (k3.size + k5.size) * 16L + 8L * ((width + 255) / 256) * height * 8L +
-            (distance?.size ?: 0) * 8L + (nativeDistanceStorage?.capacity() ?: 0) + (edgePositions?.size ?: 0) * 8L
+            (distance?.size ?: 0) * 8L + (nativeDistanceStorage?.capacity()?.toLong() ?: if (nativeDistanceFactory != null) width.toLong()*height*4 else 0L) + (edgePositions?.size ?: 0) * 8L
         fun hit(words: LongArray, x: Int, y: Int): Boolean =
             x >= 0 && y >= 0 && x < width && y < height &&
                 (words[y * wordsPerRow + (x ushr 6)] ushr (x and 63) and 1L) != 0L

@@ -72,25 +72,28 @@ internal object VpsgPreparedIndex {
                 }
                 positions
             }
-            val distance = log.measure("vpsg.prepare-index.distance") {
+            val native = VpsgNativeKernel.available
+            // nativeDistance was already lazy, but its transform was built eagerly
+            // even for proposal/reverse-only indices. Initialize that same storage
+            // only when a distance consumer uses it; retain immutable edge positions,
+            // never a borrowed Mat, source bitmap, context or diagnostics sink.
+            val distance = if (native) null else log.measure("vpsg.prepare-index.distance") {
                 val inverted = Mat(); val result = Mat()
                 try {
                     Core.bitwise_not(binary, inverted)
                     AlignmentCancellation.checkpoint("vpsg.prepare-index.distance-transform")
                     Imgproc.distanceTransform(inverted, result, Imgproc.DIST_L2, Imgproc.DIST_MASK_PRECISE)
-                    if (VpsgNativeKernel.available) {
-                        val owned = java.nio.ByteBuffer.allocateDirect(width * height * 4).order(java.nio.ByteOrder.nativeOrder())
-                        owned.put(VpsgNativeKernel.borrowBuffer(result.dataAddr(), width * height * 4L)).rewind()
-                        null to owned
-                    } else FloatArray(width * height).also { result.get(0, 0, it) } to null
+                    FloatArray(width * height).also { result.get(0, 0, it) }
                 } finally { inverted.release(); result.release() }
             }
             val result = log.measure("vpsg.prepare-index.pack") {
-                VpsgFastSolver.Index(width, height, pack(k3), pack(k5), prior, edges.size, distance.first, edges, distance.second)
+                VpsgFastSolver.Index(width, height, pack(k3), pack(k5), prior, edges.size, distance, edges,
+                    nativeDistanceFactory = if (native) ({ nativeDistance(width,height,edges) }) else null)
             }
             if (log.enabled) log.emit(AlignmentLogEvent("vpsg.prepare-index.result", measurements = mapOf(
                 "width" to width.toDouble(), "height" to height.toDouble(), "bytes" to result.bytes.toDouble(),
-                "edgeCount" to result.edgeCount.toDouble(), "referencePitch" to prior.pitch, "pitchRatio" to prior.ratio),
+                    "edgeCount" to result.edgeCount.toDouble(), "referencePitch" to prior.pitch, "pitchRatio" to prior.ratio),
+                labels = mapOf("distanceStorage" to if (native) "existing-native-lazy-storage; transform-on-first-consumer; bytes-budget-includes-full-transform" else "managed-eager"),
                 thresholds = mapOf("binarizeThreshold" to 127.0, "minimumDimension" to 100.0,
                     "k3" to 3.0, "k5" to 5.0, "maximumCacheBytes" to MAX_BYTES.toDouble()),
                 series = mapOf("referenceProjection" to projection.toList())))
@@ -105,6 +108,26 @@ internal object VpsgPreparedIndex {
             }
             return result
         } finally { gray.release(); binary.release(); k3.release(); k5.release() }
+    }
+
+    private fun nativeDistance(width: Int,height: Int,edges: IntArray): java.nio.ByteBuffer {
+        val binary = Mat(height,width,org.opencv.core.CvType.CV_8UC1)
+        val inverted = Mat(); val result = Mat()
+        try {
+            val pixels = ByteArray(width*height)
+            for (i in edges.indices) {
+                if (i and 1023 == 0) AlignmentCancellation.checkpoint("vpsg.prepare-index.distance-reconstruct")
+                pixels[edges[i]] = 255.toByte()
+            }
+            binary.put(0,0,pixels)
+            Core.bitwise_not(binary,inverted)
+            AlignmentCancellation.checkpoint("vpsg.prepare-index.distance-transform")
+            Imgproc.distanceTransform(inverted,result,Imgproc.DIST_L2,Imgproc.DIST_MASK_PRECISE)
+            AlignmentCancellation.checkpoint("vpsg.prepare-index.distance-copy")
+            return java.nio.ByteBuffer.allocateDirect(width*height*4).order(java.nio.ByteOrder.nativeOrder()).also {
+                it.put(VpsgNativeKernel.borrowBuffer(result.dataAddr(),width*height*4L)).rewind()
+            }
+        } finally { binary.release(); inverted.release(); result.release() }
     }
 
     fun projection(pixels: ByteArray, width: Int, height: Int): DoubleArray {

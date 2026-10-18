@@ -20,6 +20,7 @@ import org.junit.Test
 import java.io.File
 
 class OperationSettingsInstrumentedTest {
+    @get:org.junit.Rule val usageRules = com.idvb.android.consent.AcceptedUsageRulesFixture()
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val automation get() = instrumentation.uiAutomation
 
