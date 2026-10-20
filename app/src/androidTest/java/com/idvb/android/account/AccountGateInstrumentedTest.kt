@@ -122,14 +122,16 @@ class AccountGateInstrumentedTest {
             } finally { bitmap.recycle() }
         }
         ActivityScenario.launch(MainActivity::class.java).use {
-            find("IDVB 账户")
+            find("登录账户")
             find("密码")
             capture("login")
             click("注册")
             find("昵称")
-            find("@qq.com")
+            find("确认密码")
             capture("register")
-            click("找回密码")
+            click("返回")
+            click("忘记密码？")
+            find("重置密码")
             find("邮箱")
             find("发送验证码")
             capture("reset")
