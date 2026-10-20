@@ -9,6 +9,8 @@ import android.os.Process
 import androidx.core.content.FileProvider
 import com.idvb.android.BuildConfig
 import com.idvb.android.StartupRequirements
+import com.idvb.android.AppServices
+import com.idvb.android.account.OnlineEndpoints
 import com.idvb.android.diagnostics.HistoryArchive
 import org.json.JSONObject
 import java.io.File
@@ -22,7 +24,7 @@ import java.util.concurrent.TimeUnit
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-/** Only explicitly selected attachments leave private app storage. No account or device ID. */
+/** Explicit submission associates feedback with the validated account. Attachments stay private until sent. */
 class FeedbackService(private val context: Context) {
     fun submit(description: String, includeLogs: Boolean = true, includeDiagnostics: Boolean = true): String {
         check(StartupRequirements.isAccepted(context)) { "请先确认软件性质及使用责任声明和 IDVB 使用规则。" }
@@ -176,8 +178,12 @@ class FeedbackService(private val context: Context) {
     }
 
     private fun upload(description: String, logs: File?, diagnostics: File?): String {
+        check(StartupRequirements.isAccepted(context)) { "请先登录并验证有效账户。" }
+        val token = AppServices.accounts.requireToken()
+        require(logs == null || logs.length() <= 30L * 1024 * 1024) { "日志超过服务器 30 MB 限制，请使用导出包分享。" }
+        require(diagnostics == null || diagnostics.length() <= 100L * 1024 * 1024) { "诊断超过服务器 100 MB 限制，请使用导出包分享。" }
         val boundary = "idvb-${UUID.randomUUID()}"
-        val connection = URL("https://community.idvb.xgflee.com/api/android/feedback").openConnection() as HttpURLConnection
+        val connection = URL(OnlineEndpoints.ORIGIN + OnlineEndpoints.FEEDBACK).openConnection() as HttpURLConnection
         try {
             connection.requestMethod = "POST"
             connection.instanceFollowRedirects = false
@@ -186,6 +192,7 @@ class FeedbackService(private val context: Context) {
             connection.doOutput = true
             connection.setChunkedStreamingMode(64 * 1024)
             connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            connection.setRequestProperty("Authorization", "Bearer $token")
             connection.outputStream.buffered().use { output ->
                 fun write(value: String) = output.write(value.toByteArray(Charsets.UTF_8))
                 fun field(name: String, value: String) {
@@ -194,7 +201,15 @@ class FeedbackService(private val context: Context) {
                 fun attachment(name: String, file: File?) {
                     if (file == null) return
                     write("--$boundary\r\nContent-Disposition: form-data; name=\"$name\"; filename=\"$name.zip\"\r\nContent-Type: application/zip\r\n\r\n")
-                    file.inputStream().use { it.copyTo(output) }
+                    file.inputStream().use { input ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            check(AppServices.accounts.isAuthorized() && AppServices.accounts.requireToken() == token) { "账户状态已变化，提交已停止。" }
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            output.write(buffer, 0, count)
+                        }
+                    }
                     write("\r\n")
                 }
                 field("description", description)
@@ -204,6 +219,7 @@ class FeedbackService(private val context: Context) {
                 write("--$boundary--\r\n")
             }
             val status = connection.responseCode
+            if (status == 401 || status == 403) AppServices.accounts.reject(token)
             val stream = if (status in 200..299) connection.inputStream else connection.errorStream
             val body = stream?.bufferedReader()?.use { reader ->
                 val buffer = CharArray(8192)

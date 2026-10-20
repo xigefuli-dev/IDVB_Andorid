@@ -122,6 +122,10 @@ import com.idvb.android.tutorial.TutorialPracticeActivity
 class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
+        if (UsageConsent.isAccepted(this) && UsageRules.isAccepted(this)) {
+            AppServices.accounts.start()
+            AppServices.accounts.refresh()
+        }
         OverlayService.setHostForeground(true)
     }
 
@@ -137,6 +141,17 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Recreate removes every functional composable when the current account loses access.
+        var authorized = AppServices.accounts.isAuthorized()
+        lifecycleScope.launch {
+            AppServices.accounts.state.collect {
+                val next = AppServices.accounts.isAuthorized()
+                if (next != authorized) {
+                    authorized = next
+                    recreate()
+                }
+            }
+        }
         if (StartupRequirements.showIfRequired(this)) return
         if (intent?.action == ACTION_RECOVER_CAPTURE) {
             captureRecoveryRequest++

@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory)][string]$AdbPath,
     [ValidatePattern('^emulator-\d+$')][string]$Serial = 'emulator-5554',
     [Parameter(Mandatory)][ValidateSet('Screenshot', 'TestArtifacts')][string]$Kind,
-    [ValidateSet('com.idvb.android.test', 'com.idvb.android')][string]$EvidencePackage = 'com.idvb.android.test',
+    [ValidateSet('com.idvb.android.test', 'com.idvb.android', 'com.idvb.android.verification.test', 'com.idvb.android.verification')][string]$EvidencePackage = 'com.idvb.android.test',
     [Parameter(Mandatory)][string]$OutputPath
 )
 

@@ -21,6 +21,8 @@ import android.graphics.PointF
 import android.widget.Toast
 import com.idvb.android.overlay.OverlayService
 import com.idvb.android.ui.theme.IDVBTheme
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 
 class TutorialPracticeActivity : ComponentActivity() {
     private val store by lazy { TutorialStore.get(this) }
@@ -30,6 +32,14 @@ class TutorialPracticeActivity : ComponentActivity() {
             startActivity(android.content.Intent(this, com.idvb.android.MainActivity::class.java))
             finish()
             return
+        }
+        lifecycleScope.launch {
+            com.idvb.android.AppServices.accounts.state.collect {
+                if (!com.idvb.android.StartupRequirements.isAccepted(this@TutorialPracticeActivity)) {
+                    startActivity(android.content.Intent(this@TutorialPracticeActivity, com.idvb.android.MainActivity::class.java))
+                    finish()
+                }
+            }
         }
         enableEdgeToEdge()
         setContent {

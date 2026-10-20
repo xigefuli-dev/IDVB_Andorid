@@ -65,7 +65,8 @@ private data class SettingEntry(
 )
 
 private val productEntries = listOf(
-    SettingEntry("反馈问题", "提交问题与建议，无需登录", Icons.Outlined.Feedback, SignalGreenDeep),
+    SettingEntry("账户", "查看当前账户与退出登录", Icons.Outlined.Info, SignalGreenDeep),
+    SettingEntry("反馈问题", "以当前账户提交问题与建议", Icons.Outlined.Feedback, SignalGreenDeep),
     SettingEntry("检查更新", "获取最新版本", Icons.Outlined.SystemUpdate, SignalGreenDeep),
     SettingEntry("赞助！", "支持项目持续开发", Icons.Outlined.VolunteerActivism, AfdianPurple),
 )
@@ -94,6 +95,19 @@ fun SettingsScreen(
     var showFeedback by rememberSaveable { mutableStateOf(false) }
     var showSponsor by rememberSaveable { mutableStateOf(false) }
     var showClearCache by rememberSaveable { mutableStateOf(false) }
+    var showAccount by rememberSaveable { mutableStateOf(false) }
+    if (showAccount) androidx.compose.material3.AlertDialog(
+        onDismissRequest = { showAccount = false },
+        title = { Text("当前账户") },
+        text = { Text("${com.idvb.android.AppServices.accounts.state.value.displayName}\n手机与 PC 共用账户及封禁状态。") },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = {
+                showAccount = false
+                com.idvb.android.AppServices.accounts.logout()
+            }) { Text("退出登录") }
+        },
+        dismissButton = { androidx.compose.material3.TextButton(onClick = { showAccount = false }) { Text("返回") } },
+    )
     if (showFeedback) FeedbackDialog(onDismiss = { showFeedback = false })
     if (showSponsor) SponsorDialog(onDismiss = { showSponsor = false })
     if (showClearCache) ClearCacheDialog(onDismiss = { showClearCache = false })
@@ -146,6 +160,7 @@ fun SettingsScreen(
         Spacer(Modifier.height(28.dp))
         SettingSection("IDVB", productEntries) {
             when (it.title) {
+                "账户" -> showAccount = true
                 "反馈问题" -> showFeedback = true
                 "赞助！" -> showSponsor = true
                 else -> Toast.makeText(context, it.title + "：暂未实现", Toast.LENGTH_SHORT).show()

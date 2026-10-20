@@ -13,6 +13,8 @@ import java.util.zip.ZipException
 
 /** 地图列表的系统“用其他应用打开”与“分享”导入入口。 */
 fun importIdvmUri(context: Context, uri: Uri): Pair<ImportResult, String> {
+    if (!com.idvb.android.StartupRequirements.isAccepted(context))
+        return ImportResult.Failure("请先完成启动确认并登录有效账户") to ""
     val repo = AppServices.repository
     val rawName = queryDisplayName(context, uri) ?: uri.lastPathSegment ?: "unknown.idvm"
     val name = runCatching { Uri.decode(rawName) }.getOrDefault(rawName)
@@ -24,6 +26,7 @@ fun importIdvmUri(context: Context, uri: Uri): Pair<ImportResult, String> {
         input.use { inStream ->
             tmpFile.outputStream().use { outStream -> inStream.copyTo(outStream) }
         }
+        check(com.idvb.android.StartupRequirements.isAccepted(context)) { "账户已失效，导入已停止" }
         val result = IdvmImporter().importPackage(
             packageFile = tmpFile,
             mapsRoot = repo.mapsRoot,
@@ -42,6 +45,8 @@ fun importIdvmUri(context: Context, uri: Uri): Pair<ImportResult, String> {
 
 /** 批量导入多个 Uri（多选文件或批量分享入口） */
 fun importIdvmUris(context: Context, uris: List<Uri>): Pair<ImportResult, String> {
+    if (!com.idvb.android.StartupRequirements.isAccepted(context))
+        return ImportResult.Failure("请先完成启动确认并登录有效账户") to ""
     if (uris.isEmpty()) return ImportResult.Failure("未选择任何文件") to ""
     if (uris.size == 1) return importIdvmUri(context, uris[0])
 
@@ -52,6 +57,7 @@ fun importIdvmUris(context: Context, uris: List<Uri>): Pair<ImportResult, String
 
     return try {
         for (uri in uris) {
+            check(com.idvb.android.StartupRequirements.isAccepted(context)) { "账户已失效，导入已停止" }
             val rawName = queryDisplayName(context, uri) ?: uri.lastPathSegment ?: "unknown.idvm"
             val name = runCatching { Uri.decode(rawName) }.getOrDefault(rawName)
             names += name
@@ -68,6 +74,7 @@ fun importIdvmUris(context: Context, uris: List<Uri>): Pair<ImportResult, String
             return ImportResult.Failure("无法读取所选文件") to names.joinToString(", ")
         }
 
+        check(com.idvb.android.StartupRequirements.isAccepted(context)) { "账户已失效，导入已停止" }
         val result = IdvmImporter().importPackages(
             packageFiles = tempFiles,
             mapsRoot = repo.mapsRoot,

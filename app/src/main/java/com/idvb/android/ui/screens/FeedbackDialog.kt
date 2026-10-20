@@ -96,7 +96,7 @@ fun FeedbackDialog(onDismiss: () -> Unit, model: FeedbackViewModel = viewModel()
         title = { Text("反馈问题") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("无需登录。请详细描述遇到的问题或改进建议。")
+                Text("将以当前登录账户提交反馈。请详细描述遇到的问题、复现步骤或改进建议。")
                 OutlinedTextField(
                     value = model.description,
                     onValueChange = { if (it.length <= 4000) model.description = it },
@@ -129,6 +129,10 @@ fun FeedbackDialog(onDismiss: () -> Unit, model: FeedbackViewModel = viewModel()
                     Text("发送诊断数据（必选）")
                 }
                 Text("发送最近最多 20 场全部已保存的识别和对齐诊断，包含捕获的游戏画面、结果与追踪记录。启动悬浮窗或重置地图开始新场次；同场重复扫描不会挤占其他场次。提交前请确认画面中没有需要保密的内容。附件可能较大，建议使用 Wi-Fi。")
+                Text(
+                    "在线附件限制：日志 30 MB、诊断数据 100 MB。超出时可导出包分享。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 Text(
                     "提示：若网络异常或无法在线提交，可点击下方「导出包分享」将日志与诊断数据合并打包直接分享给其他应用。",
                     style = MaterialTheme.typography.bodySmall,

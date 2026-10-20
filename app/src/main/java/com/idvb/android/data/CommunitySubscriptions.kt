@@ -25,9 +25,12 @@ import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import com.idvb.android.account.OnlineEndpoints
+import com.idvb.android.account.OfficialResourceUrls
+import com.idvb.android.StartupRequirements
 
-private const val COMMUNITY = "https://community.idvb.xgflee.com"
-private const val DOWNLOAD = "https://download.xgflee.com"
+private const val COMMUNITY = OnlineEndpoints.ORIGIN
+private const val DOWNLOAD = OnlineEndpoints.ORIGIN
 private const val MAX_PACKAGE = 256L * 1024 * 1024
 private const val OFFICIAL_KEY = "54CC7C58D919EFD0390BCE8D8CFC6586997F17D6134899B1DB17FA129B5FE6AD"
 private val publicationPath = Regex("/api/maps/subscriptions/([0-9a-fA-F-]{36})/feed\\.json")
@@ -100,6 +103,7 @@ class CommunitySubscriptions(private val context: Context) {
     fun unsubscribe(id: String) = save(saved().filterNot { it.id == id })
 
     fun catalog(): List<CommunityEntry> {
+        requireAccess()
         val body = JSONObject(String(fetch("$COMMUNITY/api/maps", 2L * 1024 * 1024), Charsets.UTF_8))
         val result = mutableListOf<CommunityEntry>()
         val publications = body.optJSONArray("publications") ?: org.json.JSONArray()
@@ -121,7 +125,7 @@ class CommunitySubscriptions(private val context: Context) {
         require(maps.length() <= 4096) { "社区地图列表过大" }
         for (i in 0 until maps.length()) {
             val item = maps.getJSONObject(i)
-            val url = checkedUrl(item.getString("downloadUrl"), DOWNLOAD, "/maps/")
+            val url = checkedUrl(item.getString("downloadUrl"), DOWNLOAD, OnlineEndpoints.DOWNLOAD_PATH)
             require(url.path.endsWith(".idvm", true) && !url.path.contains("..")) { "普通地图地址无效" }
             val size = item.getLong("size")
             require(size in 1..MAX_PACKAGE) { "地图包大小无效" }
@@ -146,11 +150,13 @@ class CommunitySubscriptions(private val context: Context) {
     }
 
     fun install(entry: CommunityEntry): String {
+        requireAccess()
         if (entry.link != null) return subscribe(entry.link)
-        val url = checkedUrl(requireNotNull(entry.downloadUrl), DOWNLOAD, "/maps/")
+        val url = checkedUrl(requireNotNull(entry.downloadUrl), DOWNLOAD, OnlineEndpoints.DOWNLOAD_PATH)
         val temp = File(context.cacheDir, "community-${UUID.randomUUID()}.idvm")
         try {
             fetchFile(url.toString(), temp, MAX_PACKAGE, entry.size)
+            requireAccess()
             return when (val result = IdvmImporter().importPackage(temp, AppServices.repository.mapsRoot,
                 AppServices.repository.loadCatalog(), AppServices.repository::saveCatalog)) {
                 is ImportResult.Success -> "已导入 ${result.importedMaps.size} 张地图"
@@ -160,6 +166,7 @@ class CommunitySubscriptions(private val context: Context) {
     }
 
     fun subscribe(rawLink: String, onProgress: (CommunityDownloadProgress) -> Unit = {}): String {
+        requireAccess()
         onProgress(CommunityDownloadProgress("读取订阅信息"))
         val link = parseLink(rawLink)
         val previous = saved().firstOrNull { it.id == link.id }
@@ -216,6 +223,7 @@ class CommunitySubscriptions(private val context: Context) {
             onProgress(CommunityDownloadProgress("解密地图包", .88f))
             decryptToFile(encryptedFile, temp, link, plainLength, plainHash)
             onProgress(CommunityDownloadProgress("安装地图", .95f))
+            requireAccess()
             val repo = AppServices.repository
             val oldIds = previous?.mapIds.orEmpty().toSet()
             val result = IdvmImporter().importPackage(temp, repo.mapsRoot, repo.loadCatalog()) { imported ->
@@ -314,7 +322,7 @@ class CommunitySubscriptions(private val context: Context) {
     }
 
     private fun checkedUrl(value: String, origin: String, prefix: String): URL {
-        val url = URL(URL(origin), value)
+        val url = URL(OfficialResourceUrls.relocate(URL(URL(origin), value).toString()))
         val expected = URL(origin)
         require(url.protocol == "https" && url.host.equals(expected.host, true) && url.port == -1 &&
             url.userInfo == null && url.query == null && url.ref == null && url.path.startsWith(prefix) &&
@@ -323,6 +331,7 @@ class CommunitySubscriptions(private val context: Context) {
     }
 
     private fun fetch(value: String, max: Long, expected: Long? = null): ByteArray {
+        requireAccess()
         val connection = URL(value).openConnection() as HttpURLConnection
         connection.instanceFollowRedirects = false
         connection.connectTimeout = 15000
@@ -336,6 +345,7 @@ class CommunitySubscriptions(private val context: Context) {
                 val buffer = ByteArray(64 * 1024)
                 var total = 0L
                 while (true) {
+                    requireAccess()
                     val count = input.read(buffer)
                     if (count < 0) break
                     total += count
@@ -355,6 +365,7 @@ class CommunitySubscriptions(private val context: Context) {
         expected: Long,
         onBytes: (Long, Long) -> Unit = { _, _ -> },
     ): String {
+        requireAccess()
         val connection = URL(value).openConnection() as HttpURLConnection
         connection.instanceFollowRedirects = false
         connection.connectTimeout = 15000
@@ -367,6 +378,7 @@ class CommunitySubscriptions(private val context: Context) {
             connection.inputStream.use { input -> file.outputStream().use { out ->
                 val buffer = ByteArray(64 * 1024)
                 while (true) {
+                    requireAccess()
                     val count = input.read(buffer)
                     if (count < 0) break
                     total += count
@@ -384,6 +396,10 @@ class CommunitySubscriptions(private val context: Context) {
     private fun validHash(value: String): String {
         require(value.matches(Regex("[0-9a-fA-F]{64}"))) { "SHA-256 格式无效" }
         return value.uppercase()
+    }
+
+    private fun requireAccess() {
+        check(StartupRequirements.isAccepted(context)) { "请先完成启动确认并登录有效账户。" }
     }
 
     private fun hash(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).toHex()

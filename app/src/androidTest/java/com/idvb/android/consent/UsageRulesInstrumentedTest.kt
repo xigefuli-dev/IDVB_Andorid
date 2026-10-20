@@ -78,12 +78,14 @@ class UsageRulesInstrumentedTest {
             input().perform(scrollTo(), replaceText(UsageRules.CONFIRMATION), closeSoftKeyboard())
             assertFalse(UsageRules.isAccepted(context))
             confirmButton().perform(click())
-            assertTrue(StartupRequirements.isAccepted(context))
+            assertTrue(UsageRules.isAccepted(context))
+            assertFalse(StartupRequirements.isAccepted(context)) // Explicit account login is a separate gate.
             onView(withText(UsageRules.TITLE)).check(doesNotExist())
         }
         ActivityScenario.launch(MainActivity::class.java).use {
             onView(withText(UsageRules.TITLE)).check(doesNotExist())
-            assertTrue(StartupRequirements.isAccepted(context))
+            assertTrue(UsageRules.isAccepted(context))
+            assertFalse(StartupRequirements.isAccepted(context))
         }
     }
 
@@ -91,7 +93,7 @@ class UsageRulesInstrumentedTest {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             input().perform(scrollTo(), replaceText(UsageRules.CONFIRMATION), closeSoftKeyboard())
             scenario.recreate()
-            onView(withText(UsageRules.TITLE)).check(matches(isDisplayed()))
+            onView(withText(UsageRules.TITLE)).inRoot(isDialog()).check(matches(isDisplayed()))
             input().check(matches(withText("")))
             confirmButton().check(matches(not(isEnabled())))
             assertFalse(UsageRules.isAccepted(context))
@@ -139,10 +141,17 @@ class UsageRulesInstrumentedTest {
                 putExtra(Intent.EXTRA_STREAM, Uri.parse("content://com.idvb.test/second.idvm"))
             }
             scenario.onActivity { activity ->
-                MainActivity::class.java.getDeclaredMethod("onNewIntent", Intent::class.java).apply {
-                    isAccessible = true
-                }.invoke(activity, second)
-                assertEquals(Intent.ACTION_SEND, activity.intent.action)
+                val trackedIntent = activity.intent
+                try {
+                    MainActivity::class.java.getDeclaredMethod("onNewIntent", Intent::class.java).apply {
+                        isAccessible = true
+                    }.invoke(activity, second)
+                    assertEquals(Intent.ACTION_SEND, activity.intent.action)
+                } finally {
+                    // ActivityScenario matches lifecycle events by the original Intent.
+                    // Restore its tracking identity only after checking production onNewIntent behavior.
+                    activity.intent = trackedIntent
+                }
             }
             assertFalse(StartupRequirements.isAccepted(context))
         }

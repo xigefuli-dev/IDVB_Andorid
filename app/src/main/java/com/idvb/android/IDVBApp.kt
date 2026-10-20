@@ -32,6 +32,7 @@ object AppServices {
     val repository: MapRepository by lazy { MapRepository(context) }
     val templates: MapTemplateStore by lazy { MapTemplateStore(context) }
     val prefs: OverlayPrefs by lazy { OverlayPrefs(context) }
+    val accounts by lazy { com.idvb.android.account.AccountAccess(context) }
     val alignmentMethods by lazy { com.idvb.android.alignment.AlignmentRegistry.createDefault(repository) }
     val alignmentDiagnostics by lazy { com.idvb.android.alignment.AlignmentDiagnosticsStore(context) }
     val recognitionDiagnostics: RecognitionDiagnosticsStore by lazy { RecognitionDiagnosticsStore(context) }
@@ -45,8 +46,17 @@ object AppServices {
 
     private var preparationStarted = false
 
+    internal fun pauseRecognitionPreparation() {
+        if (preparationStarted) scanPreparation.pauseForResourceRelease()
+    }
+
     internal fun startRecognitionPreparation() {
-        if (!StartupRequirements.isAccepted(context) || preparationStarted) return
+        if (!StartupRequirements.isAccepted(context)) return
+        if (preparationStarted) {
+            scanPreparation.resume()
+            scanPreparation.request()
+            return
+        }
         preparationStarted = true
         repository.onCatalogChanged = { scanPreparation.request() }
         context.getSharedPreferences("overlay",Context.MODE_PRIVATE)
