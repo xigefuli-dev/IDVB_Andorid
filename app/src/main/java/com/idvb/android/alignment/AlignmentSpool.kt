@@ -8,8 +8,9 @@ import java.util.concurrent.Future
  * disk applies backpressure (recorded synchronously) instead of growing the heap. */
 internal object AlignmentSpool {
     const val EXECUTOR_LABEL = "background-private-spool"
-    /** Covers one alignment (about 15-25 MiB of masks and frames) plus a following request. */
-    const val MAX_QUEUED_BYTES = 48L * 1024 * 1024
+    // Leave room for capture/encoding, application state and allocator overhead (including
+    // whole-region allocations for large arrays), also on small Android heaps.
+    val MAX_QUEUED_BYTES = minOf(48L * 1024 * 1024, Runtime.getRuntime().maxMemory() / 8)
 
     private val executor = Executors.newSingleThreadExecutor { task ->
         Thread(task, "idvb-diagnostic-spool").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }
@@ -23,7 +24,8 @@ internal object AlignmentSpool {
     @Synchronized fun queuedBytes() = queuedBytes
 
     @Synchronized fun tryReserve(bytes: Long): Boolean {
-        if (queuedBytes > 0 && queuedBytes + bytes > MAX_QUEUED_BYTES) return false
+        require(bytes >= 0)
+        if (bytes > MAX_QUEUED_BYTES - queuedBytes) return false
         queuedBytes += bytes
         return true
     }
@@ -41,5 +43,6 @@ internal object AlignmentSpool {
 
 /** Growable capture buffer whose bytes are handed to the spool thread without a second copy. */
 internal class AlignmentCapturedBytes(initial: Int = 64 * 1024) : java.io.ByteArrayOutputStream(initial) {
+    val capacity: Int get() = buf.size
     fun writeContentTo(output: java.io.OutputStream) = output.write(buf, 0, count)
 }

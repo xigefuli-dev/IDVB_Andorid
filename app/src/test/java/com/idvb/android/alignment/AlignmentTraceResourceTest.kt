@@ -11,6 +11,48 @@ class AlignmentTraceResourceTest {
 
     @get:org.junit.Rule val temporary = org.junit.rules.TemporaryFolder()
 
+    @Test fun fullHeapAwareQueueUsesPrivateSynchronousStorageWithoutDroppingEvidence() {
+        val budget = AlignmentSpool.MAX_QUEUED_BYTES
+        assertTrue(budget <= Runtime.getRuntime().maxMemory() / 8)
+        assertTrue(budget <= 48L * 1024 * 1024)
+        assertEquals(0L, AlignmentSpool.queuedBytes())
+        assertFalse(AlignmentSpool.tryReserve(budget + 1))
+        assertTrue(AlignmentSpool.tryReserve(budget))
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val blocker = AlignmentSpool.submit(budget) { started.countDown(); release.await() }
+        val trace = AlignmentTrace(captureArtifacts = true, spoolDirectory = temporary.newFolder())
+        try {
+            assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            trace.attachStream("saturated.raw") { it.write(7) }
+            assertEquals(budget, AlignmentSpool.queuedBytes())
+            assertArrayEquals(byteArrayOf(7), trace.artifactSnapshot().getValue("saturated.raw"))
+            val event = trace.snapshot().single { it.stage == "diagnostics.spool-backpressure" }
+            assertEquals(1.0, event.measurements.getValue("bytes"), 0.0)
+            assertEquals(65536.0, event.measurements.getValue("retainedHeapBytes"), 0.0)
+            assertEquals(budget.toDouble(), event.measurements.getValue("queuedBytes"), 0.0)
+            assertEquals(budget.toDouble(), event.thresholds.getValue("maxQueuedBytes"), 0.0)
+        } finally {
+            release.countDown()
+            blocker.get(5, java.util.concurrent.TimeUnit.SECONDS)
+            trace.releaseWrittenArtifacts()
+        }
+        assertEquals(0L, AlignmentSpool.queuedBytes())
+    }
+
+    @Test fun streamQueueAccountsForBufferCapacityAndKeepsExactPayload() {
+        val trace = AlignmentTrace(captureArtifacts = true, spoolDirectory = temporary.newFolder())
+        val payload = ByteArray(65 * 1024) { (it % 251).toByte() }
+        try {
+            trace.attachStream("grown.raw") { it.write(payload) }
+            val event = trace.snapshot().single { it.stage == "diagnostics.spool-artifact" }
+            assertEquals(payload.size.toDouble(), event.measurements.getValue("bytes"), 0.0)
+            assertEquals(131072.0, event.measurements.getValue("retainedHeapBytes"), 0.0)
+            assertEquals(AlignmentSpool.MAX_QUEUED_BYTES.toDouble(), event.thresholds.getValue("maxQueuedBytes"), 0.0)
+            assertArrayEquals(payload, trace.artifactSnapshot().getValue("grown.raw"))
+        } finally { trace.releaseWrittenArtifacts() }
+    }
+
     @Test fun queuedProductionArtifactsExceedHeapWithoutRetainingPayloads() {
         // Run under -Xmx96m: 192 MiB must survive, with byte-identical data and no dropping.
         val directory = temporary.newFolder()

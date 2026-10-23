@@ -114,7 +114,7 @@ class AlignmentTrace(
         require(Regex("[a-zA-Z0-9_.-]+").matches(name))
         val storage = journal ?: run { super.attachStream(name, encode); return }
         val captured = measure("diagnostics.capture-artifact") { AlignmentCapturedBytes().also(encode) }
-        spool(storage, name, captured.size().toLong()) { captured.writeContentTo(it) }
+        spool(storage, name, captured.size().toLong(), captured.capacity.toLong()) { captured.writeContentTo(it) }
     }
 
     /** Only the owned copy is taken on the caller's thread; PNG/zlib encoding runs on the spool thread. */
@@ -141,22 +141,24 @@ class AlignmentTrace(
 
     /** Queue an owned payload for the spool thread. Over the global byte budget the write happens
      * now, after this trace's earlier writes, and is recorded as nested backpressure cost. */
-    private fun spool(storage: AlignmentJournal, name: String, bytes: Long, write: (java.io.OutputStream) -> Unit) {
-        if (!AlignmentSpool.tryReserve(bytes)) {
+    private fun spool(storage: AlignmentJournal, name: String, bytes: Long, retainedBytes: Long = bytes,
+        write: (java.io.OutputStream) -> Unit) {
+        if (!AlignmentSpool.tryReserve(retainedBytes)) {
             val waited = System.nanoTime()
             val queuedBytes = AlignmentSpool.queuedBytes()
             awaitSpool()
             val file = measure("diagnostics.spool-artifact") { storage.writeArtifact(name, write) }
             synchronized(this) { artifacts[name] = AlignmentArtifact.Spool(file); backpressureSpools++ }
             emit(AlignmentLogEvent("diagnostics.spool-backpressure", name, durationNanos = System.nanoTime() - waited,
-                measurements = mapOf("bytes" to bytes.toDouble(), "queuedBytes" to queuedBytes.toDouble()),
+                measurements = mapOf("bytes" to bytes.toDouble(), "retainedHeapBytes" to retainedBytes.toDouble(),
+                    "queuedBytes" to queuedBytes.toDouble()),
                 thresholds = mapOf("maxQueuedBytes" to AlignmentSpool.MAX_QUEUED_BYTES.toDouble()),
                 labels = mapOf("artifact" to name, "storage" to "private-file", "mode" to "synchronous-over-queue-budget",
                     "costScope" to "nested-in-caller; includes-wait-for-this-request-earlier-writes")))
             return
         }
         val queued = System.nanoTime()
-        val task = AlignmentSpool.submit(bytes) {
+        val task = AlignmentSpool.submit(retainedBytes) {
             val started = System.nanoTime()
             val written = runCatching { storage.writeArtifact(name, write) }
             val ended = System.nanoTime()
@@ -167,8 +169,10 @@ class AlignmentTrace(
             }
             emit(AlignmentLogEvent("diagnostics.spool-artifact",
                 written.exceptionOrNull()?.let { it.message ?: it.javaClass.simpleName } ?: "completed",
-                measurements = mapOf("bytes" to bytes.toDouble(), "queueMs" to (started - queued) / 1e6,
+                measurements = mapOf("bytes" to bytes.toDouble(), "retainedHeapBytes" to retainedBytes.toDouble(),
+                    "queueMs" to (started - queued) / 1e6,
                     "writtenBytes" to (written.getOrNull()?.length()?.toDouble() ?: -1.0)),
+                thresholds = mapOf("maxQueuedBytes" to AlignmentSpool.MAX_QUEUED_BYTES.toDouble()),
                 labels = mapOf("artifact" to name, "storage" to "private-file", "executor" to AlignmentSpool.EXECUTOR_LABEL,
                     "status" to if (written.isSuccess) "complete" else "failed-not-recorded", "retainedFullFrameHeapBytes" to "0",
                     "costScope" to "background-spool-thread; independent-of-calculation-capture-and-first-draw; not-nested"),

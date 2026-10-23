@@ -50,7 +50,9 @@ internal object AlignmentArchiveTransaction {
         check(destination.parentFile!!.mkdirs() || destination.parentFile!!.isDirectory)
         val temporary = File.createTempFile(".alignment-", ".tmp", destination.parentFile)
         try {
-            ZipOutputStream(openOutput(temporary)).use { zip ->
+            // Zip finalization can throw before closing its delegate on Java/Android runtimes.
+            // Keep ownership of the underlying file so failed writes can remove the temporary ZIP.
+            openOutput(temporary).use { output -> ZipOutputStream(output).use { zip ->
                 val scratch = ByteArray(64 * 1024)
                 for ((name, entry) in state.getValue("entries").jsonObject) {
                     val source = requireContained(journal.artifacts, name)
@@ -70,7 +72,7 @@ internal object AlignmentArchiveTransaction {
                         expected.getValue("sha256").jsonPrimitive.content) { "Staged evidence hash changed: $name" }
                     zip.closeEntry()
                 }
-            }
+            } }
             java.nio.file.Files.move(temporary.toPath(), destination.toPath(),
                 java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE)
             return destination

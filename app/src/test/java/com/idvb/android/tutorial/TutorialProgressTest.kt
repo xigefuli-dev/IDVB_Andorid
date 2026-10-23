@@ -23,12 +23,14 @@ class TutorialProgressTest {
             }
         }
     }
-    @Test fun `nine questions retain the requested correct answers and replace single question completion`() {
-        assertEquals(9, TutorialQuiz.questions.size)
+    @Test fun `eleven questions retain the requested correct answers and replace single question completion`() {
+        assertEquals(11, TutorialQuiz.questions.size)
         assertEquals(listOf("一楼大门", "一楼侧门", "等待队友的大厅（有镜子那个）",
             "从一楼大门进入，探索一定程度然后打开地图点🔍按钮",
             "扫描地图、选择与显示地图", "群文件和软件内订阅",
-            "点首页右下角的箭头按钮或者启动按钮", "不可以", "去 设置 - 预设 切换成传统小抄"),
+            "点首页右下角的箭头按钮或者启动按钮", "不可以", "去 设置 - 预设 切换成传统小抄",
+            "进入 设置 - 问题反馈，向官方发送完整的对局回放日志",
+            "点击“导出包分享”，把回放日志发送到官方群里"),
             TutorialQuiz.questions.map { it.options[it.correct] })
         val old = TutorialProgress(step = TutorialStep.DONE, quizAnswered = 1, completionRevision = 1,
             passed = TutorialStep.activeSteps.filter { it != TutorialStep.DONE }.toSet())
