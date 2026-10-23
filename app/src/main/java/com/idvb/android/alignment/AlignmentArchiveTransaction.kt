@@ -17,7 +17,11 @@ internal object AlignmentArchiveTransaction {
         digest.digest().joinToString("") { "%02x".format(it) }
     }
 
-    fun prepare(root: File, journal: AlignmentJournal, destination: File) {
+    /** [staged] carries digests the caller already computed for these exact bytes. Re-reading and
+     * re-hashing every staged file here would be a second full pass over the evidence; [publish]
+     * still verifies each entry's digest while it copies, so nothing is taken on trust. */
+    fun prepare(root: File, journal: AlignmentJournal, destination: File,
+        staged: Map<String, Pair<Long, String>> = emptyMap()) {
         val relative = destination.relativeTo(root).invariantSeparatorsPath
         requireContained(root, relative)
         val files = journal.artifacts.walkTopDown().filter { it.isFile && !it.name.startsWith(".") }.toList()
@@ -26,8 +30,11 @@ internal object AlignmentArchiveTransaction {
             put("schemaVersion", 1); put("status", "ready-to-publish")
             put("destination", relative)
             put("entries", buildJsonObject { files.forEach { file ->
-                put(file.relativeTo(journal.artifacts).invariantSeparatorsPath, buildJsonObject {
-                    put("bytes", file.length()); put("sha256", sha256(file))
+                val name = file.relativeTo(journal.artifacts).invariantSeparatorsPath
+                val length = file.length()
+                val known = staged[name]?.takeIf { it.first == length }?.second
+                put(name, buildJsonObject {
+                    put("bytes", length); put("sha256", known ?: sha256(file))
                 })
             } })
         }.toString())

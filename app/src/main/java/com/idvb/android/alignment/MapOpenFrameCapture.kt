@@ -61,7 +61,7 @@ class MapOpenFrameCapture(
         trace.emit(AlignmentLogEvent("readiness.input-policy", labels = mapOf(
             "floorBinding" to if (indicatorBounds == null) "disabled" else "same-accepted-ready-capture",
             "pngEncoding" to "lossless-rgba-row-stream-deflate-best-speed",
-            "diagnosticCost" to "synchronous-private-spool; included-in-readiness-total")))
+            "diagnosticCost" to "synchronous-pixel-copy-included-in-readiness-total; png-encoding-and-private-file-write-on-background-spool")))
         reference?.let { trace.emit(AlignmentLogEvent("readiness.reference", measurements = mapOf("blueGray" to it.blueGrayFraction, "meanValue" to it.meanValue), series = mapOf("histogram" to it.histogram))) }
         handler.postDelayed(deadline, MapOpenReadiness.TIMEOUT_MS)
         capture()
@@ -124,16 +124,27 @@ class MapOpenFrameCapture(
                             }
                             val signature = trace.measure("readiness.signature") { MapOpenReadiness.signature(pixels) { token.throwIfCancelled("readiness.signature.row") } }
                             val decision = MapOpenReadiness.evaluate(signature, reference, previous)
-                            if (trace.captureArtifacts) {
+                            // The readiness gate is decided from the downscaled sample below, which is
+                            // kept for every attempt. A full-frame PNG costs a synchronous multi-megabyte
+                            // pixel copy plus a deflate per attempt, so it is kept for the accepted frame
+                            // and bounded context around the wait instead of for every rejected frame.
+                            val fullFrame = decision.ready || number == 1 ||
+                                number % MapOpenReadiness.FULL_FRAME_EVIDENCE_STRIDE == 0
+                            if (trace.captureArtifacts && fullFrame) {
                                 try {
-                                    trace.attachStream("readiness-$number.png") { output ->
-                                        AlignmentFrameSpool.writePng(bitmap, output)
-                                    }
+                                    AlignmentFrameSpool.attachPng(trace, "readiness-$number.png", bitmap)
                                 } catch (cancelled: java.util.concurrent.CancellationException) { throw cancelled }
                                 catch (error: Exception) {
                                     trace.emit(AlignmentLogEvent("diagnostics.artifact-unavailable", error.message.orEmpty(),
                                         labels = mapOf("artifact" to "readiness-$number.png", "status" to "not-recorded")))
                                 }
+                            } else if (trace.captureArtifacts) {
+                                trace.emit(AlignmentLogEvent("diagnostics.artifact-skipped", "rejected-readiness-frame",
+                                    measurements = mapOf("attempt" to number.toDouble()),
+                                    thresholds = mapOf("fullFrameStride" to MapOpenReadiness.FULL_FRAME_EVIDENCE_STRIDE.toDouble()),
+                                    labels = mapOf("artifact" to "readiness-$number.png", "status" to "not-recorded-by-policy",
+                                        "gateEvidence" to "readiness-$number.argb",
+                                        "policy" to "gate-sample-retained-for-every-attempt; full-frame-retained-for-accepted-first-and-every-stride-attempt")))
                             }
                             trace.attach("readiness-$number.argb") { ByteBuffer.allocate(pixels.size * 4).apply { pixels.forEach(::putInt) }.array() }
                             trace.emit(AlignmentLogEvent("readiness.frame", decision.mode,

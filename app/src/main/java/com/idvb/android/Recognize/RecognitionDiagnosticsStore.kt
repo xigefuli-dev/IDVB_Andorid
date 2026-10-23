@@ -120,6 +120,7 @@ class RecognitionDiagnosticsStore(context: Context) {
                     flushEvents()
                     val scratch = ByteArray(64*1024)
                     trace.artifactDataSnapshot().forEach { (name,artifact) -> add("scan-evidence/$name") { artifact.writeTo(it,scratch) } }
+                    if (trace.recordingFailures > 0) missing += "scan-evidence-recording-incomplete:${trace.recordingFailures}"
                 }
                 val provenanceStarted = System.nanoTime()
                 runCatching {

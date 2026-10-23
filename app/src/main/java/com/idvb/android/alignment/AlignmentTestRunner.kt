@@ -40,6 +40,8 @@ class AlignmentReplayRunner(private val registry: AlignmentRegistry,
             override fun attachOwned(name: String, bytes: () -> ByteArray) = log.attachOwned(name, bytes)
             override fun attachDirect(name: String, capture: () -> java.nio.ByteBuffer) = log.attachDirect(name, capture)
             override fun attachStream(name: String, encode: (java.io.OutputStream) -> Unit) = log.attachStream(name, encode)
+            override fun attachEncoded(name: String, capture: () -> ByteArray, encode: (ByteArray, java.io.OutputStream) -> Unit) =
+                log.attachEncoded(name, capture, encode)
         }
         val result = registry.align(case.methodId, case.request, sink)
         val actual = (result as? AlignmentResult.Aligned)?.transform

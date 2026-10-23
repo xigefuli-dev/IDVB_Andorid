@@ -85,32 +85,34 @@ fun MapSubscriptionsScreen() {
     val jobs by AppServices.communityDownloads.jobs.collectAsState()
     val completionRevision by AppServices.communityDownloads.completionRevision.collectAsState()
     var entries by remember { mutableStateOf<List<CommunityEntry>>(emptyList()) }
-    var subscribedIds by remember { mutableStateOf(service.saved().map { it.id }.toSet()) }
+    var subscribedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var selected by remember { mutableStateOf<CommunityEntry?>(null) }
     var loading by remember { mutableStateOf(true) }
+    var loadRevision by remember { mutableStateOf(0) }
+    var loadError by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(Unit) {
-        runCatching { withContext(Dispatchers.IO) { service.catalog().filter { it.link != null } } }
-            .onSuccess { entries = it }
-            .onFailure { snackbar.showSnackbar("无法加载社区地图：${it.message ?: "网络不可用"}") }
+    LaunchedEffect(loadRevision) {
+        loading = true
+        loadError = null
+        runCatching { withContext(Dispatchers.IO) { service.catalog() } }
+            .onSuccess {
+                entries = it
+                withContext(Dispatchers.IO) { service.pendingImports(it) }
+                    .forEach { entry -> AppServices.communityDownloads.enqueue(entry) }
+            }
+            .onFailure { loadError = "无法加载社区地图：${it.message ?: "网络不可用"}" }
         loading = false
     }
-    LaunchedEffect(completionRevision) {
-        subscribedIds = withContext(Dispatchers.IO) { service.saved().map { it.id }.toSet() }
+    LaunchedEffect(completionRevision, entries) {
+        subscribedIds = withContext(Dispatchers.IO) {
+            entries.filter { service.hasPackage(it.id, it.version) }.map { it.id }.toSet()
+        }
     }
 
     fun confirm(entry: CommunityEntry) {
         selected = null
-        if (entry.id !in subscribedIds) {
-            val added = AppServices.communityDownloads.enqueue(entry)
-            scope.launch { snackbar.showSnackbar(if (added) "已加入下载队列" else "已在下载队列中") }
-        } else {
-            scope.launch {
-                runCatching { withContext(Dispatchers.IO) { service.unsubscribe(entry.id) } }
-                    .onSuccess { subscribedIds = service.saved().map { it.id }.toSet() }
-                    .onFailure { snackbar.showSnackbar("取消订阅失败：${it.message ?: "请稍后重试"}") }
-            }
-        }
+        val added = AppServices.communityDownloads.enqueue(entry)
+        scope.launch { snackbar.showSnackbar(if (added) "已加入下载队列" else "已在下载队列中") }
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -122,12 +124,16 @@ fun MapSubscriptionsScreen() {
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             item(span = { GridItemSpan(maxLineSpan) }) {
-                Text("地图订阅", style = MaterialTheme.typography.headlineLarge,
+                Text("地图社区 · 共创地图", style = MaterialTheme.typography.headlineLarge,
                     modifier = Modifier.padding(bottom = 10.dp))
             }
-            if (!loading && entries.isEmpty()) {
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    Text("暂无可订阅的地图", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                Column {
+                    TextButton(onClick = { loadRevision++ }, enabled = !loading) {
+                        Text(if (loading) "正在加载…" else "刷新社区")
+                    }
+                    loadError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    if (!loading && loadError == null && entries.isEmpty()) Text("暂无社区地图")
                 }
             }
             items(entries, key = { it.id }) { entry ->
@@ -145,8 +151,8 @@ fun MapSubscriptionsScreen() {
     selected?.let { entry ->
         AlertDialog(
             onDismissRequest = { selected = null },
-            title = { Text(if (entry.id in subscribedIds) "是否取消订阅该地图？" else "是否订阅该地图？") },
-            confirmButton = { TextButton(onClick = { confirm(entry) }) { Text("确定") } },
+            title = { Text(entry.name) },
+            confirmButton = { TextButton(onClick = { confirm(entry) }) { Text(if (entry.id in subscribedIds) "重新下载" else "获取地图包") } },
             dismissButton = { TextButton(onClick = { selected = null }) { Text("取消") } },
         )
     }
@@ -206,7 +212,7 @@ private fun SubscriptionCard(
                     .border(2.dp, MaterialTheme.colorScheme.surface, CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(Icons.Rounded.Check, contentDescription = "已订阅",
+                Icon(Icons.Rounded.Check, contentDescription = "已获取地图包",
                     modifier = Modifier.size(28.dp), tint = MaterialTheme.colorScheme.onSecondary)
             }
         }

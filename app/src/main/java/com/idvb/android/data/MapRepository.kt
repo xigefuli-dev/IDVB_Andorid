@@ -383,8 +383,6 @@ class MapRepository(context: Context) {
     }
 
     fun loadRouteAnnotations(map: MapRecord, floorKey: String): List<MapAnnotation> = runCatching {
-        if (loadCatalog().classes.firstOrNull { it.id == map.classId }?.containsVectorRoutes == false)
-            return emptyList()
         val file = File(mapsRoot, "${map.id}/data/anchors.json")
         if (!file.isFile) return emptyList()
         json.decodeFromString<AnchorsDocument>(file.readText()).floors[floorKey]?.annotations.orEmpty()

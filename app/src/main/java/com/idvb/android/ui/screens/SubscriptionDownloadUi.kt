@@ -97,7 +97,7 @@ fun SubscriptionDownloadDialog(jobs: List<CommunityDownloadJob>, onDismiss: () -
                         val status = when (job.status) {
                             CommunityJobStatus.QUEUED -> "等待下载 · …"
                             CommunityJobStatus.RUNNING -> "${job.phase} · ${job.fraction?.let { "${(it * 100).toInt()}%" } ?: "…"}"
-                            CommunityJobStatus.DONE -> "已安装"
+                            CommunityJobStatus.DONE -> job.result ?: "已获取地图包"
                             CommunityJobStatus.FAILED -> "失败：${job.result.orEmpty()}"
                         }
                         Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant,

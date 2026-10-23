@@ -136,9 +136,7 @@ class FloorIndicatorRecognizer(private val templates: List<FloorIndicatorTemplat
 
         private fun retain(bitmap: Bitmap, name: String, log: AlignmentLogSink) {
             if (log is AlignmentTrace && !log.captureArtifacts || !log.enabled) return
-            log.attachStream(name) { output ->
-                AlignmentFrameSpool.writePng(bitmap, output)
-            }
+            AlignmentFrameSpool.attachPng(log, name, bitmap)
         }
     }
 }

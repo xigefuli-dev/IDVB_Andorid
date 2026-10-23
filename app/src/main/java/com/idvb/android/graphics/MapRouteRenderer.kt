@@ -14,6 +14,12 @@ object MapRouteRenderer {
 
     private val colors = listOf("#FF3B30", "#FF9500", "#FFCC00", "#34C759", "#32ADE6",
         "#007AFF", "#AF52DE", "#FF2D55", "#F2F2F2")
+    private val HALO = Color.argb(240, 10, 15, 22)
+    private val HALO_OPAQUE = Color.argb(255, 10, 15, 22)
+    private val hexColor = Regex("#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})")
+
+    fun colorOf(a: MapAnnotation): Int = a.color?.trim()?.takeIf { hexColor.matches(it) }?.let(Color::parseColor)
+        ?: Color.parseColor(colors[a.colorIndex.coerceIn(0, colors.lastIndex)])
 
     fun render(bitmap: Bitmap, annotations: List<MapAnnotation>, region: NormalizedRect?,
                sourceWidth: Int, sourceHeight: Int, polygon: List<NormalizedPoint>, level: Int): Bitmap {
@@ -37,14 +43,33 @@ object MapRouteRenderer {
             canvas.clipPath(path)
         }
         val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        for (a in annotations) {
+        for (a in annotations.sortedBy { it.isMarker }) {
             // Old on-disk packages may predate annotation validation.
-            if (runCatching { IdvmValidator.validateAnnotation(a) }.isFailure) continue
+            if (runCatching { IdvmValidator.validateAnnotation(a.copy(color = null, colorIndex = 0)) }.isFailure) continue
             paint.reset()
             paint.isAntiAlias = true
-            paint.color = Color.parseColor(a.color ?: colors[a.colorIndex.coerceIn(0, 8)])
+            paint.color = colorOf(a)
             paint.style = Paint.Style.STROKE
             paint.strokeWidth = 2f * thicknessMultiplier(level)
+            if (a.type == "route") {
+                paint.strokeCap = Paint.Cap.ROUND
+                paint.strokeJoin = Paint.Join.ROUND
+                val path = Path()
+                a.points!!.forEachIndexed { index, point ->
+                    if (index == 0) path.moveTo(x(point.x), y(point.y)) else path.lineTo(x(point.x), y(point.y))
+                }
+                if (a.text?.startsWith("阶段 ") == true) {
+                    val routeColor = paint.color
+                    val routeWidth = paint.strokeWidth
+                    paint.color = HALO
+                    paint.strokeWidth = routeWidth + 2f
+                    canvas.drawPath(path, paint)
+                    paint.color = routeColor
+                    paint.strokeWidth = routeWidth
+                }
+                canvas.drawPath(path, paint)
+                continue
+            }
             if (a.type == "line") {
                 paint.strokeCap = Paint.Cap.ROUND
                 canvas.drawLine(x(a.start!!.x), y(a.start.y), x(a.end!!.x), y(a.end.y), paint)
@@ -52,13 +77,11 @@ object MapRouteRenderer {
             }
             val b = a.bounds ?: continue
             val rect = RectF(x(b.x), y(b.y), x(b.x + b.width), y(b.y + b.height))
-            if (a.type == "text") {
-                paint.strokeWidth = 2f
-                paint.pathEffect = DashPathEffect(floatArrayOf(6f, 4f), 0f)
+            if (a.type != "text") {
+                canvas.drawRect(rect, paint)
+                continue
             }
-            canvas.drawRect(rect, paint)
-            if (a.type != "text" || a.text.isNullOrBlank()) continue
-            paint.pathEffect = null
+            if (a.text.isNullOrBlank()) continue
             paint.style = Paint.Style.FILL
             val legacy = a.fontFamily == null && a.fontSize == null && a.isBold == null &&
                 a.isItalic == null && a.isStrikethrough == null
@@ -71,9 +94,20 @@ object MapRouteRenderer {
             val measured = paint.measureText(a.text)
             if (measured > rect.width()) paint.textSize *= rect.width() / measured
             paint.textAlign = Paint.Align.CENTER
+            val baseline = rect.centerY() - (paint.ascent() + paint.descent()) / 2
             canvas.save()
             canvas.clipRect(rect)
-            canvas.drawText(a.text, rect.centerX(), rect.centerY() - (paint.ascent() + paint.descent()) / 2, paint)
+            if (a.isMarker) {
+                val textColor = paint.color
+                paint.style = Paint.Style.STROKE
+                paint.strokeJoin = Paint.Join.ROUND
+                paint.strokeWidth = (paint.textSize * .14f).coerceAtLeast(2f)
+                paint.color = HALO_OPAQUE
+                canvas.drawText(a.text, rect.centerX(), baseline, paint)
+                paint.style = Paint.Style.FILL
+                paint.color = textColor
+            }
+            canvas.drawText(a.text, rect.centerX(), baseline, paint)
             canvas.restore()
         }
         return output

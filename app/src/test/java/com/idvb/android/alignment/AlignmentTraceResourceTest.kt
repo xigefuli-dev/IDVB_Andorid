@@ -25,6 +25,7 @@ class AlignmentTraceResourceTest {
                 else -> trace.attach("input-$index") { ByteArray(1024 * 1024) { block[it % block.size] } }
             }
         }
+        traces.forEach { it.awaitSpool() }
         assertEquals(192, evidenceFiles(directory).size)
         var written = 0
         val scratch = ByteArray(8192)
@@ -48,6 +49,7 @@ class AlignmentTraceResourceTest {
         trace.attach("same") { byteArrayOf(2) }
         trace.attachOwned("same") { byteArrayOf(3) }
         trace.attachDirect("same") { ByteBuffer.wrap(byteArrayOf(4)) }
+        trace.awaitSpool()
         assertEquals(1, evidenceFiles(directory).size)
         trace.consumeArtifacts { _, artifact -> assertArrayEquals(byteArrayOf(4), artifact.toByteArray()) }
         assertTrue(evidenceFiles(directory).isEmpty())
@@ -76,6 +78,7 @@ class AlignmentTraceResourceTest {
         repeat(120) { index ->
             trace.attachStream("readiness-$index.png") { out -> repeat(32) { out.write(block) } }
         }
+        trace.awaitSpool()
         assertEquals(120, evidenceFiles(directory).size)
         var count = 0
         trace.consumeArtifacts { _, artifact ->
@@ -103,6 +106,21 @@ class AlignmentTraceResourceTest {
         assertTrue(evidenceFiles(directory).isEmpty())
         repeat(2) { trace.attachStream("frame-$it.png") { out -> out.write(1) } }
         assertTrue(runCatching { trace.consumeArtifacts { _, _ -> error("zip failure") } }.isFailure)
+        trace.releaseWrittenArtifacts()
+        assertTrue(evidenceFiles(directory).isEmpty())
+    }
+
+    @Test fun backgroundSpoolWriteFailureMarksTraceIncompleteInsteadOfFailingCaller() {
+        val directory = temporary.newFolder()
+        val trace = AlignmentTrace(captureArtifacts = true, spoolDirectory = directory)
+        trace.attachEncoded("broken.png", { byteArrayOf(1) }) { _, _ -> throw java.io.IOException("disk full") }
+        trace.attachEncoded("kept.png", { byteArrayOf(7) }) { raw, output -> output.write(raw) }
+        val failed = trace.snapshot().single { it.stage == "diagnostics.spool-artifact" && it.labels["artifact"] == "broken.png" }
+        assertEquals("failed-not-recorded", failed.labels["status"])
+        assertTrue(trace.recordingFailures > 0)
+        val kept = trace.artifactDataSnapshot()
+        assertFalse(kept.containsKey("broken.png"))
+        assertArrayEquals(byteArrayOf(7), kept.getValue("kept.png").toByteArray())
         trace.releaseWrittenArtifacts()
         assertTrue(evidenceFiles(directory).isEmpty())
     }

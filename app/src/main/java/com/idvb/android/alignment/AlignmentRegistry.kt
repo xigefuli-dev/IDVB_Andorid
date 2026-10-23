@@ -49,6 +49,14 @@ class AlignmentRegistry(methods: List<AlignmentMethod>) {
                         labels = mapOf("artifact" to name, "status" to "not-recorded")))
                 }
             }
+            override fun attachEncoded(name: String, capture: () -> ByteArray, encode: (ByteArray, java.io.OutputStream) -> Unit) {
+                try { log.attachEncoded(name, capture, encode) } catch (error: java.util.concurrent.CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    log.emit(AlignmentLogEvent("diagnostics.artifact-error", error.message.orEmpty(),
+                        labels = mapOf("artifact" to name, "status" to "not-recorded")))
+                }
+            }
         }
         val scheduling = AlignmentScheduling.enter(safeLog)
         safeLog.emit(AlignmentLogEvent("start", "$methodId ${request.map.id}/${request.floor.key}"))

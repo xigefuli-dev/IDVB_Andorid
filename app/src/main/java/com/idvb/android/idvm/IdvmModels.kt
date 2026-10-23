@@ -77,6 +77,7 @@ data class ManifestFile(
     @SerialName("path") val path: String,
     @SerialName("size") val size: Long,
     @SerialName("sha256") val sha256: String,
+    @SerialName("storageOffset") val storageOffset: Long? = null,
 )
 
 @Serializable
@@ -107,6 +108,7 @@ data class IdvmManifest(
     @SerialName("files") val files: List<ManifestFile>,
     @SerialName("capabilities") val capabilities: ManifestCapabilities,
     @SerialName("supportedPlatforms") val supportedPlatforms: List<String> = emptyList(),
+    @SerialName("compression") val compression: String? = null,
 )
 
 // ---------- metadata.json ----------
@@ -254,6 +256,9 @@ data class MapAnnotation(
     val isBold: Boolean? = null,
     val isItalic: Boolean? = null,
     val isStrikethrough: Boolean? = null,
+    val points: List<NormalizedPoint>? = null,
+    val routePlanId: String? = null,
+    val isMarker: Boolean = false,
 )
 
 @Serializable

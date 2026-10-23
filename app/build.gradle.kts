@@ -283,6 +283,7 @@ tasks.matching { it.name == "preBuild" }.configureEach {
 }
 
 dependencies {
+    implementation("org.brotli:dec:0.1.2")
     implementation(platform(libs.compose.bom))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)

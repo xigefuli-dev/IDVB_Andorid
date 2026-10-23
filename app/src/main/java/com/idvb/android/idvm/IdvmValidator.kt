@@ -29,14 +29,15 @@ object IdvmValidator {
             "header 与 manifest 的 IDVM 版本不一致或读取器版本不受支持"
         }
         require(manifest.packageType == "class-set") { "仅支持 class-set 类型的 IDVM 包" }
-        require(manifest.formatVersion in setOf("1.0", "1.1", "1.2", "1.3", "1.4")) { "不支持的 IDVM 版本：${manifest.formatVersion}" }
+        require(manifest.formatVersion in (0..IdvmHeader.MAX_SUPPORTED_MINOR).map { "1.$it" }) { "不支持的 IDVM 版本：${manifest.formatVersion}" }
+        require(if (header.formatMinor == 6) manifest.compression == "brotli-solid-v1" else manifest.compression == null)
         require(manifest.formatVersion != "1.0" || manifest.variantGroups.isEmpty()) { "IDVM 1.0 包不能声明变体组合" }
         require(manifest.formatVersion != "1.1" || manifest.capabilities.variantGroups) { "IDVM 1.1 包必须声明 variantGroups 能力" }
         require(manifest.formatVersion != "1.2" || manifest.capabilities.floorMarkerKeys) { "IDVM 1.2 包必须声明 floorMarkerKeys 能力" }
         require(manifest.formatVersion != "1.3" || (manifest.capabilities.floorMarkerKeys && manifest.capabilities.mapTags)) {
             "IDVM 1.3 包必须声明 floorMarkerKeys 和 mapTags 能力"
         }
-        if (manifest.formatVersion == "1.4") {
+        if (header.formatMinor >= 4) {
             require(manifest.capabilities.floorMarkerKeys && manifest.capabilities.mapTags) {
                 "IDVM 1.4 包必须声明 floorMarkerKeys 和 mapTags 能力"
             }
@@ -45,7 +46,7 @@ object IdvmValidator {
                 platforms.all { it in setOf("windows", "android", "ios", "web") }) {
                 "IDVM 1.4 supportedPlatforms 无效"
             }
-            require("android" in platforms) { "该 IDVM 地图包未声明支持 Android" }
+            require("android" in platforms || (header.formatMinor >= 5 && "windows" in platforms)) { "该 IDVM 地图包未声明支持 Android" }
             require(manifest.capabilities.containsVectorRoutes == manifest.classes.any { it.properties.containsVectorRoutes }) {
                 "IDVM 1.4 矢量路线能力与地图类声明不一致"
             }
@@ -262,9 +263,17 @@ object IdvmValidator {
 
     fun validateAnnotation(a: MapAnnotation) {
         requireUuid(a.id, "annotation.id")
-        require(a.type in setOf("line", "text", "outline")) { "未知标注类型" }
+        require(a.type in setOf("line", "text", "outline", "route")) { "未知标注类型" }
         require(if (a.color == null) a.colorIndex in 0..8 else a.color.matches(Regex("#[0-9a-fA-F]{6}"))) { "标注颜色无效" }
-        if (a.type == "line") {
+        if (a.type == "route") {
+            val points = requireNotNull(a.points)
+            require(points.size in 2..8192)
+            require(points.first() == a.start && points.last() == a.end)
+            points.forEach { p -> require(p.x.isFinite() && p.y.isFinite() && p.x in 0.0..1.0 && p.y in 0.0..1.0) }
+            require(points.any { kotlin.math.abs(it.x - points.first().x) > 1e-6 ||
+                kotlin.math.abs(it.y - points.first().y) > 1e-6 })
+            a.routePlanId?.let { requireUuid(it, "routePlanId") }
+        } else if (a.type == "line") {
             val start = requireNotNull(a.start) { "线路缺少起点" }
             val end = requireNotNull(a.end) { "线路缺少终点" }
             for (p in listOf(start, end)) require(p.x.isFinite() && p.y.isFinite() && p.x in 0.0..1.0 && p.y in 0.0..1.0) { "线路坐标越界" }
@@ -274,6 +283,7 @@ object IdvmValidator {
             validateRect("annotation.bounds", requireNotNull(a.bounds))
             require(a.start == null && a.end == null) { "非线路标注不能包含端点" }
         }
+        require(a.type == "route" || a.points == null)
         require(a.fontSize == null || (a.fontSize.isFinite() && a.fontSize in 1.0..256.0)) { "标注字号无效" }
         require(a.fontFamily == null || (a.fontFamily.length <= 256 && a.fontFamily.none { it.isISOControl() })) { "标注字体无效" }
     }

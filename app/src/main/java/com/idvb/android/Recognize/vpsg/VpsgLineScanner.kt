@@ -35,7 +35,10 @@ import kotlin.math.roundToInt
 
 /** Uses Desktop's prebuilt VPSG lines to locate and verify a map without a visible side door. */
 internal class VpsgLineScanner(private val repository: MapRepository,
-    private val parallelism: Int = min(3, Runtime.getRuntime().availableProcessors()).coerceAtLeast(1),
+    // One floor is an independent match against shared immutable inputs. The old cap of 3 left
+    // most of a phone's cores idle while a full-catalogue scan ran for tens of seconds; keep one
+    // core for the capture/UI threads and use the rest.
+    private val parallelism: Int = (Runtime.getRuntime().availableProcessors() - 1).coerceIn(1, 6),
     private val scanLog: AlignmentLogSink = AlignmentLogSink.NONE) {
     companion object { const val ROUTE = "vpsg3-prepared-visible-lines-v4" }
     private data class Floor(val map: MapRecord, val record: FloorRecord, val file: java.io.File,
@@ -199,11 +202,17 @@ internal class VpsgLineScanner(private val repository: MapRepository,
                             override fun attach(name: String, bytes: () -> ByteArray) = scanLog.attach("${floor.map.id}-${floor.record.key}-$name",bytes)
                             override fun attachStream(name: String, encode: (java.io.OutputStream) -> Unit) =
                                 scanLog.attachStream("${floor.map.id}-${floor.record.key}-$name",encode)
+                            override fun attachEncoded(name: String, capture: () -> ByteArray, encode: (ByteArray, java.io.OutputStream) -> Unit) =
+                                scanLog.attachEncoded("${floor.map.id}-${floor.record.key}-$name",capture,encode)
                         }
                         val fit = runCatching {
                             AlignmentCancellation.checkpoint("scan.vpsg.floor")
                             val base = requireNotNull(repository.loadRecognitionAssets(floor.map.id,floor.record).prebuiltStructureLine)
-                            val prepared = com.idvb.android.alignment.VpsgReferenceGeometry.prepare(repository,floor.map,floor.record,base,log)
+                            // A scan prepares every candidate floor. Retaining each one's derived masks wrote
+                            // hundreds of megabytes of reconstructible pixels per scan; the numeric
+                            // geometry evidence and the explicit not-recorded marker are kept.
+                            val prepared = com.idvb.android.alignment.VpsgReferenceGeometry.prepare(repository,floor.map,floor.record,base,log,
+                                retainMaskEvidence = false)
                             val geometry = com.idvb.android.alignment.VpsgReferenceGeometry
                             val completeFloor = floor.copy(file=prepared.file,proposalFile=geometry.proposalLine(prepared).file,
                                 structuralFile=geometry.structuralLine(prepared).file,precisionFile=geometry.precisionLine(prepared).file)
@@ -335,10 +344,9 @@ internal class VpsgLineScanner(private val repository: MapRepository,
                 thresholds = mapOf("workingLongestSidePixels" to 1024.0),
                 labels = mapOf("policy" to "selected-floor-uniform-observation-v1; bilinear-ARGB8888; black-trailing-padding-is-unknown",
                     "solverCoordinateDomain" to "normalized-observation-pixels", "resultCoordinateDomain" to "original-display-pixels")))
+            // Pixels are copied here; lossless PNG encoding runs on the diagnostics spool thread.
             log.measure("diagnostics.normalized-input") {
-                log.attachStream("normalized-captured.png") { output ->
-                    check(normalized.compress(Bitmap.CompressFormat.PNG, 100, output))
-                }
+                com.idvb.android.alignment.AlignmentFrameSpool.attachPng(log, "normalized-captured.png", normalized)
             }
             val selected = alignSelectedCanonical(normalized,
                 ScreenRect(viewport.x * factor, viewport.y * factor, width.toDouble(), height.toDouble()),
@@ -815,6 +823,8 @@ internal class VpsgLineScanner(private val repository: MapRepository,
                             override fun attachOwned(name: String, bytes: () -> ByteArray) = log.attachOwned("scale-${attempt + 1}-$name", bytes)
                             override fun attachDirect(name: String, capture: () -> java.nio.ByteBuffer) = log.attachDirect("scale-${attempt + 1}-$name", capture)
                             override fun attachStream(name: String, encode: (java.io.OutputStream) -> Unit) = log.attachStream("scale-${attempt + 1}-$name", encode)
+                            override fun attachEncoded(name: String, capture: () -> ByteArray, encode: (ByteArray, java.io.OutputStream) -> Unit) =
+                                log.attachEncoded("scale-${attempt + 1}-$name", capture, encode)
                         }
                 val fit = matchFloor(floor, live, livePixels, votes, correlation, contours, liveIndex,
                             viewport, FloorProfile(), precision, branch, verifyAllSeeds, alternative,

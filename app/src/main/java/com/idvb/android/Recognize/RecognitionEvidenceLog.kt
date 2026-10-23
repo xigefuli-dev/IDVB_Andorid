@@ -18,19 +18,17 @@ internal class RecognitionEvidenceLog(private val sink: AlignmentLogSink) : Alig
         val small = event.series.filter { (key, values) ->
             if (values.size <= 128) true else {
                 val name = "series-${sequence.incrementAndGet()}.f64le.zlib"
-                sink.attachStream(name) { output ->
+                // Raw doubles are copied on the scan thread; zlib runs on the diagnostics spool thread.
+                sink.attachEncoded(name, capture = {
+                    AlignmentCancellation.checkpoint("scan.diagnostics.series-copy")
+                    val raw = java.nio.ByteBuffer.allocate(Math.multiplyExact(values.size, 8)).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    for (value in values) raw.putDouble(value)
+                    raw.array()
+                }) { raw, output ->
                     val deflater = Deflater(Deflater.BEST_SPEED)
                     try {
                         val encoded = DeflaterOutputStream(output, deflater, 64*1024)
-                        val buffer = java.nio.ByteBuffer.allocate(8192).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                        for (value in values) {
-                            if (buffer.remaining() < 8) {
-                                AlignmentCancellation.checkpoint("scan.diagnostics.series-chunk")
-                                encoded.write(buffer.array(),0,buffer.position()); buffer.clear()
-                            }
-                            buffer.putDouble(value)
-                        }
-                        encoded.write(buffer.array(),0,buffer.position()); encoded.finish()
+                        encoded.write(raw); encoded.finish()
                     } finally { deflater.end() }
                 }
                 labels["seriesArtifact.$key"] = name
@@ -43,4 +41,6 @@ internal class RecognitionEvidenceLog(private val sink: AlignmentLogSink) : Alig
     }
     override fun attach(name: String, bytes: () -> ByteArray) = sink.attach(name,bytes)
     override fun attachStream(name: String, encode: (java.io.OutputStream) -> Unit) = sink.attachStream(name,encode)
+    override fun attachEncoded(name: String, capture: () -> ByteArray, encode: (ByteArray, java.io.OutputStream) -> Unit) =
+        sink.attachEncoded(name,capture,encode)
 }

@@ -14,6 +14,8 @@ object MapOpenReadiness {
     const val HEIGHT = 100
     const val TIMEOUT_MS = 3_000L
     const val INTERVAL_MS = 250L // Android screenshot API rate limit; desktop uses much shorter capture intervals.
+    /** Rejected frames keep their gate sample; only every Nth also keeps a full-frame PNG. */
+    const val FULL_FRAME_EVIDENCE_STRIDE = 8
     const val COLOR_THRESHOLD = .85
     const val BRIGHTNESS_LIMIT = .10
 

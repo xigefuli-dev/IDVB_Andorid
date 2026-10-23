@@ -30,6 +30,10 @@ fun interface AlignmentLogSink {
     fun attachStream(name: String, encode: (java.io.OutputStream) -> Unit) = attach(name) {
         java.io.ByteArrayOutputStream().use { output -> encode(output); output.toByteArray() }
     }
+    /** [capture] copies borrowed input during this call; [encode] reads only that owned copy,
+     * so file-backed sinks may run it later on the diagnostics spool thread (PNG, zlib). */
+    fun attachEncoded(name: String, capture: () -> ByteArray, encode: (ByteArray, java.io.OutputStream) -> Unit) =
+        attachStream(name) { output -> encode(capture(), output) }
     /** Only for suppliers owning immutable managed data, never a live Mat or Bitmap. */
     fun attachOwned(name: String, bytes: () -> ByteArray) = attach(name, bytes)
     /** Capture an owned immutable buffer during this call, while a borrowed input is alive.

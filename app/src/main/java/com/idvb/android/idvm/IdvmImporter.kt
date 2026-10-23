@@ -235,7 +235,8 @@ class IdvmImporter(private val json: Json = IdvmJson.instance) {
             require(staging.isDirectory) { "无法创建暂存目录" }
 
             journal = File(mapsRoot, ".idvm-import-${UUID.randomUUID()}").apply { writeText("") }
-            val outcome = ZipFile(packageFile).use { zip -> extractAndValidate(zip, mapsRoot, staging!!, currentCatalog, movedDirs, journal!!) }
+            val prepared = IdvmSolidPayload.expand(packageFile, staging, json) ?: packageFile
+            val outcome = ZipFile(prepared).use { zip -> extractAndValidate(zip, mapsRoot, staging!!, currentCatalog, movedDirs, journal!!) }
             cleanupStaging(staging)
             return outcome to journal
         } catch (e: Exception) {
@@ -297,7 +298,7 @@ class IdvmImporter(private val json: Json = IdvmJson.instance) {
             classIdMap[c.classId] = localId
             newClasses += ClassRecord(id = localId, name = localName,
                 removeBackground = c.properties.removeBackground, scanFloorKey = c.properties.scanFloorKey,
-                containsVectorRoutes = if (manifest.formatVersion == "1.4") c.properties.containsVectorRoutes else null)
+                containsVectorRoutes = if (header.formatMinor >= 4) c.properties.containsVectorRoutes else null)
         }
 
         // 7) 逐地图解压到 staging，校验图片尺寸与摘要

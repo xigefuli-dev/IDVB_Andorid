@@ -21,6 +21,7 @@ data class CommunityDownloadJob(
     val fraction: Float? = null,
     val result: String? = null,
     val link: String,
+    val entry: CommunityEntry,
 )
 
 /** One app-level worker preserves the queue when the subscription tab is no longer visible. */
@@ -35,12 +36,12 @@ class CommunityDownloadQueue(context: Context) {
     val completionRevision: StateFlow<Int> = _completionRevision.asStateFlow()
 
     fun enqueue(entry: CommunityEntry): Boolean {
-        val link = entry.link ?: return false
+        val link = entry.link ?: entry.downloadUrl ?: return false
         synchronized(lock) {
             if (_jobs.value.any { it.publicationId == entry.id && it.status in setOf(CommunityJobStatus.QUEUED, CommunityJobStatus.RUNNING) })
                 return false
             _jobs.value = _jobs.value + CommunityDownloadJob(UUID.randomUUID().toString(), entry.id, entry.name,
-                CommunityJobStatus.QUEUED, link = link)
+                CommunityJobStatus.QUEUED, link = link, entry = entry)
             if (!workerRunning) {
                 workerRunning = true
                 scope.launch { drain() }
@@ -62,7 +63,7 @@ class CommunityDownloadQueue(context: Context) {
                 queued
             } ?: return
             val outcome = runCatching {
-                service.subscribe(next.link) { progress ->
+                service.install(next.entry) { progress ->
                     synchronized(lock) {
                         update(next.token) { it.copy(phase = progress.phase, fraction = progress.fraction?.coerceIn(0f, 1f)) }
                     }

@@ -44,6 +44,28 @@ internal class AlignmentFrameSpool private constructor(
             ArgbPngStream.write(input, bitmap.width, bitmap.height, output)
         }
 
+        /** Big-endian ARGB rows, the input format of [ArgbPngStream]; an owned copy of a borrowed bitmap. */
+        fun argbBytes(bitmap: Bitmap): ByteArray {
+            val width = bitmap.width
+            val pixels = IntArray(width)
+            val bytes = ByteBuffer.allocate(Math.multiplyExact(Math.multiplyExact(width, bitmap.height), 4))
+            val rows = bytes.asIntBuffer()
+            repeat(bitmap.height) { y ->
+                AlignmentCancellation.checkpoint("diagnostics.png.copy-row")
+                bitmap.getPixels(pixels, 0, width, 0, y, width, 1)
+                rows.put(pixels)
+            }
+            return bytes.array()
+        }
+
+        /** Copies pixels during this call; a file-backed sink encodes the lossless PNG off the caller's thread. */
+        fun attachPng(log: AlignmentLogSink, name: String, bitmap: Bitmap) {
+            val width = bitmap.width; val height = bitmap.height
+            log.attachEncoded(name, { argbBytes(bitmap) }) { argb, output ->
+                ArgbPngStream.write(argb.inputStream(), width, height, output)
+            }
+        }
+
         /** Borrows input; callers always release their owned frame even if this fails. */
         fun write(directory: File, bitmap: Bitmap): AlignmentFrameSpool {
             check(directory.mkdirs() || directory.isDirectory)

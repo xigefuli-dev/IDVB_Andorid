@@ -148,7 +148,10 @@ class AlignmentDiagnosticsStore(context: Context) {
                 check(frame.compress(Bitmap.CompressFormat.PNG, 100, it)) { "无法编码诊断截图" }
             }
         }
+        // Background evidence writes (including captured.png) must be on disk before staged inputs are hashed.
+        trace.measure("diagnostics.await-spool") { trace.awaitSpool() }
         var sourceComplete = false
+        var sourceSnapshotDigests: Map<String, Pair<Long, String>> = emptyMap()
         trace.measure("diagnostics.stage-provenance") {
             runCatching {
                 fun copyAssets(path: String) {
@@ -159,30 +162,69 @@ class AlignmentDiagnosticsStore(context: Context) {
                 }
                 copyAssets("alignment-provenance.json")
                 copyAssets("alignment-source")
-                val provenance = Json.parseToJsonElement(File(journal.artifacts, "alignment-provenance.json").readText()).jsonObject
-                val files = provenance.getValue("files").jsonObject
-                check(files.isNotEmpty()) { "Empty source snapshot" }
-                files.forEach { (path, hash) ->
-                    check(AlignmentArchiveTransaction.sha256(File(journal.artifacts, "alignment-source/$path")) == hash.jsonPrimitive.content) {
-                        "Source snapshot incomplete or changed: $path"
+                // The snapshot is a build input: identical bytes for every request of this process.
+                // Verify it against the manifest once, then bind later requests to the same digests
+                // after a size check. publish() still re-digests every entry while it copies, so a
+                // staged file that changed under us fails the archive instead of being trusted.
+                val cached = verifiedSourceSnapshot
+                if (cached != null && cached.all { (path, known) ->
+                        File(journal.artifacts, path).length() == known.first }) {
+                    sourceSnapshotDigests = cached
+                    trace.emit(AlignmentLogEvent("diagnostics.provenance-verified", "process-cached-snapshot",
+                        measurements = mapOf("files" to cached.size.toDouble()),
+                        labels = mapOf("policy" to "manifest-verified-once-per-process; staged-size-checked; digests-reverified-during-archive-copy")))
+                    sourceComplete = true
+                } else {
+                    val provenance = Json.parseToJsonElement(File(journal.artifacts, "alignment-provenance.json").readText()).jsonObject
+                    val files = provenance.getValue("files").jsonObject
+                    check(files.isNotEmpty()) { "Empty source snapshot" }
+                    val digests = linkedMapOf<String, Pair<Long, String>>()
+                    files.forEach { (path, hash) ->
+                        val staged = File(journal.artifacts, "alignment-source/$path")
+                        val expected = hash.jsonPrimitive.content
+                        check(AlignmentArchiveTransaction.sha256(staged) == expected) {
+                            "Source snapshot incomplete or changed: $path"
+                        }
+                        digests["alignment-source/$path"] = staged.length() to expected
                     }
+                    File(journal.artifacts, "alignment-provenance.json").let {
+                        digests["alignment-provenance.json"] = it.length() to AlignmentArchiveTransaction.sha256(it)
+                    }
+                    verifiedSourceSnapshot = digests
+                    sourceSnapshotDigests = digests
+                    trace.emit(AlignmentLogEvent("diagnostics.provenance-verified", "manifest-verified",
+                        measurements = mapOf("files" to digests.size.toDouble()),
+                        labels = mapOf("policy" to "full-manifest-digest-verification; result-cached-for-this-process")))
+                    sourceComplete = true
                 }
-                sourceComplete = true
-            }.onFailure { trace.emit(AlignmentLogEvent("diagnostics.provenance-unavailable", it.message.orEmpty())) }
+            }.onFailure {
+                sourceSnapshotDigests = emptyMap()
+                trace.emit(AlignmentLogEvent("diagnostics.provenance-unavailable", it.message.orEmpty()))
+            }
         }
+        val reusable = sourceSnapshotDigests
         val artifacts = linkedMapOf<String, Pair<Long, String>>()
+        var reusedDigests = 0
         trace.measure("diagnostics.hash-staged-inputs") {
             journal.artifacts.walkTopDown().filter { it.isFile && !it.name.startsWith(".") && it.name != "diagnostics.json" }
-                .forEach { artifacts[it.relativeTo(journal.artifacts).invariantSeparatorsPath] =
-                    it.length() to AlignmentArchiveTransaction.sha256(it) }
+                .forEach { file ->
+                    val name = file.relativeTo(journal.artifacts).invariantSeparatorsPath
+                    val length = file.length()
+                    val known = reusable[name]?.takeIf { it.first == length }
+                    if (known != null) reusedDigests++
+                    artifacts[name] = known ?: (length to AlignmentArchiveTransaction.sha256(file))
+                }
         }
+        trace.emit(AlignmentLogEvent("diagnostics.staged-input-digests",
+            measurements = mapOf("files" to artifacts.size.toDouble(), "reusedBuildInputDigests" to reusedDigests.toDouble()),
+            labels = mapOf("policy" to "request-evidence-hashed-here; immutable-build-inputs-reuse-this-process-verified-digests")))
         val serializeStarted = System.nanoTime()
         AlignmentJournal.publish(File(journal.artifacts, "diagnostics.json")) {
             writeManifest(it, trace, context, frameSize, result, terminal, artifacts, sourceComplete)
         }
         val serializeMs = (System.nanoTime() - serializeStarted) / 1e6
         // Commit plan is durable before ZIP creation. A restarted writer uses these exact source bytes.
-        AlignmentArchiveTransaction.prepare(File(app.filesDir, "idvb/diagnostics"), journal, destination)
+        AlignmentArchiveTransaction.prepare(File(app.filesDir, "idvb/diagnostics"), journal, destination, artifacts)
         val publishStarted = System.nanoTime()
         AlignmentArchiveTransaction.publish(File(app.filesDir, "idvb/diagnostics"), journal)
         val archiveComplete = System.nanoTime()
@@ -383,6 +425,10 @@ class AlignmentDiagnosticsStore(context: Context) {
     }
 
     companion object {
+        /** The bundled source snapshot is an immutable build input. Verifying its manifest digests
+         * once per process removes a full re-read of several hundred files from every request. */
+        @Volatile private var verifiedSourceSnapshot: Map<String, Pair<Long, String>>? = null
+        internal fun forgetVerifiedSourceSnapshot() { verifiedSourceSnapshot = null }
         internal fun sha256(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
         private fun number(value: Double): JsonElement = if (value.isFinite()) JsonPrimitive(value) else JsonNull
         private fun numbers(values: Map<String, Double>) = buildJsonObject { values.forEach { (key, value) -> put(key, number(value)) } }

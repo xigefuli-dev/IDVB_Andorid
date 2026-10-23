@@ -18,7 +18,7 @@ internal object OfficialResourceUrls {
                 require(uri.path.startsWith("/maps/"))
                 "/downloads${uri.path}"
             }
-            "156.239.51.171" -> uri.path
+            "idvb.dev", "156.239.51.171" -> uri.path
             else -> error("只允许官方 HTTPS 地图资源")
         }
         return OnlineEndpoints.ORIGIN + path

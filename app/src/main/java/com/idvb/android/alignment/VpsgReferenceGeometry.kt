@@ -32,8 +32,13 @@ internal object VpsgReferenceGeometry {
     @Synchronized fun precisionLine(line: ResolvedPrebuiltStructureLine): ResolvedPrebuiltStructureLine =
         cache.values.firstOrNull { it.line.file == line.file }?.precisionLine ?: proposalLine(line)
 
+    /** [retainMaskEvidence] keeps the full derived reference masks in the evidence package. A
+     * catalogue scan prepares every candidate floor, so retaining them there wrote hundreds of
+     * megabytes of derived pixels per scan; they stay reconstructible from the bundled reference
+     * source plus [ALGORITHM_ID], and the numeric geometry evidence below is retained either way. */
     @Synchronized fun prepare(repository: MapRepository, map: MapRecord, floor: FloorRecord,
-        line: ResolvedPrebuiltStructureLine, log: AlignmentLogSink): ResolvedPrebuiltStructureLine {
+        line: ResolvedPrebuiltStructureLine, log: AlignmentLogSink,
+        retainMaskEvidence: Boolean = true): ResolvedPrebuiltStructureLine {
         val assets = repository.loadRecognitionAssets(map.id, floor)
         val source = assets.recognitionImageFile ?: repository.floorImageFile(map.id, floor.imagePath)
         if (!source.isFile) {
@@ -155,17 +160,17 @@ internal object VpsgReferenceGeometry {
             series = mapOf("holeXYWHAreaParentIncluded" to prepared.holes),
             labels = mapOf("sourceSha256" to prepared.sourceHash, "colorArtifact" to prepared.colorArtifact,
                 "originalArtifact" to "reference-prebuilt.png", "policy" to "reference-only-closed-dark-holes; no-live-residual-input")))
-        log.attach("reference-hatched-frames.gray8") { prepared.hatch.edges }
+        if (retainMaskEvidence) log.attach("reference-hatched-frames.gray8") { prepared.hatch.edges }
         log.emit(AlignmentLogEvent("vpsg.reference.hatched-frames", "reference-hatched-frame-v1",
             thresholds = ReferenceHatchGeometry.thresholds,
             series = ReferenceHatchGeometry.colorRanges + mapOf("candidateLTRBSupportsDensityBandsContinuousSidesAccepted" to prepared.hatch.candidates,
                 "acceptedLTRB" to prepared.hatch.rectangles),
             labels = mapOf("sourceSha256" to prepared.sourceHash, "artifact" to "reference-hatched-frames.gray8",
                 "policy" to "source-only-parallel-diagonal-texture-with-continuous-measured-rectangular-frame; prebuilt-walls-preserved")))
-        log.attach("reference-partitions.gray8") { prepared.partition.edges }
-        log.attach("reference-striped-frames.gray8") { prepared.striped.edges }
-        log.attach("reference-semantic-boundaries.gray8") { prepared.semantic.edges }
-        log.attach("reference-photometric.gray8") { prepared.semantic.photometricEdges }
+        if (retainMaskEvidence) log.attach("reference-partitions.gray8") { prepared.partition.edges }
+        if (retainMaskEvidence) log.attach("reference-striped-frames.gray8") { prepared.striped.edges }
+        if (retainMaskEvidence) log.attach("reference-semantic-boundaries.gray8") { prepared.semantic.edges }
+        if (retainMaskEvidence) log.attach("reference-photometric.gray8") { prepared.semantic.photometricEdges }
         log.emit(AlignmentLogEvent("vpsg.reference.precision-domain", "undilated-source-photometric-index",
             thresholds = mapOf("minimumSourceEdges" to 300.0),
             measurements = mapOf("sourceEdges" to prepared.semantic.photometricEdges.count { it.toInt() and 255 > 128 }.toDouble()),
@@ -196,6 +201,12 @@ internal object VpsgReferenceGeometry {
                 "acceptedBranchXYWHParentXYWHMissingAnchorFlankDomain" to prepared.partition.partitions),
             labels = mapOf("sourceSha256" to prepared.sourceHash, "artifact" to "reference-partitions.gray8",
                 "policy" to "source-only-measured-thin-T-partition; original-prebuilt-domain-and-parent-anchor; no-endpoint-extrapolation")))
+        if (!retainMaskEvidence) log.emit(AlignmentLogEvent("vpsg.reference.mask-evidence", "not-recorded-by-policy",
+            measurements = mapOf("width" to prepared.line.width.toDouble(), "height" to prepared.line.height.toDouble()),
+            labels = mapOf("status" to "not-recorded-by-policy", "sourceSha256" to prepared.sourceHash,
+                "algorithmId" to ALGORITHM_ID, "colorArtifact" to prepared.colorArtifact,
+                "artifacts" to "reference-hatched-frames.gray8,reference-partitions.gray8,reference-striped-frames.gray8,reference-semantic-boundaries.gray8,reference-photometric.gray8",
+                "reconstruction" to "rerun-prepare-on-bundled-reference-source-at-this-algorithmId; numeric-candidates-thresholds-and-accepted-geometry-retained-above")))
         return prepared.line
     }
 }

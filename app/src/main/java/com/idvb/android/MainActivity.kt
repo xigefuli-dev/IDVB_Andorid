@@ -733,7 +733,7 @@ private data class NavItem(val label: String, val icon: ImageVector)
 private val navItems = listOf(
     NavItem("首页", Icons.Outlined.Home),
     NavItem("列表", Icons.AutoMirrored.Outlined.ListAlt),
-    NavItem("订阅", Icons.Outlined.CloudDownload),
+    NavItem("社区", Icons.Outlined.CloudDownload),
     NavItem("设置", Icons.Outlined.Settings),
 )
 
