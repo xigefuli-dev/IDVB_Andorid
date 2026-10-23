@@ -5,7 +5,14 @@ import java.io.OutputStream
 import kotlinx.serialization.json.Json
 
 /** Request-local, app-private write-ahead evidence. Completed files have stable names;
- * a failed archive must never consume them. No file here is automatically media-published. */
+ * a failed archive must never consume them. No file here is automatically media-published.
+ *
+ * Events are appended through one buffered handle instead of reopening the file per event: a
+ * single alignment emits ~1900 events and a catalogue scan ~16000, and an open/append/close plus
+ * a size probe for each of them cost more than the algorithm being measured. Every read, artifact
+ * write, state write and close flushes first, so a reader or a restarted process sees every event
+ * up to the last checkpoint; a request killed between checkpoints keeps its "collecting" state and
+ * is therefore already reported as non-replayable. */
 internal class AlignmentJournal(val directory: File) {
     val artifacts = File(directory, "artifacts")
     private val events = File(directory, "events.jsonl")
@@ -78,6 +85,8 @@ internal class AlignmentJournal(val directory: File) {
 
     fun writeArtifact(name: String, write: (OutputStream) -> Unit): File {
         require(Regex("[a-zA-Z0-9_.-]+").matches(name))
+        // Every artifact is a checkpoint: the events that explain it reach the file first.
+        runCatching { flush() }
         return publish(File(artifacts, name), write)
     }
 

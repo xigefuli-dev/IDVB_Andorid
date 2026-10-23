@@ -16,22 +16,50 @@ import com.idvb.android.alignment.AlignmentCancellation
 internal object VpsgPreparedIndex {
     private const val MAX_BYTES = 32L * 1024 * 1024
     private val cache = LinkedHashMap<String, VpsgFastSolver.Index>(32, .75f, true)
+    /** One lock per index key. Building an index is pure, self-contained work on local Mats, so
+     * a scan's floor workers may build different references at the same time; only the shared
+     * cache is serialized. Holding the object monitor for the whole build collapsed a parallel
+     * catalogue scan into a single thread for seconds at a time. */
+    private val building = HashMap<String, Any>()
     private var bytes = 0L
     val retainedBytes: Long get() = synchronized(this) { bytes }
 
-    @Synchronized fun clear() { cache.clear(); bytes = 0 }
+    @Synchronized fun clear() { cache.clear(); building.clear(); bytes = 0 }
 
-    @Synchronized fun load(file: File, generation: String, log: AlignmentLogSink = AlignmentLogSink.NONE): VpsgFastSolver.Index {
+    @Synchronized private fun lookup(key: String): VpsgFastSolver.Index? = cache[key]
+
+    @Synchronized private fun buildLock(key: String): Any = building.getOrPut(key) { Any() }
+
+    @Synchronized private fun store(path: String, key: String, result: VpsgFastSolver.Index) {
+        val obsolete = cache.keys.filter { it.startsWith("$path|") }
+        for (old in obsolete) bytes -= cache.remove(old)!!.bytes
+        if (result.bytes > MAX_BYTES) return
+        while (bytes + result.bytes > MAX_BYTES && cache.isNotEmpty()) {
+            val oldest = cache.entries.first()
+            bytes -= oldest.value.bytes; cache.remove(oldest.key)
+        }
+        cache[key] = result; bytes += result.bytes
+    }
+
+    fun load(file: File, generation: String, log: AlignmentLogSink = AlignmentLogSink.NONE): VpsgFastSolver.Index {
         // Include content generation, actual location, size and mtime. Reimports and changed packages
         // cannot reuse an old index just because the map/floor names are unchanged.
         val path = file.canonicalPath
         val key = "$path|$generation|${file.length()}|${file.lastModified()}"
-        cache[key]?.let {
-            log.emit(AlignmentLogEvent("vpsg.prepare-index.cache", "hit", mapOf("bytes" to bytes.toDouble(),
-                "edgeCount" to it.edgeCount.toDouble(), "referencePitch" to it.prior.pitch, "pitchRatio" to it.prior.ratio),
+        fun hit(index: VpsgFastSolver.Index): VpsgFastSolver.Index {
+            log.emit(AlignmentLogEvent("vpsg.prepare-index.cache", "hit", mapOf("bytes" to retainedBytes.toDouble(),
+                "edgeCount" to index.edgeCount.toDouble(), "referencePitch" to index.prior.pitch, "pitchRatio" to index.prior.ratio),
                 thresholds = mapOf("maximumCacheBytes" to MAX_BYTES.toDouble())))
-            return it
+            return index
         }
+        lookup(key)?.let { return hit(it) }
+        synchronized(buildLock(key)) {
+            lookup(key)?.let { return hit(it) }
+            return build(file, path, key, log)
+        }
+    }
+
+    private fun build(file: File, path: String, key: String, log: AlignmentLogSink): VpsgFastSolver.Index {
         log.emit(AlignmentLogEvent("vpsg.prepare-index.cache", "miss"))
         val gray = log.measure("vpsg.prepare-index.load") { CvImages.loadGray(file) }
         val binary = Mat()
@@ -97,15 +125,7 @@ internal object VpsgPreparedIndex {
                 thresholds = mapOf("binarizeThreshold" to 127.0, "minimumDimension" to 100.0,
                     "k3" to 3.0, "k5" to 5.0, "maximumCacheBytes" to MAX_BYTES.toDouble()),
                 series = mapOf("referenceProjection" to projection.toList())))
-            val obsolete = cache.keys.filter { it.startsWith("$path|") }
-            for (old in obsolete) bytes -= cache.remove(old)!!.bytes
-            if (result.bytes <= MAX_BYTES) {
-                while (bytes + result.bytes > MAX_BYTES && cache.isNotEmpty()) {
-                    val oldest = cache.entries.first()
-                    bytes -= oldest.value.bytes; cache.remove(oldest.key)
-                }
-                cache[key] = result; bytes += result.bytes
-            }
+            store(path, key, result)
             return result
         } finally { gray.release(); binary.release(); k3.release(); k5.release() }
     }

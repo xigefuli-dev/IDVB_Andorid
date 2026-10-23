@@ -295,6 +295,7 @@ class AlignmentTrace(
         synchronized(this) {
             if (journal == null) artifacts.values.forEach { it.release() }
             artifacts.clear(); deferredArtifacts.clear()
+            journal?.close()
             journal?.directory?.let { directory ->
                 val root = requireNotNull(directory.parentFile?.parentFile)
                 if (directory.parentFile?.name == "spool")
@@ -313,6 +314,7 @@ class AlignmentTrace(
     internal fun retainUnpublishedEvidence() {
         awaitSpool()
         synchronized(this) {
+            journal?.close()
             artifacts.clear(); deferredArtifacts.clear(); events.clear(); recordingIntervals.clear(); diagnosticIntervals.clear()
             storageLease?.close(); storageLease = null
             pendingCapture?.close(); pendingCapture = null

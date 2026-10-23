@@ -22,15 +22,30 @@ internal object VpsgReferenceGeometry {
         val striped: ReferenceStripedFrameGeometry.Result, val semantic: ReferenceSemanticGeometry.Result,
         val proposalLine: ResolvedPrebuiltStructureLine, val structuralLine: ResolvedPrebuiltStructureLine,
         val precisionLine: ResolvedPrebuiltStructureLine)
+    /** Only the resolved reference images, without the derived masks. The masks are what makes a
+     * [Prepared] entry cost megabytes, so they are capped tightly; this index stays small enough to
+     * hold a whole catalogue and lets a repeat scan skip the preparation that produced those files. */
+    private data class Resolved(val line: ResolvedPrebuiltStructureLine,
+        val proposalLine: ResolvedPrebuiltStructureLine, val structuralLine: ResolvedPrebuiltStructureLine,
+        val precisionLine: ResolvedPrebuiltStructureLine, val sourceHash: String, val colorArtifact: String) {
+        val complete: Boolean get() = line.file.isFile && proposalLine.file.isFile &&
+            structuralLine.file.isFile && precisionLine.file.isFile
+    }
+    private const val MASK_CACHE_ENTRIES = 8
+    private const val RESOLVED_CACHE_ENTRIES = 256
     private val cache = LinkedHashMap<String, Prepared>(8, .75f, true)
+    private val resolved = LinkedHashMap<String, Resolved>(32, .75f, true)
     val retainedEntries: Int get() = synchronized(this) { cache.size }
-    @Synchronized fun clear() { cache.clear() }
+    @Synchronized fun clear() { cache.clear(); resolved.clear() }
     @Synchronized fun proposalLine(line: ResolvedPrebuiltStructureLine): ResolvedPrebuiltStructureLine =
-        cache.values.firstOrNull { it.line.file == line.file }?.proposalLine ?: line
+        cache.values.firstOrNull { it.line.file == line.file }?.proposalLine
+            ?: resolved.values.firstOrNull { it.line.file == line.file }?.proposalLine ?: line
     @Synchronized fun structuralLine(line: ResolvedPrebuiltStructureLine): ResolvedPrebuiltStructureLine =
-        cache.values.firstOrNull { it.line.file == line.file }?.structuralLine ?: line
+        cache.values.firstOrNull { it.line.file == line.file }?.structuralLine
+            ?: resolved.values.firstOrNull { it.line.file == line.file }?.structuralLine ?: line
     @Synchronized fun precisionLine(line: ResolvedPrebuiltStructureLine): ResolvedPrebuiltStructureLine =
-        cache.values.firstOrNull { it.line.file == line.file }?.precisionLine ?: proposalLine(line)
+        cache.values.firstOrNull { it.line.file == line.file }?.precisionLine
+            ?: resolved.values.firstOrNull { it.line.file == line.file }?.precisionLine ?: proposalLine(line)
 
     /** [retainMaskEvidence] keeps the full derived reference masks in the evidence package. A
      * catalogue scan prepares every candidate floor, so retaining them there wrote hundreds of
@@ -49,6 +64,22 @@ internal object VpsgReferenceGeometry {
         val crop = if (assets.recognitionImageFile == null) repository.loadFreeCropPoints(map.id, floor) else emptyList()
         val key = "$ALGORITHM_ID|${map.id}|${floor.key}|${source.canonicalPath}|${source.length()}|${source.lastModified()}|$region|$crop|${line.file.canonicalPath}|${line.file.length()}|${line.file.lastModified()}"
         val cached = cache[key]?.takeIf { it.line.file.isFile }
+        // A catalogue scan prepares every candidate floor, and the mask cache is deliberately small,
+        // so without this the whole OpenCV preparation ran again for every floor on every scan even
+        // though its outputs were already on disk under the same fingerprint. The masks only feed the
+        // evidence block, so the reuse is limited to callers that did not ask for them.
+        val reusable = if (cached != null || retainMaskEvidence) null else resolved[key]?.takeIf { it.complete }
+        if (reusable != null) {
+            log.emit(AlignmentLogEvent("vpsg.reference.prepare", "reused-resolved-reference-images",
+                measurements = mapOf("width" to reusable.line.width.toDouble(), "height" to reusable.line.height.toDouble()),
+                labels = mapOf("geometryCache" to "resolved-hit", "algorithmId" to ALGORITHM_ID,
+                    "sourceSha256" to reusable.sourceHash, "colorArtifact" to reusable.colorArtifact,
+                    "verificationArtifact" to reusable.line.file.name, "proposalArtifact" to reusable.proposalLine.file.name,
+                    "structuralArtifact" to reusable.structuralLine.file.name, "precisionArtifact" to reusable.precisionLine.file.name,
+                    "policy" to "same-input-fingerprint-and-algorithmId-as-an-earlier-preparation-in-this-process",
+                    "evidence" to "derived-masks-and-per-stage-geometry-not-recomputed; rerun-prepare-on-this-source-at-this-algorithmId-to-reproduce")))
+            return reusable.line
+        }
         val prepared = cached ?: log.measure("vpsg.reference.prepare") {
             val bitmap = requireNotNull(decodeMapRegion(source, region, maxOf(line.width, line.height),
                 crop))
@@ -135,8 +166,11 @@ internal object VpsgReferenceGeometry {
                         precisionFile else proposalFile, line.width, line.height, line.algorithmId + "+$ALGORITHM_ID-precision"))
             } finally { bgr.release(); gray.release(); hsv.release(); topHat.release(); filled.release(); hierarchy.release(); originalMat.release(); augmented.release(); contours.forEach(MatOfPoint::release) }
         }.also {
-            if (cache.size >= 8) cache.remove(cache.keys.first())
+            if (cache.size >= MASK_CACHE_ENTRIES) cache.remove(cache.keys.first())
             cache[key] = it
+            if (resolved.size >= RESOLVED_CACHE_ENTRIES) resolved.remove(resolved.keys.first())
+            resolved[key] = Resolved(it.line, it.proposalLine, it.structuralLine, it.precisionLine,
+                it.sourceHash, it.colorArtifact)
         }
         log.emit(AlignmentLogEvent("vpsg.reference.preprocess-domain", "shared-immutable-source-preprocessing-v1",
             measurements = mapOf("width" to line.width.toDouble(), "height" to line.height.toDouble()),
